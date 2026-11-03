@@ -21,12 +21,10 @@ today (adapter or limitation) and what would replace it.
 7. ~~Standoffs~~ — done by the engine: `StandoffsFromPcb.{exclude, gussets,
    lid_holes}` (lid holes with `body: None` go through the closed shell above each
    standoff, before the parting joint splits off the lid).
-8. **Face provenance for labels.** The pick stack says "Planar face · facing up";
-   the mock says "Boss top", "Floor". *Want:* the creating feature (and role, e.g.
-   cap/side) per face in `RegenResult`.
-9. **Section / slice.** The "Section view" button and the sketch option "Slice body
-   at sketch plane" are disabled. *Want:* `Shape::section(plane)` exposed for display
-   (it exists for joints) and a cap-face mesh.
+8. ~~Face provenance for labels~~ — done by the engine: `RegenResult::face_origin(body,
+   face)` → feature + `FaceRole`; `FaceOrigin::label` gives "Bosses · boss top".
+9. ~~Section / slice~~ — done by the engine: `Body::section_view(origin, normal, q)`
+   → kept half, cap faces, cap mesh, outline.
 10. ~~Concurrency contract~~ — done; the GUI's kernel mutex is gone.
 11. ~~BOM without a `Document`~~ — done by the engine: `DocData::bom(&AssemblyResult)`
     (`AssemblyResult::flat(regen)` for a plain `RegenResult`), `DocData::bom_tree`.

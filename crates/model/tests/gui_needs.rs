@@ -198,3 +198,63 @@ fn profile_edits_keep_their_place() {
     assert_eq!(doc.data.processes.iter().map(|p| p.name.clone()).collect::<Vec<_>>(), names);
     assert_eq!(doc.data.processes[0].xy_comp, 0.07);
 }
+
+#[test]
+fn section_view_with_cap_mesh() {
+    let (mut doc, body) = common::enclosure_doc();
+    let out = doc.regenerate().clone();
+    let b = out.body_by_id(body).unwrap();
+    let sv = b.section_view(DVec3::ZERO, DVec3::Y, casework_model::regen::MeshQuality::Display).unwrap();
+    let kept = sv.kept.as_ref().unwrap().shape().bbox().unwrap();
+    assert!(kept.max.y.abs() < 1e-6 && kept.min.y < -20.0, "the back half stays: {kept:?}");
+    let cap = sv.cap.as_ref().unwrap();
+    let a = cap.area().unwrap();
+    assert!(a > 50.0 && a < 80.0 * 30.0, "cap area {a}");
+    let m = sv.cap_mesh.as_ref().unwrap();
+    assert!(!m.indices.is_empty() && !sv.outline.is_empty());
+    // every cap triangle faces the viewer (+Y) and lies in the plane
+    for t in &m.indices {
+        let p = |i: u32| DVec3::new(m.positions[i as usize][0] as f64, m.positions[i as usize][1] as f64, m.positions[i as usize][2] as f64);
+        assert!((p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).dot(DVec3::Y) >= -1e-9);
+        assert!(p(t[0]).y.abs() < 1e-4);
+    }
+    // a plane that misses the body: everything kept, no cap
+    let miss = b.section_view(DVec3::new(0.0, 500.0, 0.0), DVec3::Y, casework_model::regen::MeshQuality::Preview).unwrap();
+    assert!(miss.kept.is_some() && miss.cap.is_none());
+}
+
+#[test]
+fn face_provenance_names_the_feature_and_role() {
+    use casework_model::occt::SurfaceKind;
+    use casework_model::provenance::FaceRole;
+    let (mut doc, body) = common::enclosure_doc();
+    let out = doc.regenerate().clone();
+    let shape = out.body_by_id(body).unwrap().shape().clone();
+    let faces = shape.faces().unwrap();
+    let origin = |pred: &dyn Fn(&casework_model::occt::FaceInfo) -> bool| {
+        let f = faces.iter().find(|f| pred(f)).expect("face");
+        (out.face_origin(body, f.index).unwrap(), f.clone())
+    };
+    let fid = |name: &str| doc.data.features.iter().find(|f| f.name == name).unwrap().id;
+    // boss tops: planar, facing up, at z = 2 + 12
+    let (o, f) = origin(&|f| f.kind == SurfaceKind::Plane && f.normal.z > 0.99 && (f.point.z - 14.0).abs() < 1e-6);
+    assert_eq!((o.feature, o.role), (Some(fid("Bosses")), FaceRole::BossTop));
+    assert_eq!(o.label(&doc.data, Some(&f)), "Bosses · boss top");
+    // the boss holes
+    let (o, _) = origin(&|f| f.kind == SurfaceKind::Cylinder && (f.radius - 1.25).abs() < 1e-6);
+    assert_eq!(o.role, FaceRole::BossHole);
+    // the cavity floor survives the bosses and rib cutting into it
+    let (o, _) = origin(&|f| f.kind == SurfaceKind::Plane && f.normal.z > 0.99 && (f.point.z - 2.0).abs() < 1e-6);
+    assert_eq!((o.feature, o.role), (Some(fid("Cavity")), FaceRole::StartCap));
+    // the outside walls and the bottom come from the first extrude
+    let (o, _) = origin(&|f| f.kind == SurfaceKind::Plane && f.normal.x > 0.99);
+    assert_eq!((o.feature, o.role), (Some(fid("Body")), FaceRole::Side));
+    let (o, _) = origin(&|f| f.kind == SurfaceKind::Plane && f.normal.z < -0.99 && f.point.z.abs() < 1e-6);
+    assert_eq!(o.role, FaceRole::StartCap);
+    // the joint made faces at the parting plane (z = 20)
+    assert!(faces.iter().any(|f| (f.point.z - 20.0).abs() < 4.0 && out.face_origin(body, f.index).is_some_and(|o| o.feature == Some(fid("Joint")))));
+    // every face of every body has an origin
+    for b in &out.bodies {
+        assert_eq!(out.face_origins.of(b.id).unwrap().len(), b.shape().faces().unwrap().len(), "{}", b.name);
+    }
+}

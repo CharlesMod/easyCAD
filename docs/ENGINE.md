@@ -126,6 +126,25 @@ doc.bom(); doc.blob_refs();
     which becomes the lid after a later parting joint).
   - **Default fits.** `FeatureKind::default_fit(field) -> Option<Fit>` (e.g.
     `"hole_dia"` → Hole/Snug, `"kind.width"` of a tongue → Pin).
+- **Face provenance** (`provenance`). `RegenResult::face_origin(body, face) ->
+  Option<FaceOrigin { feature: Option<FeatureId>, role: FaceRole }>` and
+  `RegenResult.face_origins.of(body)` (indexed like `shape().faces()`). Roles:
+  `StartCap/EndCap/Side` (extrude), `Fillet`, `Chamfer`, `Inner` (shell),
+  `Drafted`, `Rib`, `BossTop/BossSide/BossHole`, `Hole`, `Joint`, `SplitFace`,
+  `Imported`, `Copy` (pattern/mirror), `Teardrop` (process stage, `feature: None`),
+  `Other`. After each feature, faces are matched to the previous state's by surface
+  identity (same plane / cylinder axis and radius / ...), so a face keeps its maker
+  when later features trim it (the cavity floor stays the cavity's after bosses cut
+  into it). `FaceOrigin::label(&doc, Some(&face_info))` gives "Bosses · boss top"
+  (a shell's up/down inner planes read "floor" / "ceiling"). Lazy: regeneration
+  only links tables; the first query of a body computes its chain (a few ms per
+  feature that changed it) and caches it in the result.
+- **Section view** (GUI_NEEDS #9). `Body::section_view(origin, normal, quality) ->
+  SectionView { kept: Option<Body> (the side behind the plane), cap: Option<Shape>
+  (the cut faces), cap_mesh: Option<Arc<Mesh>> (facing the viewer, normals along
+  the plane normal), outline: Vec<Vec<DVec3>> }`, in the body's frame (for
+  instances, transform the plane into the component frame). A plane that misses
+  keeps the whole body with no cap.
 - **Rollback.** `DocData.rollback: Option<usize>` (saved, undoable via
   `Document::set_rollback(Option<usize>)`, labels "Roll back to n" / "Roll
   forward"): only the first `n` root features are computed; the others report
@@ -757,6 +776,11 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Face provenance and section view (GUI_NEEDS #8, #9).** New module
+  `provenance` (`FaceOrigin`, `FaceRole`, `FaceOrigins`), `RegenResult.face_origins`
+  + `RegenResult::face_origin(body, face)`, `regen::SectionView` +
+  `Body::section_view`. No breaking changes.
 
 - **Joint refusals (item 3) and GUI_NEEDS 12b–12e.**
   - `JointReport.adjustments: Vec<String>`: changes the engine made to build the

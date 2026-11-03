@@ -146,6 +146,67 @@ impl Body {
     }
 }
 
+/// A body cut open by a plane, for display ("Section view", "Slice body at sketch
+/// plane"). GUI_NEEDS #9.
+#[derive(Clone)]
+pub struct SectionView {
+    /// What stays on the back side of the plane (against its normal), as a body
+    /// with the original id and name; the whole body when the plane misses it on
+    /// the front, `None` when nothing is behind the plane.
+    pub kept: Option<Body>,
+    /// The cut faces (planar regions in the plane); `None` when the plane misses
+    /// the body.
+    pub cap: Option<Shape>,
+    /// Triangles of `cap` (normals face the viewer, i.e. along the plane normal).
+    pub cap_mesh: Option<Arc<Mesh>>,
+    /// Boundary polylines of the cap (from the cap mesh's edges).
+    pub outline: Vec<Vec<DVec3>>,
+}
+
+impl Body {
+    /// Cut this body by the plane through `origin` with normal `normal` (body
+    /// frame); see [`SectionView`]. `q` sets the cap's mesh density.
+    pub fn section_view(&self, origin: DVec3, normal: DVec3, q: MeshQuality) -> Result<SectionView, String> {
+        let n = normal.normalize_or_zero();
+        if n == DVec3::ZERO {
+            return Err("section: the plane normal is zero".into());
+        }
+        let shape = self.shape();
+        let (below, above) = shape.split(origin, n).map_err(|e| e.0)?;
+        let kept = match (below, above) {
+            (Some(b), _) => Some(Body { geom: BodyGeom::new(b), ..self.clone() }),
+            (None, None) => Some(self.clone()),
+            (None, Some(_)) => None,
+        };
+        let cap = shape.section(origin, n).ok().filter(|c| c.area().unwrap_or(0.0) > 1e-9);
+        let (cap_mesh, outline) = match &cap {
+            Some(c) => {
+                let (l, a) = q.deflection();
+                let mut m = c.tessellate(l, a).map_err(|e| e.0)?;
+                // face the viewer: flip triangles whose normal points away
+                let p3 = |i: u32| {
+                    let v = m.positions[i as usize];
+                    DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)
+                };
+                let flip = m.indices.first().map(|t| (p3(t[1]) - p3(t[0])).cross(p3(t[2]) - p3(t[0])).dot(n) < 0.0).unwrap_or(false);
+                if flip {
+                    for t in m.indices.iter_mut() {
+                        t.swap(1, 2);
+                    }
+                }
+                let nf = [n.x as f32, n.y as f32, n.z as f32];
+                for v in m.normals.iter_mut() {
+                    *v = nf;
+                }
+                let outline = m.edges.iter().map(|e| e.points.iter().map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).collect()).collect();
+                (Some(Arc::new(m)), outline)
+            }
+            None => (None, Vec::new()),
+        };
+        Ok(SectionView { kept, cap, cap_mesh, outline })
+    }
+}
+
 #[derive(Clone)]
 struct ToolOp {
     target: BodyId,
@@ -155,6 +216,8 @@ struct ToolOp {
 #[derive(Clone, Default)]
 struct ModelState {
     bodies: Vec<Body>,
+    /// Face provenance per body geometry.
+    faces: crate::provenance::FaceTables,
     tools: BTreeMap<FeatureId, Vec<ToolOp>>,
 }
 
@@ -243,6 +306,8 @@ pub struct RegenResult {
     pub reused: usize,
     /// What the final process stage (active profile) did.
     pub process: ProcessReport,
+    /// Per body: the feature and role that made each face (see [`RegenResult::face_origin`]).
+    pub face_origins: crate::provenance::FaceOrigins,
 }
 
 /// A cylindrical hole considered by the teardrop stage.
@@ -266,6 +331,11 @@ pub struct ProcessReport {
 }
 
 impl RegenResult {
+    /// Which feature made face `face` of `body`, and in what role (GUI_NEEDS #8).
+    /// Computed on first use (lazily, then cached in the result).
+    pub fn face_origin(&self, body: BodyId, face: u32) -> Option<crate::provenance::FaceOrigin> {
+        self.face_origins.face(body, face)
+    }
     pub fn body(&self, name: &str) -> Option<&Body> {
         self.bodies.iter().find(|b| b.name == name)
     }
@@ -299,7 +369,7 @@ pub struct Regenerator {
     imports: HashMap<String, Arc<Shape>>,
     dxfs: HashMap<String, Arc<DxfDrawing>>,
     parts: HashMap<String, Arc<PartInstance>>,
-    stages: HashMap<u64, (Vec<Body>, ProcessReport)>,
+    stages: HashMap<u64, (Vec<Body>, ProcessReport, crate::provenance::FaceOrigins)>,
     xcaf: HashMap<String, Arc<(Shape, Vec<occt::StepPart>)>>,
     /// In-context bodies per source occurrence path, already in this component's
     /// frame (set by the assembly regeneration before `regenerate`).
@@ -502,7 +572,10 @@ impl Regenerator {
                     edge_requests: Vec::new(),
                     skipped_edges: Vec::new(),
                 };
-                let res = ctx.exec(f, &state);
+                let res = ctx.exec(f, &state).map(|mut s| {
+                    s.faces = crate::provenance::update(&state.faces, &s.bodies, Some(f), doc);
+                    s
+                });
                 let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
                 let (edge_requests, skipped_edges) = (std::mem::take(&mut ctx.edge_requests), std::mem::take(&mut ctx.skipped_edges));
                 match res {
@@ -549,10 +622,12 @@ impl Regenerator {
                 .hash(&mut h);
             h.finish()
         };
-        let (bodies, process) = match self.stages.get(&stage_key) {
+        let (bodies, process, face_origins) = match self.stages.get(&stage_key) {
             Some(hit) => hit.clone(),
             None => {
-                let r = process_stage(&state.bodies, &profile, doc);
+                let (b, p) = process_stage(&state.bodies, &profile, doc);
+                let fo = crate::provenance::FaceOrigins(crate::provenance::update(&state.faces, &b, None, doc));
+                let r = (b, p, fo);
                 if self.stages.len() > self.capacity {
                     self.stages.clear();
                 }
@@ -560,7 +635,7 @@ impl Regenerator {
                 r
             }
         };
-        RegenResult { bodies, reports, recomputed, reused, process }
+        RegenResult { bodies, reports, recomputed, reused, process, face_origins }
     }
 
     fn insert(&mut self, key: u64, s: Step) {
