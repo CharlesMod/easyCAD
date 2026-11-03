@@ -406,17 +406,17 @@ chain, and most time sits in single large booleans.
 
 **PCB wizard enclosure** (`crates/model/tests/wizard_speed.rs`: the saved
 `tests/data/wizard_{step,dxf}.ecad`, FDM, tongue & groove with rim; best of 3,
-release, a 20-core machine shared with four other agents' builds, so the numbers
-move by ±20 %). The test asserts a parameter edit under 1.5 × 300 ms and undo
+release, a 20-core machine at load 12–17 from four other agents' builds, so the
+numbers move by ±20 %; saturated, a `wall` edit took up to ~390 ms). The test asserts a parameter edit under 1.5 × 300 ms and undo
 under 5 ms; `CW_PROF=1` prints the steps inside the shell, standoffs and joint.
 
 | step | before | after |
 |---|---|---|
-| param edit `wall` (all 6 features) | ~830 ms, 364–454 ms with the first speed work | 251–285 ms |
-| param edit `lid_split` (joint only) | 279–358 ms | 167–210 ms |
+| param edit `wall` (all 6 features) | ~830 ms, 364–454 ms with the first speed work | 248–302 ms |
+| param edit `lid_split` (joint only) | 279–358 ms | 167–215 ms |
 | cold regen | 320–330 ms | 232–281 ms |
 | undo ×2 (cache) | 0.2 ms | 0.15 ms |
-| assembly variant, `wall` edit (master + in-context Base / Lid) | 500 ms | 296–330 ms |
+| assembly variant, `wall` edit (master + in-context Base / Lid) | 500 ms | 289–330 ms |
 | re-tessellation of the edited bodies (Display) | — | 31–42 ms |
 
 Where the `wall` edit goes now: joint ~150 ms (split ∥ ring 20, rim 10, tongue

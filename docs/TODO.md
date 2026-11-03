@@ -27,9 +27,11 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 ## 3. Speed and "refuse less than Fusion"
 - [x] **[eng]** Regeneration: under 300 ms per parameter edit on the wizard enclosure (about 830 ms
       before the in-progress work). Undo stays instant. Test: `crates/model/tests/wizard_speed.rs`.
-      Done: `wall` edit 251–285 ms, `lid_split` 167–210 ms, undo 0.15 ms, assembly `wall` edit
-      296–330 ms (busy 20-core machine); the test asserts 1.5 × 300 ms in release. Ruled tongue
-      taper (the draft algorithm hung), serial booleans, no double checks (ENGINE.md, Performance).
+      Done, at the edge: best of 3, `wall` edit 248–302 ms (STEP) / 251–260 (DXF), `lid_split`
+      167–215, undo 0.15 ms, assembly `wall` edit 289–330, on a 20-core machine at load 12–17
+      from four other agents (up to ~390 ms when it was saturated). The test asserts 1.5 × 300 ms in
+      release. Ruled tongue taper (the draft algorithm hung), serial booleans, no double checks;
+      what is left is the joint halves' booleans, ~100 ms (ENGINE.md, Performance).
 - [x] **[eng]** Fillet/chamfer fuzz: random edge sets × radii on realistic enclosures; histogram
       applied / reduced / skipped / bailed; fix the "bailed" and wrongly "skipped" (vertex blends,
       sliver faces, cross-feature fillets). Done: `tests/fillet_fuzz.rs` (full run `#[ignore]`,
