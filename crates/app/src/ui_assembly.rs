@@ -1184,7 +1184,7 @@ mod tests {
             id: easycad_model::feature::FeatureId(0),
             name: "Round".into(),
             suppressed: false,
-            kind: easycad_model::feature::FeatureKind::Fillet { body: None, edges: Vec::new(), radius: "1".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
+            kind: easycad_model::feature::FeatureKind::Fillet { body: None, edges: Vec::new(), radius: "1".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
         };
         a.commit_features("Fillet Round", vec![f], None);
         a.refresh_scope();

@@ -111,7 +111,7 @@ fn patterned_holes_get_fits_and_teardrops() {
 }
 
 fn fillet(edges: Vec<EdgeSelector>, r: f64, b: BodyId) -> FeatureKind {
-    FeatureKind::Fillet { body: Some(b), edges, radius: r.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false }
+    FeatureKind::Fillet { body: Some(b), edges, radius: r.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() }
 }
 
 /// The top outer edge of a boss at `x` (top at z = 11, radius 3.5).
