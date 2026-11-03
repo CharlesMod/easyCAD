@@ -2,10 +2,10 @@
 //! self-heal report from the engine's `DressUpReport`: applied, reduced to the
 //! largest size that fits, or failed with "Use r_max" / "Skip edge" actions.
 //!
-//! The engine takes one radius per feature, so each edge set becomes one Fillet
-//! feature (committed together, one undo step). Report outcomes name edges on each
-//! feature's *input* shape; the worker returns those intermediate bodies
-//! (`prefixes`) so outcomes map back to the picked edges geometrically.
+//! One Fillet / Chamfer feature carries every edge set (`edges` + `sets`, each with
+//! its own size) and the skipped edges; each report outcome names its request
+//! (`FeatureReport.edge_requests`: set and selector), so results land on the
+//! picked edge exactly.
 
 use casework_model::feature::*;
 use casework_model::occt::{CurveKind, EdgeInfo, EdgeStatus, Strategy};
@@ -152,43 +152,41 @@ impl FilletD {
     }
 
     pub fn from_feature(f: &Feature) -> Self {
-        let (chamfer, body, edges, radius, auto_reduce) = match &f.kind {
-            FeatureKind::Fillet {
-                body,
-                edges,
-                radius,
-                auto_reduce,
-                ..
-            } => (false, *body, edges, radius, *auto_reduce),
-            FeatureKind::Chamfer {
-                body,
-                edges,
-                distance,
-                auto_reduce,
-                ..
-            } => (true, *body, edges, distance, *auto_reduce),
+        let (chamfer, body, skipped, setback) = match &f.kind {
+            FeatureKind::Fillet { body, skipped, setback, .. } => (false, *body, skipped, *setback),
+            FeatureKind::Chamfer { body, skipped, .. } => (true, *body, skipped, false),
             _ => unreachable!(),
         };
-        let mut set = EdgeSet::new(&radius.0);
-        set.radius.fit = radius.1;
-        set.auto_reduce = auto_reduce;
-        set.name = Some(f.name.clone()).filter(|n| n != "Fillet" && n != "Chamfer");
-        set.edges = edges
+        let eref = |s: &EdgeSelector| EdgeRef {
+            key: None,
+            sel: s.clone(),
+            label: sel_label(s),
+            midpoint: hint_mid(s),
+        };
+        let mut sets: Vec<EdgeSet> = f
+            .kind
+            .edge_sets()
             .iter()
-            .map(|s| EdgeRef {
-                key: None,
-                sel: s.clone(),
-                label: sel_label(s),
-                midpoint: hint_mid(s),
+            .map(|es| {
+                let mut set = EdgeSet::new(&es.size.0);
+                set.radius.fit = es.size.1;
+                set.auto_reduce = es.auto_reduce;
+                set.edges = es.edges.iter().map(eref).collect();
+                set
             })
             .collect();
+        if sets.is_empty() {
+            sets.push(EdgeSet::new(if chamfer { "0.5" } else { "1" }));
+        }
+        sets[0].name = Some(f.name.clone()).filter(|n| n != "Fillet" && n != "Chamfer");
+        sets[0].skipped = skipped.iter().map(eref).collect();
         FilletD {
             chamfer,
             body,
-            sets: vec![set],
+            sets,
             active: 0,
             tangent_chains: true,
-            setback: false,
+            setback,
             auto_heal: true,
             unresolved: None,
             keep_failing: false,
@@ -236,122 +234,103 @@ impl FilletD {
         true
     }
 
+    /// One feature: the first set with edges is the primary (`edges`, size), the
+    /// others go to `sets`; every set's skipped edges to `skipped`.
     pub fn build(
         &self,
         cx: &BuildCx,
         editing: Option<FeatureId>,
         name: &str,
     ) -> Result<Vec<Feature>, String> {
-        let mut out = Vec::new();
-        for s in self.sets.iter().filter(|s| !s.edges.is_empty()) {
-            let id = cx.id(editing, out.len());
-            let edges: Vec<EdgeSelector> = s.edges.iter().map(|e| e.sel.clone()).collect();
-            let radius = s.radius.expr(None);
-            let kind = if self.chamfer {
-                FeatureKind::Chamfer {
-                    body: self.body,
-                    edges,
-                    distance: radius,
-                    auto_reduce: s.auto_reduce,
-                    sets: Vec::new(),
-                    skipped: Vec::new(),
-                }
-            } else {
-                FeatureKind::Fillet {
-                    body: self.body,
-                    edges,
-                    radius,
-                    auto_reduce: s.auto_reduce,
-                    sets: Vec::new(),
-                    skipped: Vec::new(),
-                    setback: false,
-                }
-            };
-            let fname = match (&s.name, out.len()) {
-                (Some(n), _) => n.clone(),
-                (None, 0) => name.to_string(),
-                (None, i) => format!("{name} {}", i + 1),
-            };
-            out.push(Feature {
-                id,
-                name: fname,
-                suppressed: false,
-                kind,
-            });
-        }
-        if out.is_empty() {
+        let used: Vec<&EdgeSet> = self.sets.iter().filter(|s| !s.edges.is_empty()).collect();
+        let Some(first) = used.first() else {
             return Err("pick edges in the view".into());
-        }
-        Ok(out)
+        };
+        let sel = |s: &EdgeSet| s.edges.iter().map(|e| e.sel.clone()).collect::<Vec<_>>();
+        let more: Vec<casework_model::feature::EdgeSet> = used[1..]
+            .iter()
+            .map(|s| casework_model::feature::EdgeSet {
+                edges: sel(s),
+                size: s.radius.expr(None),
+                auto_reduce: s.auto_reduce,
+            })
+            .collect();
+        let skipped: Vec<EdgeSelector> = self
+            .sets
+            .iter()
+            .flat_map(|s| s.skipped.iter().map(|e| e.sel.clone()))
+            .collect();
+        let kind = if self.chamfer {
+            FeatureKind::Chamfer {
+                body: self.body,
+                edges: sel(first),
+                distance: first.radius.expr(None),
+                auto_reduce: first.auto_reduce,
+                sets: more,
+                skipped,
+            }
+        } else {
+            FeatureKind::Fillet {
+                body: self.body,
+                edges: sel(first),
+                radius: first.radius.expr(None),
+                auto_reduce: first.auto_reduce,
+                sets: more,
+                skipped,
+                setback: self.setback,
+            }
+        };
+        Ok(vec![Feature {
+            id: cx.id(editing, 0),
+            name: first.name.clone().unwrap_or_else(|| name.to_string()),
+            suppressed: false,
+            kind,
+        }])
     }
 
-    /// Map the preview's dress-up reports back onto the picked edges.
+    /// Map the preview's dress-up report onto the picked edges (by request).
     pub fn on_preview(&mut self, out: &Output, model: Option<&Output>, editing: Option<FeatureId>) {
-        let _ = model;
+        let _ = (model, editing);
         let base = out.prefix_bodies.keys().min().copied().unwrap_or(0);
-        let next = out.data.features.get(base).map(|f| f.id);
-        let mut k = 0usize;
+        let Some(fid) = crate::scope::features(&out.data, out.asm.as_ref().map(|a| a.active_comp).unwrap_or_default())
+            .get(base)
+            .map(|f| f.id)
+        else {
+            return;
+        };
+        let used: Vec<usize> = (0..self.sets.len()).filter(|i| !self.sets[*i].edges.is_empty()).collect();
         for s in self.sets.iter_mut() {
-            if s.edges.is_empty() {
-                s.results.clear();
-                continue;
-            }
-            let fid = out.data.features.get(base + k).map(|f| f.id);
-            let _ = (next, editing);
-            let input = out.prefix_bodies.get(&(base + k));
-            k += 1;
-            let Some(fid) = fid else { continue };
-            let Some(rep) = out.result.report(fid) else {
-                continue;
-            };
-            s.status = Some(rep.status.clone());
             s.results = vec![Vec::new(); s.edges.len()];
-            let Some(dr) = &rep.dressup else { continue };
-            s.strategy = Some(dr.strategy);
-            s.healed = dr.healed;
-            // input shape's edge infos
-            let infos: Vec<EdgeInfo> = input
-                .and_then(|bodies| {
-                    bodies
-                        .iter()
-                        .find(|b| Some(b.id) == self.body)
-                        .or_else(|| bodies.iter().rev().find(|b| !b.reference))
-                })
-                .and_then(|b| b.shape().edges().ok())
-                .unwrap_or_default();
-            for o in &dr.outcomes {
-                let r = match &o.status {
-                    EdgeStatus::Applied => EdgeResult::Applied,
-                    EdgeStatus::AppliedReduced { requested, applied } => EdgeResult::Reduced {
-                        requested: *requested,
-                        applied: *applied,
-                    },
-                    EdgeStatus::Failed { reason, max_size } => EdgeResult::Failed {
-                        reason: reason.clone(),
-                        max: *max_size,
-                    },
-                };
-                // nearest picked edge by midpoint (semantic selectors collect everything)
-                let mid = infos.get(o.edge as usize).map(|e| e.midpoint);
-                let idx = match mid {
-                    Some(m) => s
-                        .edges
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, e)| e.midpoint.map(|p| (i, p.distance(m))))
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .filter(|(_, d)| *d < 1.0)
-                        .map(|(i, _)| i)
-                        .or_else(|| s.edges.iter().position(|e| e.midpoint.is_none())),
-                    None => None,
-                }
-                .unwrap_or(0);
-                if let Some(v) = s.results.get_mut(idx) {
-                    v.push(r);
-                }
-            }
-            if let FeatureStatus::Unresolved(u) = &rep.status {
-                self.unresolved = Some((u.selector.clone(), u.best_candidate.clone(), u.score));
+            s.status = None;
+        }
+        let Some(rep) = out.result.report(fid) else { return };
+        for &i in &used {
+            self.sets[i].status = Some(rep.status.clone());
+        }
+        if let FeatureStatus::Unresolved(u) = &rep.status {
+            self.unresolved = Some((u.selector.clone(), u.best_candidate.clone(), u.score));
+        }
+        let Some(dr) = &rep.dressup else { return };
+        for &i in &used {
+            self.sets[i].strategy = Some(dr.strategy);
+            self.sets[i].healed = dr.healed;
+        }
+        for o in &dr.outcomes {
+            let r = match &o.status {
+                EdgeStatus::Applied => EdgeResult::Applied,
+                EdgeStatus::AppliedReduced { requested, applied } => EdgeResult::Reduced {
+                    requested: *requested,
+                    applied: *applied,
+                },
+                EdgeStatus::Failed { reason, max_size } => EdgeResult::Failed {
+                    reason: reason.clone(),
+                    max: *max_size,
+                },
+            };
+            let Some(req) = rep.edge_requests.get(o.request) else { continue };
+            let Some(&si) = used.get(req.set) else { continue };
+            if let Some(v) = self.sets[si].results.get_mut(req.selector) {
+                v.push(r);
             }
         }
     }
