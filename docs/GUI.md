@@ -158,6 +158,12 @@ Deleted files go to the Drive trash; files deleted locally by sync go to
 cargo test -p easycad                 # unit + snapshot + GPU tests
 ```
 
+`tests/ui_clicks.rs` drives the real app with clicks and drags (kittest): the
+overhang heat map, "Output as components", linked-file Update / Break (badge click,
+row context menu), dragging a tree row onto another to reparent (the tree records
+its row and link-badge rects in `AsmUi::{row_rects, link_rects}`), the navigation
+presets, mate free-motion glyphs and the interference overlap solid.
+
 Snapshots (written, not compared) land in `crates/app/tests/snapshots/`. They need
 a wgpu adapter; in a container install `mesa-vulkan-drivers` (lavapipe). The
 snapshot tests serialize themselves (one GPU, one kernel).

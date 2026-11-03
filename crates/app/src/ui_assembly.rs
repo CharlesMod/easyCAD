@@ -38,14 +38,21 @@ pub struct AsmUi {
     pub mates_collapsed: bool,
     /// Occurrence row being dragged onto another (reparent).
     pub tree_drag: Option<OccPath>,
-    /// Link status per linked component: (status, revision checked, time checked).
-    pub links: HashMap<ComponentId, (LinkStatus, u64, f64)>,
+    /// Link status per linked component: (status, revision checked, time checked,
+    /// the folder links were resolved against).
+    pub links: HashMap<ComponentId, (LinkStatus, u64, f64, std::path::PathBuf)>,
     /// Interference results and the highlighted pair.
     pub interference: Option<crate::ui_interference::InterferenceUi>,
     pub mate: Option<crate::ui_mates::MateUi>,
     pub bom: Option<crate::ui_bom::BomUi>,
     /// The explode slider is open in the view toolbar.
     pub explode_open: bool,
+    /// Screen rects of the last drawn tree rows and link badges (click tests,
+    /// E2E state dump).
+    pub row_rects: Vec<(OccPath, egui::Rect)>,
+    pub link_rects: Vec<(ComponentId, egui::Rect)>,
+    /// The selected row of the Mates folder (its free motion is drawn).
+    pub sel_mate: Option<easycad_model::assembly::MateId>,
 }
 
 /// Is the document an assembly (anything beyond the root's own content)?
@@ -466,13 +473,15 @@ impl EasyCadApp {
 
     pub fn link_status(&mut self, c: ComponentId) -> LinkStatus {
         let rev = self.doc.data.revision;
-        if let Some((s, r, t)) = self.asm.links.get(&c) {
-            if *r == rev && self.now - t < 5.0 {
+        let host = self.host_dir();
+        // a Save As elsewhere resolves the relative links again at once
+        if let Some((s, r, t, h)) = self.asm.links.get(&c) {
+            if *r == rev && self.now - t < 5.0 && *h == host {
                 return s.clone();
             }
         }
-        let s = self.doc.link_status(c, &self.host_dir());
-        self.asm.links.insert(c, (s.clone(), rev, self.now));
+        let s = self.doc.link_status(c, &host);
+        self.asm.links.insert(c, (s.clone(), rev, self.now, host));
         s
     }
 
@@ -546,11 +555,14 @@ enum MenuAct {
 pub fn tree(app: &mut EasyCadApp, ui: &mut Ui) {
     let d = app.doc.data.clone();
     let mut acts: Vec<TreeAct> = Vec::new();
+    app.asm.row_rects.clear();
+    app.asm.link_rects.clear();
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let released = ui.input(|i| i.pointer.any_released());
     let mut drop_target: Option<OccPath> = None;
     // the root row is a drop target too (move to the top level)
     let (r, resp) = tree_row(ui, 14.0, 30.0, false);
+    app.asm.row_rects.push((Vec::new(), r));
     let p = ui.painter().clone();
     let root_active = app.active.is_empty();
     paint_cube(&p, r.left_center() + vec2(6.0, 0.0), theme::ACCENT_LINK);
@@ -600,13 +612,13 @@ pub fn tree(app: &mut EasyCadApp, ui: &mut Ui) {
     // drag to reparent
     if let Some(src) = app.asm.tree_drag.clone() {
         if let Some(q) = pointer {
-            ui.painter().text(
-                q + vec2(14.0, 4.0),
-                egui::Align2::LEFT_CENTER,
-                format!("Move {}", occ_name(&d, &src)),
-                theme::prop(12.0),
-                theme::ACCENT_LINK,
-            );
+            // a chip beside the cursor, above the rows it crosses
+            egui::Area::new(egui::Id::unique("tree_drag_chip")).order(egui::Order::Tooltip).fixed_pos(q + vec2(16.0, 6.0)).interactable(false).show(ui.ctx(), |ui| {
+                egui::Frame::new().fill(theme::CARD).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(5.0).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
+                    let into = drop_target.as_ref().map(|t| if t.is_empty() { format!(" to {}", d.name) } else { format!(" into {}", occ_name(&d, t)) });
+                    ui.add(egui::Label::new(RichText::new(format!("Move {}{}", occ_name(&d, &src), into.unwrap_or_default())).size(12.0).color(theme::ACCENT_LINK)).extend());
+                });
+            });
         }
         if released {
             app.asm.tree_drag = None;
@@ -721,6 +733,7 @@ fn rows(
         let on_active_path = app.active.starts_with(&path);
         let indent = 22.0 + depth as f32 * 14.0;
         let (r, resp) = tree_row(ui, indent, 30.0, sel || is_active);
+        app.asm.row_rects.push((path.clone(), r));
         let p = ui.painter().clone();
         let id_salt = ("occ", path.clone());
         // chevron
@@ -823,6 +836,7 @@ fn rows(
                     let w = p.layout_no_wrap(t.into(), theme::prop(10.5), colr).size().x + 10.0;
                     let lr = Rect::from_min_size(pos2(rx - w, r.center().y - 9.0), vec2(w, 18.0));
                     let lresp = ui.interact(lr, ui.scope_id().with((&id_salt, "link")), Sense::click());
+                    app.asm.link_rects.push((c.id, lr));
                     p.rect(lr, 9.0, Color32::TRANSPARENT, Stroke::new(1.0, colr), egui::StrokeKind::Inside);
                     p.text(lr.center(), egui::Align2::CENTER_CENTER, t, theme::prop(10.5), colr);
                     if lresp.on_hover_text(tip).clicked() && st == LinkStatus::OutOfDate {

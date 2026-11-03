@@ -246,3 +246,123 @@ fn split_output_as_components_in_an_active_component() {
     h.state_mut().edit_feature(split);
     assert_eq!(h.state().dialog.as_ref().map(|d| d.as_components), Some(None));
 }
+
+fn click_at(h: &mut Harness<'static, EasyCadApp>, p: egui::Pos2, button: egui::PointerButton) {
+    h.hover_at(p);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
+fn row(h: &Harness<'static, EasyCadApp>, name: &str) -> egui::Rect {
+    let p = occ_path(h.state(), name);
+    h.state().asm.row_rects.iter().find(|(q, _)| *q == p).unwrap_or_else(|| panic!("no tree row for {name}")).1
+}
+
+#[test]
+fn linked_file_update_and_break_by_clicks() {
+    use easycad_model::assembly::{ComponentId, LinkStatus, Transform};
+    use easycad_model::document::Document;
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("easycad-link-clicks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let part = dir.join("bracket.ecad");
+    let mut b = Document::new("bracket");
+    b.set_param("t", "2").unwrap();
+    b.save_to_dir(&part).unwrap();
+    let mut host = Document::new("host");
+    let c = host.link_component(&part, &dir).unwrap();
+    host.add_occurrence(ComponentId::ROOT, c, "bracket:1", Transform::IDENTITY).unwrap();
+    let mut h = harness(host);
+    // as if saved into that folder: links are relative to the host file, and the
+    // cached status follows the move at once
+    h.run_steps(2);
+    h.state_mut().path = Some(dir.join("host.ecad"));
+    h.run_steps(3);
+    let badge = |h: &Harness<'static, EasyCadApp>| h.state().asm.link_rects.iter().find(|(k, _)| *k == c).map(|x| x.1);
+    assert!(badge(&h).is_some(), "the row shows a link badge");
+    assert_eq!(h.state_mut().link_status(c), LinkStatus::UpToDate);
+    // the part changes on disk: the badge turns into "update"; a click updates
+    b.set_param("t", "3").unwrap();
+    b.save_to_dir(&part).unwrap();
+    h.state_mut().asm.links.clear();
+    h.run_steps(3);
+    assert_eq!(h.state_mut().link_status(c), LinkStatus::OutOfDate);
+    save(&mut h, "link_out_of_date");
+    let r = badge(&h).expect("badge");
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
+    settle(&mut h);
+    assert_eq!(h.state_mut().link_status(c), LinkStatus::UpToDate);
+    assert_eq!(h.state().doc.data.component(c).unwrap().params.get("t").map(|p| p.expr.0.as_str()), Some("3"), "the new content came in");
+    assert!(h.state().toasts.iter().any(|t| t.text.starts_with("Updated")));
+    assert!(h.state().doc.data.component(c).unwrap().locked);
+    // right-click the row, Break link
+    let r = row(&h, "bracket:1");
+    click_at(&mut h, r.left_center() + egui::vec2(40.0, 0.0), egui::PointerButton::Secondary);
+    h.get_by_label("Break link").click();
+    h.run_steps(3);
+    let comp = h.state().doc.data.component(c).unwrap().clone();
+    assert!(!comp.locked, "an editable component now");
+    assert_eq!(h.state_mut().link_status(c), LinkStatus::NotLinked);
+    assert!(badge(&h).is_none(), "no badge once the link is broken");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn drag_a_tree_row_onto_another_to_reparent() {
+    let _serial = serial();
+    let mut h = harness(easycad_model::document::Document::new("asm"));
+    h.state_mut().new_component(easycad_model::assembly::ComponentId::ROOT);
+    h.state_mut().new_component(easycad_model::assembly::ComponentId::ROOT);
+    {
+        let app = h.state_mut();
+        let p2 = occ_path(app, "Component2:1");
+        app.occ_edit(p2[0], "Move", |o| o.transform = easycad_model::assembly::Transform::translation(glam::DVec3::new(10.0, 0.0, 0.0)));
+    }
+    settle(&mut h);
+    let (from, to) = (row(&h, "Component2:1"), row(&h, "Component1:1"));
+    let start = from.left_center() + egui::vec2(40.0, 0.0);
+    h.hover_at(start);
+    h.step();
+    h.drag_at(start);
+    h.step();
+    // move in steps past the drag threshold, onto the other row
+    let end = to.left_center() + egui::vec2(40.0, 0.0);
+    for i in 1..=8 {
+        h.hover_at(start + (end - start) * (i as f32 / 8.0));
+        h.step();
+    }
+    assert!(h.state().asm.tree_drag.is_some(), "dragging a row");
+    save(&mut h, "tree_drag_reparent");
+    h.drop_at(end);
+    h.run_steps(3);
+    settle(&mut h);
+    let app = h.state();
+    assert!(app.asm.tree_drag.is_none());
+    let p2 = occ_path(app, "Component2:1");
+    assert_eq!(p2.len(), 2, "Component2 is inside Component1 now");
+    assert_eq!(p2[0], occ_path(app, "Component1:1")[0]);
+    let w = app.doc.data.world_transform(&p2).unwrap();
+    assert!((w.translation - glam::DVec3::new(10.0, 0.0, 0.0)).length() < 1e-9, "it stays where it was");
+    assert_eq!(app.doc.undo_label(), Some("Move Component2:1 into Component1:1"));
+    // and back out onto the root row
+    let root = h.state().asm.row_rects.iter().find(|(p, _)| p.is_empty()).map(|x| x.1).expect("the root row");
+    let start = row(&h, "Component2:1").left_center() + egui::vec2(50.0, 0.0);
+    let end = root.center().y;
+    h.hover_at(start);
+    h.step();
+    h.drag_at(start);
+    h.step();
+    for i in 1..=8 {
+        let t = i as f32 / 8.0;
+        h.hover_at(egui::pos2(start.x, start.y + (end - start.y) * t));
+        h.step();
+    }
+    h.drop_at(egui::pos2(start.x, end));
+    h.run_steps(3);
+    assert_eq!(occ_path(h.state(), "Component2:1").len(), 1, "back at the top level");
+}
