@@ -23,7 +23,9 @@ use crate::process::{BuildOrientation, ProcessProfile};
 use crate::regen::{RegenResult, Regenerator};
 use crate::sketch::Sketch;
 
-pub const FORMAT_VERSION: u32 = 1;
+/// 2: assemblies (`components`, `occurrences`, `mates`). Format-1 files load as a
+/// single root component (the new fields default to empty).
+pub const FORMAT_VERSION: u32 = 2;
 pub const DOC_FILE: &str = "doc.json";
 pub const BLOB_DIR: &str = "blobs";
 
@@ -105,6 +107,16 @@ pub struct DocData {
     /// 2D drawings.
     #[serde(default)]
     pub drawings: Vec<crate::drawing::Drawing>,
+    /// Component definitions other than the root (the root is this document's own
+    /// params/sketches/features/imports). Sorted by id.
+    #[serde(default)]
+    pub components: Vec<crate::assembly::Component>,
+    /// Occurrences placed directly in the root component.
+    #[serde(default)]
+    pub occurrences: Vec<crate::assembly::Occurrence>,
+    /// Mates between occurrences (paths from the root).
+    #[serde(default)]
+    pub mates: Vec<crate::assembly::Mate>,
     pub next_id: u32,
 }
 
@@ -127,11 +139,14 @@ impl DocData {
             body_orientations: Vec::new(),
             teardrop_overrides: Vec::new(),
             drawings: Vec::new(),
+            components: Vec::new(),
+            occurrences: Vec::new(),
+            mates: Vec::new(),
             next_id: 1,
         }
     }
 
-    fn alloc(&mut self) -> u32 {
+    pub(crate) fn alloc(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -194,8 +209,19 @@ impl DocData {
     /// Hashes of every blob the document references.
     pub fn blob_refs(&self) -> Vec<String> {
         let mut v: Vec<String> = self.imports.iter().map(|i| i.import.blob.clone()).collect();
-        for f in &self.features {
+        let comp_imports = self.components.iter().flat_map(|c| c.imports.iter());
+        v.extend(comp_imports.map(|i| i.import.blob.clone()));
+        let feats = self.features.iter().chain(self.components.iter().flat_map(|c| c.features.iter()));
+        for f in feats {
             if let FeatureKind::InsertPart { part: PartRef { blob: Some(b), .. }, .. } = &f.kind {
+                v.push(b.clone());
+            }
+        }
+        for c in &self.components {
+            if let crate::assembly::ComponentSource::Step { blob, .. } = &c.source {
+                v.push(blob.clone());
+            }
+            if let Some(PartRef { blob: Some(b), .. }) = &c.purchased {
                 v.push(b.clone());
             }
         }
@@ -212,10 +238,14 @@ impl DocData {
     }
 
     pub fn from_json(s: &str) -> Result<Self, DocError> {
-        let d: DocData = serde_json::from_str(s)?;
+        let mut d: DocData = serde_json::from_str(s)?;
         if d.format > FORMAT_VERSION {
             return Err(DocError::Format(d.format));
         }
+        // Migration 1 -> 2: a flat document is the root component with no children;
+        // the assembly fields defaulted to empty above.
+        d.format = FORMAT_VERSION;
+        d.components.sort_by_key(|c| c.id);
         Ok(d)
     }
 }

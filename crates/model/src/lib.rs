@@ -2,6 +2,7 @@
 //! parts library, import/export and picking. Pure Rust apart from the `occt`
 //! kernel bridge.
 
+pub mod assembly;
 pub mod document;
 pub mod drawing;
 pub mod dxf;

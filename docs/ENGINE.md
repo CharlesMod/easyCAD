@@ -442,6 +442,26 @@ was not run: both need the static OCCT build and the Rust side instrumented toge
 - A converted kernel fault (`occt::Error("OSD_SIGSEGV ...")`) leaves the process
   healthy; report it like any other feature error.
 
+## Assemblies (`assembly`)
+
+Work in progress; see the BREAKING "Assemblies" entry in the changelog.
+
+- The root fields of `DocData` (`params`, `sketches`, `features`, `imports`) are
+  the root component (`ComponentId::ROOT`). `DocData.components` holds the other
+  component definitions, `DocData.occurrences` the root's children, `DocData.mates`
+  the mates. `format` is now 2; a format-1 file loads as a root component with no
+  children and is written back as format 2.
+- `Component { id, name, params (local, shadowing), sketches, features, imports,
+  children: Vec<Occurrence>, source, locked, purchased, process }`.
+  `Occurrence { id, component, name, transform, visible, grounded, explode, in_bom }`.
+  `Transform { translation, rotation: DQuat }` (rigid).
+- Editing (all undoable): `Document::{add_component, add_occurrence(parent, comp,
+  name, transform), edit_occurrence, remove_occurrence, edit_component,
+  add_sketch_in, add_feature_in, set_component_param}`. Queries:
+  `DocData::{component, occurrence, children_of, component_at(path),
+  world_transform(path), all_occurrences, component_view(id)}`. Nesting a component
+  inside itself is refused ("component nesting cycle").
+
 ## File format (`.cwk`), sync-friendly
 
 A `.cwk` is a folder containing `doc.json` and `blobs/<sha256>`. `doc.json` holds
