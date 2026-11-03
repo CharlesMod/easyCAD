@@ -479,21 +479,13 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
     let mut rep = JointReport { wall_thickness: ring.t, effective_wall: ring.t, ..Default::default() };
 
     // available material on each side of the plane (floor / lid limits)
+    // (cheap: extremes along the normal from vertices and edges; the exact box of
+    // shelled halves with offset surfaces costs ~100 ms each)
     let extent = |s: &Shape, sign: f64| -> f64 {
-        let bb = match s.bbox() {
-            Ok(b) => b,
-            Err(_) => return 0.0,
-        };
-        let c = [bb.min, bb.max];
-        let mut m: f64 = 0.0;
-        for x in c.iter().map(|p| p.x) {
-            for y in c.iter().map(|p| p.y) {
-                for z in c.iter().map(|p| p.z) {
-                    m = m.max(sign * (DVec3::new(x, y, z) - plane.origin).dot(n));
-                }
-            }
+        match s.extent_along(plane.origin, n) {
+            Ok((lo, hi)) => (if sign > 0.0 { hi } else { -lo }).max(0.0),
+            Err(_) => 0.0,
         }
-        m
     };
     // booleans are deferred: one fuse + one cut per half at the end
     let mut pend = Pending::default();
@@ -582,24 +574,55 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                     gw + 2.0 * MIN_WALL
                 ));
             }
-            let mut tongue = k(prism(&band(tw, "tongue")?, n, 0.0, -side(*tongue_on) * th), "tongue")?;
-            let li = ev(lead_in)?;
-            if li > 0.0 {
-                let top = if *tongue_on == Half::Lower { n } else { -n };
-                let sel = crate::select::EdgeSelector::OfFace(crate::select::FaceSelector::Extreme { normal: top, which: crate::select::Extremum::Max });
-                if let Ok(ids) = sel.resolve(&tongue) {
-                    let req: Vec<(u32, f64)> = ids.iter().map(|e| (*e, li.min(tw * 0.45))).collect();
-                    let sizes: Vec<f64> = req.iter().map(|r| r.1).collect();
-                    if let Some(s) = tongue.chamfer_raw(&ids, &sizes).ok().filter(|s| s.is_valid()) {
-                        tongue = s;
-                    } else if let Ok((s, r)) = occt::dressup::chamfer(&tongue, &req, &occt::dressup::DressUpOptions { auto_reduce: true, ..Default::default() }) {
-                        if !r.all_applied() {
-                            rep.warnings.push(format!("lead-in: {}", r.summary()));
+            let tband = band(tw, "tongue")?;
+            let li = ev(lead_in)?.min(tw * 0.45).min(th * 0.9);
+            let tongue = if li > 1e-3 {
+                // lead-in: the top `li` of the tongue tapers 45° on both sides. Built
+                // directly as a drafted prism (cheap, deterministic); a raw chamfer is
+                // the fallback, and no lead-in (with a warning) the last resort.
+                let dirv = n * -side(*tongue_on);
+                let body = k(prism(&tband, n, 0.0, -side(*tongue_on) * (th - li)), "tongue")?;
+                let drafted = tband.translated(dirv * (th - li)).and_then(|f| {
+                    let fr = Frame { origin: plane.origin + dirv * (th - li), x_dir: plane.x_dir, normal: dirv };
+                    f.extrude_ext(&fr, dirv, li, false, 45.0)
+                });
+                let full_v = tband.area().unwrap_or(0.0) * th;
+                let plausible = |s: &Shape| s.is_valid() && s.count(occt::ShapeKind::Solid) == 1 && s.volume().is_ok_and(|v| v < full_v && v > full_v * (th - li) / th * 0.999);
+                let fused = drafted.and_then(|top| body.fuse(&top)).map(tidy);
+                match fused {
+                    Ok(t) if plausible(&t) => t,
+                    _ => {
+                        let full = k(prism(&tband, n, 0.0, -side(*tongue_on) * th), "tongue")?;
+                        let top = if *tongue_on == Half::Lower { n } else { -n };
+                        let sel = crate::select::EdgeSelector::OfFace(crate::select::FaceSelector::Extreme { normal: top, which: crate::select::Extremum::Max });
+                        let chamfered = sel.resolve(&full).ok().and_then(|ids| {
+                            let sizes = vec![li; ids.len()];
+                            full.chamfer_raw(&ids, &sizes).ok().filter(|s| plausible(s))
+                        });
+                        // a step instead of a taper: the top `li` is `li` narrower
+                        let stepped = || -> Option<Shape> {
+                            let narrow = band(tw - li, "tongue lead-in").ok()?;
+                            let top = prism(&narrow, n, -side(*tongue_on) * (th - li), -side(*tongue_on) * th).ok()?;
+                            body.fuse(&top).ok().map(tidy).filter(|s| plausible(s))
+                        };
+                        match chamfered {
+                            Some(t) => t,
+                            None => match stepped() {
+                                Some(t) => {
+                                    rep.adjustments.push(format!("lead-in built as a {li:.2} mm step (a corner of the tongue is tighter than the {li:.2} mm taper)"));
+                                    t
+                                }
+                                None => {
+                                    rep.warnings.push(format!("lead-in {li:.2} mm could not be built on this tongue; the tongue has square edges"));
+                                    full
+                                }
+                            },
                         }
-                        tongue = s;
                     }
                 }
-            }
+            } else {
+                k(prism(&tband, n, 0.0, -side(*tongue_on) * th), "tongue")?
+            };
             let groove = k(prism(&band(gw, "groove")?, n, 0.0, -side(*tongue_on) * depth), "groove")?;
             let g_half = other(*tongue_on);
             add(*tongue_on, tongue, &mut pend)?;
@@ -837,6 +860,7 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             rep.clearance_per_side = Some(c);
         }
     }
+    lap("kind geometry");
     let [lo_ops, up_ops] = pend.take();
     // the halves are independent: finish them concurrently
     let (lo, up) = std::thread::scope(|sc| {

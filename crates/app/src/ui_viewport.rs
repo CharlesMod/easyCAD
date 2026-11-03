@@ -577,6 +577,19 @@ fn build_frame(
             });
         }
     }
+    // interference overlap solids (world -> view frame)
+    if let (Some(i), Some(a)) = (&app.asm.interference, &shown.asm) {
+        let to_view = a.frame.inverse().affine();
+        for mesh in i.shown_overlaps() {
+            bodies.push(DrawBody {
+                mesh,
+                color: [0.90, 0.20, 0.16, 1.0],
+                translucent: false,
+                colors: None,
+                model: to_mat4(to_view),
+            });
+        }
+    }
     // section caps (the cut faces)
     for (cap, xf) in &shown.caps {
         bodies.push(DrawBody {

@@ -664,6 +664,15 @@ impl Shape {
     pub fn center_of_mass(&self) -> Result<DVec3> {
         Ok(dv(raw::mass_props(self.r())?.center))
     }
+    /// `(min, max)` of `(p - origin)·dir` over the shape's vertices and points
+    /// sampled along its edges: cheap (no surface optimisation), exact for shapes
+    /// whose extremes lie on edges (prisms, shells), an underestimate within the
+    /// sampling for faces bulging past their edges.
+    pub fn extent_along(&self, origin: DVec3, dir: DVec3) -> Result<(f64, f64)> {
+        let v = raw::extent_along(self.r(), v3(origin), v3(dir))?;
+        Ok((v[0], v[1]))
+    }
+
     pub fn bbox(&self) -> Result<BBox> {
         let b = raw::bounding_box(self.r())?;
         Ok(BBox { min: dv(b.min), max: dv(b.max) })

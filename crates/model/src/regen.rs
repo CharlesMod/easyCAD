@@ -1040,7 +1040,11 @@ impl Ctx<'_> {
             }
             FeatureKind::StandoffsFromPcb { body, source, plane, od, hole_dia, height, base_fillet, draft_deg, offset, exclude, gussets, lid_holes } => {
                 let plane = &plane.offset(self.ev(offset)?);
+                let tp = std::time::Instant::now();
                 let mut pts = self.pcb_points(st, source, plane)?;
+                if std::env::var("CW_PROF").is_ok() {
+                    eprintln!("  standoffs pcb points: {:.1} ms", tp.elapsed().as_secs_f64() * 1000.0);
+                }
                 if pts.is_empty() {
                     return fail("no mounting holes found in the PCB within the diameter range");
                 }
@@ -1440,9 +1444,17 @@ impl Ctx<'_> {
             let depth = b.hole_depth.unwrap_or(b.height);
             holes.push(Shape::cylinder(base + n * (b.height - depth), n, b.hole / 2.0, depth + 1.0)?);
         }
+        let prof = std::env::var("CW_PROF").is_ok();
+        let t0 = std::time::Instant::now();
+        let lap = |w: &str| {
+            if prof {
+                eprintln!("  bosses {w}: {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+            }
+        };
         let i = self.target(st, body)?;
         let tid = st.bodies[i].id;
         self.apply_op(st, fid, "", BoolOp::Join, Some(tid), fuse_many(&bosses)?)?;
+        lap("join");
         if b.fillet > 0.0 {
             let i = self.target(st, Some(tid))?;
             let shape = st.bodies[i].shape().clone();
@@ -1466,7 +1478,9 @@ impl Ctx<'_> {
                 self.warning = Some("base fillet: no boss base edges found".into());
             }
         }
+        lap("fillet");
         self.apply_op(st, fid, "", BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
+        lap("holes");
         if let Some((lid, hole, cbd, cbh)) = b.lid {
             let li = self.target(st, lid.or(Some(tid)))?;
             let lid_shape = st.bodies[li].shape().clone();

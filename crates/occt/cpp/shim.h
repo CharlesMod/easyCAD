@@ -132,6 +132,7 @@ MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad);
 HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl);
 MassProps mass_props(const Shape &s);
 BBox bounding_box(const Shape &s);
+rust::Vec<double> extent_along(const Shape &s, V3 origin, V3 dir);
 
 std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts);
 rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts);

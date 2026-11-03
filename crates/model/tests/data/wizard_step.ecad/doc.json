@@ -1,0 +1,763 @@
+{
+  "active_profile": "FDM 0.4 generic",
+  "body_orientations": [],
+  "build_orientation": {
+    "down": "NegZ",
+    "quarter_turns": 0
+  },
+  "components": [],
+  "doc_id": "e3355113-5ed0-46be-b903-2622d615c3a7",
+  "drawings": [],
+  "features": [
+    {
+      "id": 2,
+      "kind": {
+        "Extrude": {
+          "distance": "height",
+          "draft_deg": "0",
+          "op": "NewBody",
+          "profiles": "All",
+          "reverse": false,
+          "sketch": 1,
+          "symmetric": false,
+          "target": null
+        }
+      },
+      "name": "Base",
+      "suppressed": false
+    },
+    {
+      "id": 3,
+      "kind": {
+        "Fillet": {
+          "auto_reduce": true,
+          "body": {
+            "feature": 2,
+            "index": 0
+          },
+          "edges": [
+            {
+              "OfFace": {
+                "Extreme": {
+                  "normal": [
+                    0.0,
+                    0.0,
+                    1.0
+                  ],
+                  "which": "Max"
+                }
+              }
+            }
+          ],
+          "radius": "edge_r",
+          "setback": false,
+          "sets": [],
+          "skipped": []
+        }
+      },
+      "name": "Top edges",
+      "suppressed": false
+    },
+    {
+      "id": 4,
+      "kind": {
+        "Shell": {
+          "body": {
+            "feature": 2,
+            "index": 0
+          },
+          "open_faces": [],
+          "outward": false,
+          "thickness": "wall"
+        }
+      },
+      "name": "Shell",
+      "suppressed": false
+    },
+    {
+      "id": 6,
+      "kind": {
+        "ImportStep": {
+          "import": 5,
+          "reference": true,
+          "translate": [
+            -0.0,
+            -0.0,
+            -13.0
+          ]
+        }
+      },
+      "name": "board",
+      "suppressed": false
+    },
+    {
+      "id": 7,
+      "kind": {
+        "StandoffsFromPcb": {
+          "base_fillet": "0.3",
+          "body": {
+            "feature": 2,
+            "index": 0
+          },
+          "draft_deg": "0",
+          "exclude": [],
+          "gussets": null,
+          "height": "standoff_h",
+          "hole_dia": "boss_hole",
+          "lid_holes": null,
+          "od": "boss_od",
+          "offset": "wall",
+          "plane": {
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x_dir": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          },
+          "source": {
+            "Step": {
+              "import": 5,
+              "max_dia": 4.0,
+              "min_dia": 2.0
+            }
+          }
+        }
+      },
+      "name": "Standoffs",
+      "suppressed": false
+    },
+    {
+      "id": 8,
+      "kind": {
+        "PartingJoint": {
+          "body": {
+            "feature": 2,
+            "index": 0
+          },
+          "class": "Slide",
+          "closing_radius": null,
+          "kind": {
+            "TongueGroove": {
+              "clearance": "0",
+              "extra_depth": "0.2",
+              "height": "1.3",
+              "lead_in": "0.3",
+              "tongue_on": "Lower",
+              "width": "wall * 0.5"
+            }
+          },
+          "offset": "lid_split",
+          "plane": {
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "x_dir": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          },
+          "rim": {
+            "height": "3",
+            "width": "4"
+          },
+          "upper_name": "Lid"
+        }
+      },
+      "name": "Joint · Tongue & groove",
+      "suppressed": false
+    }
+  ],
+  "format": 2,
+  "imports": [
+    {
+      "id": 5,
+      "import": {
+        "blob": "0701eb3e095913f33de0cf5f32561eb9830e806f40b492e29787dbc61d3a4b8b",
+        "kind": "Step",
+        "name": "board",
+        "size": 79034
+      }
+    }
+  ],
+  "mates": [],
+  "meta": {
+    "revision": "A",
+    "title": "enclosure enclosure"
+  },
+  "modified_by_device": "local",
+  "name": "enclosure",
+  "next_id": 9,
+  "occurrences": [],
+  "params": {
+    "list": [
+      {
+        "comment": "from STEP",
+        "expr": "86",
+        "name": "pcb_w"
+      },
+      {
+        "comment": "from STEP",
+        "expr": "50",
+        "name": "pcb_h"
+      },
+      {
+        "comment": "PCB to wall",
+        "expr": "0.5",
+        "name": "clearance"
+      },
+      {
+        "comment": "",
+        "expr": "2",
+        "name": "wall"
+      },
+      {
+        "comment": "outside, floor to top",
+        "expr": "30",
+        "name": "height"
+      },
+      {
+        "comment": "outline corners",
+        "expr": "6",
+        "name": "corner_r"
+      },
+      {
+        "comment": "top edge round",
+        "expr": "wall + 1",
+        "name": "edge_r"
+      },
+      {
+        "comment": "board above the floor",
+        "expr": "5",
+        "name": "standoff_h"
+      },
+      {
+        "comment": "",
+        "expr": "7",
+        "name": "boss_od"
+      },
+      {
+        "comment": "M3 self-tap",
+        "expr": "2.5",
+        "name": "boss_hole"
+      },
+      {
+        "comment": "parting plane",
+        "expr": "height - 10",
+        "name": "lid_split"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "first_layer_chamfer": 0.4,
+      "first_layer_comp": 0.15,
+      "fits": {
+        "loose": 0.3,
+        "press": -0.05,
+        "slide": 0.15,
+        "snug": 0.05
+      },
+      "hole_comp": {
+        "base": 0.1,
+        "per_mm": 0.01
+      },
+      "kind": "Fdm",
+      "name": "FDM 0.4 generic",
+      "notes": "Starting point for a 0.4 mm nozzle, 0.2 mm layers (PLA/PETG). Calibrate with the fit coupon.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": true,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.05
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.15,
+        "press": -0.02,
+        "slide": 0.08,
+        "snug": 0.03
+      },
+      "hole_comp": {
+        "base": 0.05,
+        "per_mm": 0.0
+      },
+      "kind": "Sla",
+      "name": "SLA generic",
+      "notes": "Starting point for desktop MSLA resin printers. Calibrate with the fit coupon.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.02
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.0,
+        "press": 0.0,
+        "slide": 0.0,
+        "snug": 0.0
+      },
+      "hole_comp": {
+        "base": 0.0,
+        "per_mm": 0.0
+      },
+      "kind": "Molded",
+      "name": "Injection molded (nominal)",
+      "notes": "Nominal geometry: no process compensation.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.0
+    }
+  ],
+  "revision": 29,
+  "rollback": null,
+  "sketches": [
+    {
+      "id": 1,
+      "sketch": {
+        "constraints": [
+          {
+            "Horizontal": 0
+          },
+          {
+            "Vertical": 1
+          },
+          {
+            "Horizontal": 2
+          },
+          {
+            "Vertical": 3
+          },
+          {
+            "Length": [
+              0,
+              "pcb_w"
+            ]
+          },
+          {
+            "Length": [
+              1,
+              "pcb_h"
+            ]
+          },
+          {
+            "Midpoint": [
+              4,
+              4
+            ]
+          },
+          {
+            "Fix": [
+              4,
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          {
+            "Offset": {
+              "distance": "clearance + wall",
+              "source": [
+                0,
+                1,
+                2,
+                3
+              ],
+              "target": [
+                5,
+                6,
+                7,
+                8
+              ]
+            }
+          },
+          {
+            "Tangent": [
+              5,
+              9
+            ]
+          },
+          {
+            "Tangent": [
+              8,
+              9
+            ]
+          },
+          {
+            "Radius": [
+              9,
+              "corner_r"
+            ]
+          },
+          {
+            "PointOnLine": [
+              5,
+              5
+            ]
+          },
+          {
+            "PointOnLine": [
+              5,
+              8
+            ]
+          },
+          {
+            "Tangent": [
+              5,
+              10
+            ]
+          },
+          {
+            "Tangent": [
+              6,
+              10
+            ]
+          },
+          {
+            "Radius": [
+              10,
+              "corner_r"
+            ]
+          },
+          {
+            "PointOnLine": [
+              6,
+              5
+            ]
+          },
+          {
+            "PointOnLine": [
+              6,
+              6
+            ]
+          },
+          {
+            "Tangent": [
+              6,
+              11
+            ]
+          },
+          {
+            "Tangent": [
+              7,
+              11
+            ]
+          },
+          {
+            "Radius": [
+              11,
+              "corner_r"
+            ]
+          },
+          {
+            "PointOnLine": [
+              7,
+              6
+            ]
+          },
+          {
+            "PointOnLine": [
+              7,
+              7
+            ]
+          },
+          {
+            "Tangent": [
+              7,
+              12
+            ]
+          },
+          {
+            "Tangent": [
+              8,
+              12
+            ]
+          },
+          {
+            "Radius": [
+              12,
+              "corner_r"
+            ]
+          },
+          {
+            "PointOnLine": [
+              8,
+              7
+            ]
+          },
+          {
+            "PointOnLine": [
+              8,
+              8
+            ]
+          }
+        ],
+        "entities": [
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 0,
+                "b": 1
+              }
+            }
+          },
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 1,
+                "b": 2
+              }
+            }
+          },
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 2,
+                "b": 3
+              }
+            }
+          },
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 3,
+                "b": 0
+              }
+            }
+          },
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 0,
+                "b": 2
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 9,
+                "b": 12
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 13,
+                "b": 15
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 16,
+                "b": 18
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 19,
+                "b": 10
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Arc": {
+                "center": 11,
+                "end": 9,
+                "start": 10
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Arc": {
+                "center": 14,
+                "end": 13,
+                "start": 12
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Arc": {
+                "center": 17,
+                "end": 16,
+                "start": 15
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Arc": {
+                "center": 20,
+                "end": 19,
+                "start": 18
+              }
+            }
+          }
+        ],
+        "name": "Enclosure profile",
+        "plane": {
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x_dir": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "points": [
+          [
+            -43.0,
+            -25.0
+          ],
+          [
+            43.0,
+            -25.0
+          ],
+          [
+            43.0,
+            25.0
+          ],
+          [
+            -43.0,
+            25.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            -45.5,
+            -27.5
+          ],
+          [
+            45.5,
+            -27.5
+          ],
+          [
+            45.5,
+            27.5
+          ],
+          [
+            -45.5,
+            27.5
+          ],
+          [
+            -39.5,
+            -27.5
+          ],
+          [
+            -45.5,
+            -21.5
+          ],
+          [
+            -39.5,
+            -21.5
+          ],
+          [
+            39.5,
+            -27.5
+          ],
+          [
+            45.5,
+            -21.5
+          ],
+          [
+            39.5,
+            -21.5
+          ],
+          [
+            45.5,
+            21.5
+          ],
+          [
+            39.5,
+            27.5
+          ],
+          [
+            39.5,
+            21.5
+          ],
+          [
+            -39.5,
+            27.5
+          ],
+          [
+            -45.5,
+            21.5
+          ],
+          [
+            -39.5,
+            21.5
+          ]
+        ]
+      }
+    }
+  ],
+  "teardrop_overrides": []
+}

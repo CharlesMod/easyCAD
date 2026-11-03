@@ -6,6 +6,9 @@
 #include "occt/src/ffi.rs.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <csignal>
 #include <cstring>
@@ -812,6 +815,13 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
   if (closing.IsEmpty()) {
     // Nothing to open: MakeThickSolid would return only the offset skin. Build the
     // closed hollow solid (outer skin + internal void) from a 3D offset instead.
+    const bool prof = std::getenv("CW_PROF") != nullptr;
+    auto t0 = std::chrono::steady_clock::now();
+    auto lap = [&](const char *w) {
+      if (prof)
+        std::fprintf(stderr, "  shell %s: %.1f ms\n", w,
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    };
     GProp_GProps in_v, in_a;
     BRepGProp::VolumeProperties(input, in_v);
     BRepGProp::SurfaceProperties(input, in_a);
@@ -844,17 +854,51 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
       }
       return true;
     };
+    lap("input props");
     std::string why;
     TopoDS_Shape r;
     try {
       TopoDS_Shape off = doOffsetSolid(privateCopy(input), offset);
-      r = simplify(offset < 0 ? doBoolean(input, off, 1u) : doBoolean(off, input, 1u));
+      lap("offset solid");
+      // inward: the void is the inner offset's skin, reversed, as a second shell of
+      // the input solid (no boolean needed when the skins do not touch; checked)
+      if (offset < 0) {
+        try {
+          TopoDS_Solid hollow;
+          BRep_Builder bld;
+          bld.MakeSolid(hollow);
+          int outer = 0, inner = 0;
+          for (TopExp_Explorer ex(input, TopAbs_SHELL); ex.More(); ex.Next()) {
+            bld.Add(hollow, ex.Current());
+            ++outer;
+          }
+          for (TopExp_Explorer ex(off, TopAbs_SHELL); ex.More(); ex.Next()) {
+            bld.Add(hollow, ex.Current().Reversed());
+            ++inner;
+          }
+          if (outer == 1 && inner == 1) {
+            std::string why0;
+            if (plausible(hollow, why0)) {
+              lap("direct void");
+              return wrap(hollow);
+            }
+          }
+        } catch (const Standard_Failure &) {
+        }
+      }
+      r = offset < 0 ? doBoolean(input, off, 1u) : doBoolean(off, input, 1u);
+      lap("boolean");
+      r = simplify(r);
+      lap("simplify");
     } catch (const Standard_Failure &e) {
       why = std::string("the ") + (offset < 0 ? "inner" : "outer") + " offset failed (thickness larger than a convex radius or a thin feature?): " + e.GetMessageString();
     } catch (const std::exception &e) {
       why = std::string("the ") + (offset < 0 ? "inner" : "outer") + " offset failed (thickness larger than a convex radius or a thin feature?): " + e.what();
     }
-    if (!r.IsNull() && plausible(r, why)) return wrap(r);
+    if (!r.IsNull() && plausible(r, why)) {
+      lap("checks");
+      return wrap(r);
+    }
     // Fallback (inward only): shell with the largest planar face open (the robust
     // thick-solid path), then close it again with that face's slab of the input.
     if (offset < 0) {
@@ -1661,6 +1705,36 @@ BBox bounding_box(const Shape &s) {
   r.min = mk(x0, y0, z0);
   r.max = mk(x1, y1, z1);
   return r;
+}
+
+rust::Vec<double> extent_along(const Shape &s, V3 origin, V3 dir) {
+  requireShape(s, "extent_along");
+  gp_Pnt o = P(origin);
+  gp_Dir d = D(dir, "extent direction");
+  double lo = 1e300, hi = -1e300;
+  auto add = [&](const gp_Pnt &p) {
+    double t = gp_Vec(o, p).Dot(gp_Vec(d));
+    lo = std::min(lo, t);
+    hi = std::max(hi, t);
+  };
+  for (TopExp_Explorer ex(s.s, TopAbs_VERTEX); ex.More(); ex.Next()) add(BRep_Tool::Pnt(TopoDS::Vertex(ex.Current())));
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(s.s, TopAbs_EDGE, edges);
+  for (int i = 1; i <= edges.Extent(); ++i) {
+    const TopoDS_Edge &e = TopoDS::Edge(edges(i));
+    if (BRep_Tool::Degenerated(e)) continue;
+    try {
+      BRepAdaptor_Curve c(e);
+      double a = c.FirstParameter(), b = c.LastParameter();
+      for (int k = 1; k < 32; ++k) add(c.Value(a + (b - a) * k / 32.0));
+    } catch (const Standard_Failure &) {
+    }
+  }
+  if (lo > hi) fail("extent of an empty shape");
+  rust::Vec<double> out;
+  out.push_back(lo);
+  out.push_back(hi);
+  return out;
 }
 
 // ---------------------------------------------------------------- I/O

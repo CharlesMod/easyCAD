@@ -1,0 +1,1138 @@
+{
+  "active_profile": "FDM 0.4 generic",
+  "body_orientations": [],
+  "build_orientation": {
+    "down": "NegZ",
+    "quarter_turns": 0
+  },
+  "components": [
+    {
+      "children": [
+        {
+          "component": 10,
+          "explode": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "grounded": true,
+          "id": 16,
+          "in_bom": false,
+          "name": "Base (design position)",
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "visible": true
+        },
+        {
+          "component": 13,
+          "explode": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "grounded": true,
+          "id": 17,
+          "in_bom": false,
+          "name": "Lid (design position)",
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "visible": true
+        }
+      ],
+      "context": null,
+      "context_frame": null,
+      "features": [
+        {
+          "id": 2,
+          "kind": {
+            "Extrude": {
+              "distance": "height",
+              "draft_deg": "0",
+              "op": "NewBody",
+              "profiles": "All",
+              "reverse": false,
+              "sketch": 1,
+              "symmetric": false,
+              "target": null
+            }
+          },
+          "name": "Base",
+          "suppressed": false
+        },
+        {
+          "id": 3,
+          "kind": {
+            "Fillet": {
+              "auto_reduce": true,
+              "body": {
+                "feature": 2,
+                "index": 0
+              },
+              "edges": [
+                {
+                  "OfFace": {
+                    "Extreme": {
+                      "normal": [
+                        0.0,
+                        0.0,
+                        1.0
+                      ],
+                      "which": "Max"
+                    }
+                  }
+                }
+              ],
+              "radius": "edge_r",
+              "setback": false,
+              "sets": [],
+              "skipped": []
+            }
+          },
+          "name": "Top edges",
+          "suppressed": false
+        },
+        {
+          "id": 4,
+          "kind": {
+            "Shell": {
+              "body": {
+                "feature": 2,
+                "index": 0
+              },
+              "open_faces": [],
+              "outward": false,
+              "thickness": "wall"
+            }
+          },
+          "name": "Shell",
+          "suppressed": false
+        },
+        {
+          "id": 6,
+          "kind": {
+            "StandoffsFromPcb": {
+              "base_fillet": "0.3",
+              "body": {
+                "feature": 2,
+                "index": 0
+              },
+              "draft_deg": "0",
+              "exclude": [],
+              "gussets": null,
+              "height": "standoff_h",
+              "hole_dia": "boss_hole",
+              "lid_holes": null,
+              "od": "boss_od",
+              "offset": "wall",
+              "plane": {
+                "normal": [
+                  0.0,
+                  0.0,
+                  1.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_dir": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "source": {
+                "Dxf": {
+                  "import": 5,
+                  "layers": [
+                    "Multi-Layer holes"
+                  ],
+                  "max_dia": 4.0,
+                  "min_dia": 2.0,
+                  "offset": [
+                    -43.0,
+                    -25.0
+                  ]
+                }
+              }
+            }
+          },
+          "name": "Standoffs",
+          "suppressed": false
+        },
+        {
+          "id": 7,
+          "kind": {
+            "PartingJoint": {
+              "body": {
+                "feature": 2,
+                "index": 0
+              },
+              "class": "Slide",
+              "closing_radius": null,
+              "kind": {
+                "TongueGroove": {
+                  "clearance": "0",
+                  "extra_depth": "0.2",
+                  "height": "1.3",
+                  "lead_in": "0.3",
+                  "tongue_on": "Lower",
+                  "width": "wall * 0.5"
+                }
+              },
+              "offset": "lid_split",
+              "plane": {
+                "normal": [
+                  0.0,
+                  0.0,
+                  1.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_dir": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "rim": {
+                "height": "3",
+                "width": "4"
+              },
+              "upper_name": "Lid"
+            }
+          },
+          "name": "Joint · Tongue & groove",
+          "suppressed": false
+        }
+      ],
+      "id": 8,
+      "imports": [
+        {
+          "id": 5,
+          "import": {
+            "blob": "893666d5cde22c9826fda22484cf998a285e12c8b0105ddf04ad79e5cf64216f",
+            "kind": "Dxf",
+            "name": "board.dxf",
+            "size": 889
+          }
+        }
+      ],
+      "link_ids": [],
+      "locked": false,
+      "name": "Enclosure",
+      "owner": null,
+      "params": {
+        "list": []
+      },
+      "process": null,
+      "purchased": null,
+      "rollback": null,
+      "sketches": [
+        {
+          "id": 1,
+          "sketch": {
+            "constraints": [
+              {
+                "Coincident": [
+                  1,
+                  3
+                ]
+              },
+              {
+                "Coincident": [
+                  4,
+                  5
+                ]
+              },
+              {
+                "Coincident": [
+                  6,
+                  8
+                ]
+              },
+              {
+                "Coincident": [
+                  9,
+                  10
+                ]
+              },
+              {
+                "Coincident": [
+                  11,
+                  13
+                ]
+              },
+              {
+                "Coincident": [
+                  14,
+                  15
+                ]
+              },
+              {
+                "Coincident": [
+                  16,
+                  18
+                ]
+              },
+              {
+                "Coincident": [
+                  0,
+                  19
+                ]
+              },
+              {
+                "Fix": [
+                  0,
+                  [
+                    -40.0,
+                    -25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  1,
+                  [
+                    40.0,
+                    -25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  2,
+                  [
+                    40.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  3,
+                  [
+                    40.0,
+                    -25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  4,
+                  [
+                    43.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  5,
+                  [
+                    43.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  6,
+                  [
+                    43.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  7,
+                  [
+                    40.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  8,
+                  [
+                    43.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  9,
+                  [
+                    40.0,
+                    25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  10,
+                  [
+                    40.0,
+                    25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  11,
+                  [
+                    -40.0,
+                    25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  12,
+                  [
+                    -40.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  13,
+                  [
+                    -40.0,
+                    25.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  14,
+                  [
+                    -43.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  15,
+                  [
+                    -43.0,
+                    22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  16,
+                  [
+                    -43.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  17,
+                  [
+                    -40.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  18,
+                  [
+                    -43.0,
+                    -22.0
+                  ]
+                ]
+              },
+              {
+                "Fix": [
+                  19,
+                  [
+                    -40.0,
+                    -25.0
+                  ]
+                ]
+              },
+              {
+                "Offset": {
+                  "distance": "clearance + wall",
+                  "source": [
+                    5,
+                    6,
+                    7,
+                    0,
+                    1,
+                    2,
+                    3,
+                    4
+                  ],
+                  "target": [
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15
+                  ]
+                }
+              }
+            ],
+            "entities": [
+              {
+                "construction": true,
+                "geom": {
+                  "Line": {
+                    "a": 0,
+                    "b": 1
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Arc": {
+                    "center": 2,
+                    "end": 4,
+                    "start": 1
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Line": {
+                    "a": 4,
+                    "b": 6
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Arc": {
+                    "center": 7,
+                    "end": 9,
+                    "start": 6
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Line": {
+                    "a": 9,
+                    "b": 11
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Arc": {
+                    "center": 12,
+                    "end": 14,
+                    "start": 11
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Line": {
+                    "a": 14,
+                    "b": 16
+                  }
+                }
+              },
+              {
+                "construction": true,
+                "geom": {
+                  "Arc": {
+                    "center": 17,
+                    "end": 0,
+                    "start": 16
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Arc": {
+                    "center": 12,
+                    "end": 21,
+                    "start": 20
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Line": {
+                    "a": 21,
+                    "b": 22
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Arc": {
+                    "center": 17,
+                    "end": 23,
+                    "start": 22
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Line": {
+                    "a": 23,
+                    "b": 24
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Arc": {
+                    "center": 2,
+                    "end": 25,
+                    "start": 24
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Line": {
+                    "a": 25,
+                    "b": 26
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Arc": {
+                    "center": 7,
+                    "end": 27,
+                    "start": 26
+                  }
+                }
+              },
+              {
+                "construction": false,
+                "geom": {
+                  "Line": {
+                    "a": 27,
+                    "b": 20
+                  }
+                }
+              }
+            ],
+            "name": "Enclosure profile",
+            "plane": {
+              "normal": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "origin": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "x_dir": [
+                1.0,
+                0.0,
+                0.0
+              ]
+            },
+            "points": [
+              [
+                -40.0,
+                -25.0
+              ],
+              [
+                40.0,
+                -25.0
+              ],
+              [
+                40.0,
+                -22.0
+              ],
+              [
+                40.0,
+                -25.0
+              ],
+              [
+                43.0,
+                -22.0
+              ],
+              [
+                43.0,
+                -22.0
+              ],
+              [
+                43.0,
+                22.0
+              ],
+              [
+                40.0,
+                22.0
+              ],
+              [
+                43.0,
+                22.0
+              ],
+              [
+                40.0,
+                25.0
+              ],
+              [
+                40.0,
+                25.0
+              ],
+              [
+                -40.0,
+                25.0
+              ],
+              [
+                -40.0,
+                22.0
+              ],
+              [
+                -40.0,
+                25.0
+              ],
+              [
+                -43.0,
+                22.0
+              ],
+              [
+                -43.0,
+                22.0
+              ],
+              [
+                -43.0,
+                -22.0
+              ],
+              [
+                -40.0,
+                -22.0
+              ],
+              [
+                -43.0,
+                -22.0
+              ],
+              [
+                -40.0,
+                -25.0
+              ],
+              [
+                -40.0,
+                27.5
+              ],
+              [
+                -45.5,
+                22.0
+              ],
+              [
+                -45.5,
+                -22.0
+              ],
+              [
+                -40.0,
+                -27.5
+              ],
+              [
+                40.0,
+                -27.5
+              ],
+              [
+                45.5,
+                -22.0
+              ],
+              [
+                45.5,
+                22.0
+              ],
+              [
+                40.0,
+                27.5
+              ]
+            ]
+          }
+        }
+      ],
+      "source": "Native"
+    },
+    {
+      "children": [],
+      "context": [
+        9,
+        16
+      ],
+      "context_frame": {
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "features": [
+        {
+          "id": 11,
+          "kind": {
+            "ContextRef": {
+              "body": "Base",
+              "offset": "0",
+              "op": "NewBody",
+              "reference": false,
+              "root": null,
+              "source": [
+                9
+              ],
+              "target": null
+            }
+          },
+          "name": "Base (in context)",
+          "suppressed": false
+        }
+      ],
+      "id": 10,
+      "imports": [],
+      "link_ids": [],
+      "locked": false,
+      "name": "Base",
+      "owner": null,
+      "params": {
+        "list": []
+      },
+      "process": null,
+      "purchased": null,
+      "rollback": null,
+      "sketches": [],
+      "source": "Native"
+    },
+    {
+      "children": [],
+      "context": [
+        9,
+        17
+      ],
+      "context_frame": {
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "features": [
+        {
+          "id": 14,
+          "kind": {
+            "ContextRef": {
+              "body": "Lid",
+              "offset": "0",
+              "op": "NewBody",
+              "reference": false,
+              "root": null,
+              "source": [
+                9
+              ],
+              "target": null
+            }
+          },
+          "name": "Lid (in context)",
+          "suppressed": false
+        }
+      ],
+      "id": 13,
+      "imports": [],
+      "link_ids": [],
+      "locked": false,
+      "name": "Lid",
+      "owner": null,
+      "params": {
+        "list": []
+      },
+      "process": null,
+      "purchased": null,
+      "rollback": null,
+      "sketches": [],
+      "source": "Native"
+    }
+  ],
+  "doc_id": "949621fa-4834-4903-bc8c-f5afeeb1fab7",
+  "drawings": [],
+  "features": [],
+  "format": 2,
+  "imports": [],
+  "mates": [],
+  "meta": {
+    "gui.anchor.16": "1",
+    "gui.anchor.17": "1",
+    "revision": "A",
+    "title": "enclosure enclosure"
+  },
+  "modified_by_device": "local",
+  "name": "enclosure",
+  "next_id": 18,
+  "occurrences": [
+    {
+      "component": 8,
+      "explode": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grounded": true,
+      "id": 9,
+      "in_bom": false,
+      "name": "Enclosure:1",
+      "transform": {
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "visible": false
+    },
+    {
+      "component": 10,
+      "explode": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grounded": true,
+      "id": 12,
+      "in_bom": true,
+      "name": "Base:1",
+      "transform": {
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "visible": true
+    },
+    {
+      "component": 13,
+      "explode": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grounded": false,
+      "id": 15,
+      "in_bom": true,
+      "name": "Lid:1",
+      "transform": {
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "visible": true
+    }
+  ],
+  "params": {
+    "list": [
+      {
+        "comment": "PCB to wall",
+        "expr": "0.5",
+        "name": "clearance"
+      },
+      {
+        "comment": "",
+        "expr": "2",
+        "name": "wall"
+      },
+      {
+        "comment": "outside, floor to top",
+        "expr": "30",
+        "name": "height"
+      },
+      {
+        "comment": "top edge round",
+        "expr": "wall + 1",
+        "name": "edge_r"
+      },
+      {
+        "comment": "board above the floor",
+        "expr": "5",
+        "name": "standoff_h"
+      },
+      {
+        "comment": "",
+        "expr": "7",
+        "name": "boss_od"
+      },
+      {
+        "comment": "M3 self-tap",
+        "expr": "2.5",
+        "name": "boss_hole"
+      },
+      {
+        "comment": "parting plane",
+        "expr": "height - 10",
+        "name": "lid_split"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "first_layer_chamfer": 0.4,
+      "first_layer_comp": 0.15,
+      "fits": {
+        "loose": 0.3,
+        "press": -0.05,
+        "slide": 0.15,
+        "snug": 0.05
+      },
+      "hole_comp": {
+        "base": 0.1,
+        "per_mm": 0.01
+      },
+      "kind": "Fdm",
+      "name": "FDM 0.4 generic",
+      "notes": "Starting point for a 0.4 mm nozzle, 0.2 mm layers (PLA/PETG). Calibrate with the fit coupon.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": true,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.05
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.15,
+        "press": -0.02,
+        "slide": 0.08,
+        "snug": 0.03
+      },
+      "hole_comp": {
+        "base": 0.05,
+        "per_mm": 0.0
+      },
+      "kind": "Sla",
+      "name": "SLA generic",
+      "notes": "Starting point for desktop MSLA resin printers. Calibrate with the fit coupon.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.02
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.0,
+        "press": 0.0,
+        "slide": 0.0,
+        "snug": 0.0
+      },
+      "hole_comp": {
+        "base": 0.0,
+        "per_mm": 0.0
+      },
+      "kind": "Molded",
+      "name": "Injection molded (nominal)",
+      "notes": "Nominal geometry: no process compensation.",
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.0
+    }
+  ],
+  "revision": 30,
+  "rollback": null,
+  "sketches": [],
+  "teardrop_overrides": []
+}

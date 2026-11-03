@@ -73,8 +73,10 @@ pub fn display_xf(app: &EasyCadApp, c: &CtxBody) -> DAffine3 {
 /// Interference highlight: the pair shown in the report is drawn red.
 pub fn body_tint(app: &EasyCadApp, c: &CtxBody) -> Option<[f32; 4]> {
     let i = app.asm.interference.as_ref()?;
-    // translucent so the overlap inside shows through
-    i.highlighted(c).then_some([0.86, 0.22, 0.18, 0.55])
+    // the pair goes see-through so the red overlap solid inside shows (GUI_NEEDS
+    // #19); without an overlap solid the pair itself is tinted red
+    let tint = if i.overlaps.iter().any(|m| m.is_some()) { [0.62, 0.66, 0.72, 0.28] } else { [0.86, 0.22, 0.18, 0.55] };
+    i.highlighted(c).then_some(tint)
 }
 
 pub fn occ_name(d: &DocData, path: &[OccurrenceId]) -> String {

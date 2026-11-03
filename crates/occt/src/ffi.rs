@@ -226,6 +226,7 @@ pub mod bridge {
         fn hlr(s: &Shape, dir: V3, x_dir: V3, exact: bool, defl: f64) -> Result<HlrData>;
         fn mass_props(s: &Shape) -> Result<MassProps>;
         fn bounding_box(s: &Shape) -> Result<BBox>;
+        fn extent_along(s: &Shape, origin: V3, dir: V3) -> Result<Vec<f64>>;
 
         /// STEP with assembly structure, names and colours. Returns a compound whose
         /// direct children are the leaf solids (placed), in the order of `parts`.

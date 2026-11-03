@@ -17,7 +17,9 @@ use crate::worker::{ctx_key, CtxBody, Output};
 #[derive(Default)]
 pub struct InterferenceUi {
     pub report: Option<InterferenceReport>,
-    pub job: Option<Receiver<InterferenceReport>>,
+    /// The overlap solid of each pair (GUI_NEEDS #19), meshed off the UI thread.
+    pub overlaps: Vec<Option<Arc<easycad_model::occt::Mesh>>>,
+    pub job: Option<Receiver<(InterferenceReport, Vec<Option<Arc<easycad_model::occt::Mesh>>>)>>,
     /// Highlighted pair (index into `report.pairs`); `None` highlights every pair.
     pub sel: Option<usize>,
     /// Model id the report was computed on.
@@ -26,6 +28,16 @@ pub struct InterferenceUi {
 }
 
 impl InterferenceUi {
+    /// Overlap solids to draw (world frame): the selected pair's, or all.
+    pub fn shown_overlaps(&self) -> Vec<Arc<easycad_model::occt::Mesh>> {
+        self.overlaps
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.sel.is_none_or(|s| s == *i))
+            .filter_map(|(_, m)| m.clone())
+            .collect()
+    }
+
     pub fn highlighted(&self, c: &CtxBody) -> bool {
         let Some(r) = &self.report else { return false };
         let hit = |p: &easycad_model::assembly::Interference| {
@@ -60,7 +72,9 @@ impl EasyCadApp {
         let Some(rx) = &i.job else { return };
         if let Ok(r) = rx.try_recv() {
             i.job = None;
+            let (r, meshes) = r;
             let n = r.pairs.len();
+            i.overlaps = meshes;
             i.report = Some(r);
             i.sel = None;
             if n == 0 {
@@ -70,13 +84,24 @@ impl EasyCadApp {
     }
 }
 
-fn spawn(m: Arc<Output>, include_reference: bool) -> Receiver<InterferenceReport> {
+type Job = (InterferenceReport, Vec<Option<Arc<easycad_model::occt::Mesh>>>);
+
+fn spawn(m: Arc<Output>, include_reference: bool) -> Receiver<Job> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let Some(a) = &m.asm else { return };
         let opts = InterferenceOptions { include_reference, ..Default::default() };
         let r = easycad_model::assembly::interference(&m.data, &a.result, &opts);
-        let _ = tx.send(r);
+        let meshes = r
+            .pairs
+            .iter()
+            .map(|p| {
+                p.common
+                    .as_ref()
+                    .and_then(|o| o.0.mesh_quality(easycad_model::regen::MeshQuality::Display).ok())
+            })
+            .collect();
+        let _ = tx.send((r, meshes));
     });
     rx
 }

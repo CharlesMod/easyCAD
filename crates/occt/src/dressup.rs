@@ -3,6 +3,7 @@
 //! Instead of a single `BRepFilletAPI_MakeFillet` call that either succeeds or
 //! refuses, [`fillet`] and [`chamfer`] run a fallback ladder:
 //!
+//! 0. **Fast path:** the requested edges all at once on the input as it is.
 //! 1. **Pre-heal** the input (ShapeFix + UnifySameDomain) and re-find the
 //!    requested edges on it geometrically.
 //! 2. **Expand** each edge to its tangent chain, then try everything at once.
@@ -234,6 +235,39 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
             }
             Some(_) => statuses[k] = Some(EdgeStatus::Failed { reason: "size must be positive".into(), max_size: None }),
             None => statuses[k] = Some(EdgeStatus::Failed { reason: "edge index out of range".into(), max_size: None }),
+        }
+    }
+
+    // 0. Fast path: everything at once on the input as it is (no healing, no chain
+    // analysis). Most requests succeed here; the ladder below is for the rest.
+    if statuses.iter().all(|s| s.is_none()) {
+        let mut idx: Vec<u32> = Vec::new();
+        let mut sizes = Vec::new();
+        for &(e, size, _) in edges {
+            if !idx.contains(&e) {
+                idx.push(e);
+                sizes.push(size);
+            }
+        }
+        if let Ok(r) = apply(kind, shape, &idx, &sizes) {
+            report.strategy = Strategy::AllAtOnce;
+            // the kernel follows tangent chains by itself: report them as before
+            let chains = shape.tangent_chains().unwrap_or_default();
+            let chain_of = |e: u32| chains.get(e as usize).copied().unwrap_or(u32::MAX - e);
+            let mut groups: Vec<u32> = Vec::new();
+            for (k, &(e, _, _)) in edges.iter().enumerate() {
+                let c = chain_of(e);
+                let g = groups.iter().position(|x| *x == c).unwrap_or_else(|| {
+                    groups.push(c);
+                    groups.len() - 1
+                });
+                report.outcomes.push(EdgeOutcome { request: k, edge: e, chain: g, status: EdgeStatus::Applied });
+            }
+            if opts.expand_tangent_chains {
+                let infos = shape.edges().unwrap_or_default();
+                report.expanded_edges = infos.iter().filter(|i| i.faces.len() == 2 && !idx.contains(&i.index) && groups.contains(&chain_of(i.index))).count();
+            }
+            return Ok((r, report));
         }
     }
 
