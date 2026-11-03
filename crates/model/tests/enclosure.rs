@@ -70,7 +70,7 @@ fn enclosure_end_to_end() {
     // Fillet the vertical edges, r = 6
     doc.add_feature(
         "Corners",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: "r".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: "r".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
     );
     let a_out = 80.0 * 60.0 - (4.0 - PI) * 36.0;
     let v = doc.regenerate().body_by_id(base_id).unwrap().shape().volume().unwrap();

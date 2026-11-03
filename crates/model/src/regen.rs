@@ -541,10 +541,14 @@ impl Regenerator {
         let mut reports = Vec::new();
         let (mut recomputed, mut reused) = (0, 0);
         let live = doc.rollback.map_or(doc.features.len(), |r| r.min(doc.features.len()));
+        let prof = std::env::var("CW_PROF").is_ok();
+        let (mut t_key, mut t_prov) = (0.0, 0.0);
         for f in &doc.features[..live] {
+            let tk = std::time::Instant::now();
             let mut h = DefaultHasher::new();
             key.hash(&mut h);
             fingerprint(f, doc, &vals).hash(&mut h);
+            t_key += tk.elapsed().as_secs_f64() * 1000.0;
             param_err.hash(&mut h);
             if let FeatureKind::ContextRef { source, root, .. } = &f.kind {
                 let k = crate::assembly::ctx_key(*root, source);
@@ -582,7 +586,9 @@ impl Regenerator {
                     skipped_edges: Vec::new(),
                 };
                 let res = ctx.exec(f, &state).map(|mut s| {
+                    let tp = std::time::Instant::now();
                     s.faces = crate::provenance::update(&state.faces, &s.bodies, Some(f), doc);
+                    t_prov += tp.elapsed().as_secs_f64() * 1000.0;
                     s
                 });
                 let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
@@ -631,6 +637,7 @@ impl Regenerator {
                 .hash(&mut h);
             h.finish()
         };
+        let ts = std::time::Instant::now();
         let (bodies, process, face_origins) = match self.stages.get(&stage_key) {
             Some(hit) => hit.clone(),
             None => {
@@ -644,6 +651,9 @@ impl Regenerator {
                 r
             }
         };
+        if prof {
+            eprintln!("  regen keys {t_key:.1} ms · provenance {t_prov:.1} ms · process stage {:.1} ms", ts.elapsed().as_secs_f64() * 1000.0);
+        }
         RegenResult { bodies, reports, recomputed, reused, process, face_origins }
     }
 
@@ -946,11 +956,6 @@ impl Ctx<'_> {
                 let mut warn = Vec::new();
                 if !all {
                     warn.push(summary);
-                }
-                if matches!(kind, FeatureKind::Fillet { setback: true, .. }) {
-                    // TODO: setback vertex blends (OCCT's MakeFillet has no setback corner
-                    // option; would need a custom corner patch).
-                    warn.push("setback corners are not supported yet; corners use the kernel's rolling-ball blend".into());
                 }
                 if !warn.is_empty() {
                     self.warning = Some(warn.join("; "));
@@ -1499,7 +1504,10 @@ impl Ctx<'_> {
         };
         let i = self.target(st, body)?;
         let tid = st.bodies[i].id;
-        self.apply_op(st, fid, "", BoolOp::Join, Some(tid), fuse_many(&bosses)?)?;
+        // the join is not unified or checked: the hole cut below does both
+        let joined = st.bodies[i].shape().fuse(&fuse_many(&bosses)?)?;
+        st.bodies[i].geom = BodyGeom::new(joined);
+        st.tools.entry(fid).or_default().push(ToolOp { target: tid, op: BoolOp::Join });
         lap("join");
         if b.fillet > 0.0 {
             let i = self.target(st, Some(tid))?;
@@ -1740,24 +1748,40 @@ fn process_stage(bodies: &[Body], profile: &ProcessProfile, doc: &DocData) -> (V
     if !td.enabled && !any_override {
         return (bodies.to_vec(), rep);
     }
+    // bodies are independent (each scan reads every face): one thread per body
+    let per: Vec<(Body, ProcessReport)> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                sc.spawn(move || {
+                    let mut rep = ProcessReport::default();
+                    if b.reference {
+                        return (b.clone(), rep);
+                    }
+                    let body = match teardrop_body(b, profile, doc, &mut rep) {
+                        Ok(Some(s)) => {
+                            let mut nb = b.clone();
+                            nb.geom = BodyGeom::new(s);
+                            nb
+                        }
+                        Ok(None) => b.clone(),
+                        Err(e) => {
+                            rep.warnings.push(format!("{}: teardrop stage failed ({e}); body left unchanged", b.name));
+                            b.clone()
+                        }
+                    };
+                    (body, rep)
+                })
+            })
+            .collect();
+        jobs.into_iter().zip(bodies).map(|(j, b)| j.join().unwrap_or_else(|_| (b.clone(), ProcessReport { warnings: vec![format!("{}: teardrop stage panicked; body left unchanged", b.name)], ..Default::default() }))).collect()
+    });
     let mut out = Vec::with_capacity(bodies.len());
-    for b in bodies {
-        if b.reference {
-            out.push(b.clone());
-            continue;
-        }
-        match teardrop_body(b, profile, doc, &mut rep) {
-            Ok(Some(s)) => {
-                let mut nb = b.clone();
-                nb.geom = BodyGeom::new(s);
-                out.push(nb);
-            }
-            Ok(None) => out.push(b.clone()),
-            Err(e) => {
-                rep.warnings.push(format!("{}: teardrop stage failed ({e}); body left unchanged", b.name));
-                out.push(b.clone());
-            }
-        }
+    for (b, r) in per {
+        out.push(b);
+        rep.teardropped.extend(r.teardropped);
+        rep.skipped.extend(r.skipped);
+        rep.warnings.extend(r.warnings);
     }
     (out, rep)
 }

@@ -194,6 +194,50 @@ fn fillet_fallback_partial_success() {
     assert!(matches!(rep2.outcomes[3].status, EdgeStatus::AppliedReduced { applied, .. } if applied < 2.0));
 }
 
+/// A dress-up that eats through the body used to come back as a valid *shell* (no
+/// solid left, reported as applied; see `fillet_fuzz_regressions` for the real
+/// cases); a smooth edge (a fillet's own boundary) or a seam in
+/// the set used to send the whole request down the slow ladder.
+#[test]
+fn dressup_refuses_lost_solids_and_skips_smooth_edges() {
+    let plate = Shape::make_box(DVec3::ZERO, DVec3::new(20.0, 20.0, 4.0)).unwrap();
+    let hole = Shape::cylinder(DVec3::new(10.0, 10.0, -1.0), DVec3::Z, 1.25, 6.0).unwrap();
+    let b = plate.cut(&hole).unwrap();
+    let rim = b.edges().unwrap().into_iter().find(|e| e.circle.is_some() && (e.midpoint.z - 4.0).abs() < 1e-6).unwrap().index;
+    if let Ok(r) = b.chamfer_raw(&[rim], &[2.0]) {
+        assert_eq!(r.count(ShapeKind::Solid), 1, "a raw chamfer may fail, never lose the solid");
+    }
+    for size in [1.0, 2.0, 3.0, 5.0] {
+        let opts = dressup::DressUpOptions { auto_reduce: true, ..Default::default() };
+        let (out, rep) = dressup::chamfer(&b, &[(rim, size)], &opts).unwrap();
+        assert_eq!(out.count(ShapeKind::Solid), 1, "{size}: {}", rep.summary());
+        assert!(out.is_valid());
+    }
+
+    // round the vertical edges, then ask for a fillet boundary (smooth), the hole's
+    // seam and a top edge: the top edge goes through in one call, the others need nothing
+    let vertical: Vec<u32> = b.edges().unwrap().iter().filter(|e| e.tangent.z.abs() > 0.99 && e.circle.is_none() && e.faces.len() == 2 && e.faces[0] != e.faces[1]).map(|e| e.index).collect();
+    let r = b.fillet_raw(&vertical[..4.min(vertical.len())], &[3.0; 4][..4.min(vertical.len())]).unwrap();
+    let edges = r.edges().unwrap();
+    let smooth = edges.iter().find(|e| e.faces.len() == 2 && e.faces[0] != e.faces[1] && r.edge_convexity(e.index).unwrap() == 0).unwrap().index;
+    let seam = edges.iter().find(|e| e.faces.len() == 1).map(|e| e.index);
+    let top = edges.iter().find(|e| e.circle.is_none() && (e.midpoint.z - 4.0).abs() < 1e-6 && r.edge_convexity(e.index).unwrap() == 1).unwrap().index;
+    let mut req = vec![(smooth, 1.0), (top, 1.0)];
+    req.extend(seam.map(|s| (s, 1.0)));
+    let (out, rep) = dressup::fillet(&r, &req, &Default::default()).unwrap();
+    assert_eq!(rep.strategy, Strategy::AllAtOnce, "{}", rep.summary());
+    assert_eq!(rep.outcomes[0].status, EdgeStatus::Smooth);
+    assert_eq!(rep.outcomes[1].status, EdgeStatus::Applied);
+    if seam.is_some() {
+        assert_eq!(rep.outcomes[2].status, EdgeStatus::Smooth);
+    }
+    assert!(rep.all_applied() && rep.applied_count() == 1, "{}", rep.summary());
+    assert!(out.volume().unwrap() < r.volume().unwrap());
+    // nothing but smooth edges: nothing applied (regen turns that into an error)
+    let (_, rep) = dressup::fillet(&r, &[(smooth, 1.0)], &Default::default()).unwrap();
+    assert_eq!(rep.applied_count(), 0);
+}
+
 #[test]
 fn errors_are_results_not_aborts() {
     let b = Shape::make_box(DVec3::ZERO, DVec3::splat(10.0)).unwrap();

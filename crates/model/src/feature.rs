@@ -176,11 +176,10 @@ pub enum FeatureKind {
         #[serde(default)]
         sets: Vec<EdgeSet>,
         /// Edges the user chose to skip (left sharp, listed in the report).
+        /// (Documents saved with the former `setback` flag still load: unknown
+        /// fields are ignored. OpenCascade has no setback vertex blend; see TODO.md.)
         #[serde(default)]
         skipped: Vec<EdgeSelector>,
-        /// Setback (smooth) vertex blends where three or more filleted edges meet.
-        #[serde(default)]
-        setback: bool,
     },
     Chamfer {
         #[serde(default)]

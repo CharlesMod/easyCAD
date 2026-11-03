@@ -116,17 +116,18 @@ doc.bom(); doc.blob_refs();
     `StandoffsFromPcb` have `offset: Expr` (default `"0"`) moving their plane along
     its normal, like `PartingJoint.offset` (`"lid_split"`).
   - **Fillet / chamfer edge sets.** `Fillet { body, edges, radius, auto_reduce,
-    sets: Vec<EdgeSet { edges, size, auto_reduce }>, skipped, setback }` (Chamfer
-    the same without `setback`): `kind.edge_sets()` lists `(edges, radius,
-    auto_reduce)` (when `edges` is not empty) then `sets`, all dressed in one
+    sets: Vec<EdgeSet { edges, size, auto_reduce }>, skipped }` (Chamfer the
+    same): `kind.edge_sets()` lists `(edges, radius, auto_reduce)` (when
+    `edges` is not empty) then `sets`, all dressed in one
     pipeline run (`occt::dressup::dress` takes a per-edge auto-reduce; a tangent
     chain is reduced as a whole only if every edge in it allows it). An edge in two
     sets takes the later set. `skipped` edge selectors are left sharp
     (`FeatureReport.skipped_edges`, " · 1 skipped" in the summary; everything
     skipped is an error). `FeatureReport.edge_requests[outcome.request] =
     EdgeRequest { set, selector }` maps each `DressUpReport` outcome back to the
-    request. `setback: true` is accepted but gives a warning (TODO: OCCT has no
-    setback vertex blend).
+    request. Corners where three or more filleted edges meet get OCCT's own blend
+    (rolling ball / filling patch); there is no setback corner (the old `setback`
+    flag was removed and is ignored when an old document loads; see TODO.md).
   - **Standoffs.** `StandoffsFromPcb` gained `exclude: Vec<DVec2>` (hole centres in
     plane coordinates, 0.5 mm match), `gussets: Option<Gussets { thickness, height
     (default 60 % of the standoff), max_length (25) }>` (one rib per standoff to the
@@ -446,8 +447,10 @@ cavity, 4 filleted bosses, rib, tongue & groove joint with rim; best of 5, relea
 What changed:
 - Joints defer their booleans to one fuse and one cut per half, and run the split,
   the ring analysis and the two halves on two threads.
-- Booleans and BRepMesh use OCCT's parallel mode and oriented bounding boxes; set
-  `CW_SERIAL_BOP=1` to compare against serial.
+- Booleans run serially with oriented bounding boxes; BRepMesh runs in parallel.
+  On these models OCCT's parallel boolean took about 3x the CPU for no gain in wall
+  time, and lost when other processes were busy. `CW_PARALLEL_BOP=1`,
+  `CW_NO_OBB=1` and `CW_SERIAL_MESH=1` switch each back to compare.
 - Meshing starts from a clean triangulation, so each `MeshQuality` (Preview,
   Display, Final) gets its own density, computed once per shape.
 - `FeatureReport.elapsed_ms` gives per-feature cost (the joint dominates).
@@ -455,6 +458,43 @@ What changed:
 
 Regenerating independent bodies in parallel is not done. Features form one cached
 chain, and most time sits in single large booleans.
+
+**PCB wizard enclosure** (`crates/model/tests/wizard_speed.rs`: the saved
+`tests/data/wizard_{step,dxf}.ecad`, FDM, tongue & groove with rim; best of 3,
+release, a 20-core machine at load 12–17 from four other agents' builds, so the
+numbers move by ±20 %; saturated, a `wall` edit took up to ~390 ms). The test asserts a parameter edit under 1.5 × 300 ms and undo
+under 5 ms; `CW_PROF=1` prints the steps inside the shell, standoffs and joint.
+
+| step | before | after |
+|---|---|---|
+| param edit `wall` (all 6 features) | ~830 ms, 364–454 ms with the first speed work | 248–302 ms |
+| param edit `lid_split` (joint only) | 279–358 ms | 167–215 ms |
+| cold regen | 320–330 ms | 232–281 ms |
+| undo ×2 (cache) | 0.2 ms | 0.15 ms |
+| assembly variant, `wall` edit (master + in-context Base / Lid) | 500 ms | 289–330 ms |
+| re-tessellation of the edited bodies (Display) | — | 31–42 ms |
+
+Where the `wall` edit goes now: joint ~150 ms (split ∥ ring 20, rim 10, tongue
+and groove bands 20, then the halves ∥ ~100: the lower half's fuse ~60, each half's
+unify ~7 and check ~10), standoffs ~55 (join, base fillet, hole cut + unify), shell
+~16, top fillet ~6, teardrop stage ~7 (bodies in parallel). A `wall` edit
+recomputes every feature (all depend on it); `lid_split` only the joint.
+
+What changed for it:
+- The tongue's 45° lead-in is a ruled taper (`Shape::taper`: 2D offset of the
+  band, a ruled loft per loop, sewn with both caps), not `BRepOffsetAPI_DraftAngle`,
+  which hung on some sections (the joint fuzz's iteration 33 never finished). Its
+  straight part and taper go to the half's single fuse; no inner fuse.
+- 2D offsets drop zero-length arcs (`MakeOffset` leaves them where a line meets an
+  arc almost tangentially). They made the taper fail on `wall = 2.2` and fall back to
+  a 70 ms chamfer.
+- Each half is unified and checked once, in its worker thread (it was checked twice).
+- Dress-ups no longer re-check the shim's already-checked result; the standoffs'
+  boss join is not unified or checked before the hole cut, which does both.
+- The teardrop stage scans bodies on parallel threads.
+- Tried without gain: fusing the tongue onto the rim first, OCCT's glue mode for
+  the stacked tongue, holes drilled into the bosses before the join, a rim that does
+  not share the outer wall faces, and turning off boolean history.
 
 ## Robustness
 
@@ -513,6 +553,40 @@ chain, and most time sits in single large booleans.
   - Messages: kernel offset failures say "2D offset failed" (they used to read like
     "does not fit" or "passes through the floor or lid"); "the rim fills the whole
     cavity at the plane" is its own infeasible message.
+- `crates/model/tests/fillet_fuzz.rs` throws random edge sets (a few edges, every
+  edge of a face, every edge at a vertex) × sizes (0.25–6 mm, fillet or chamfer,
+  auto-reduce on or off) at the wizard's bodies (after the shell, after the
+  standoffs, the finished halves) and at generated shelled boxes with bosses, slots
+  and vents, through `occt::dressup::dress`. Each request is **applied**, **reduced**,
+  **skipped** (some edges left sharp, with a reason) or **bailed** (error, panic, or
+  an invalid / solid-losing result). A skipped edge is **wrongly skipped** when the
+  kernel takes it, at full size, on the pipeline's own result. The full run is
+  `#[ignore]` (`--ignored --nocapture`, `FUZZ_N`, `FUZZ_V=1`);
+  `fillet_fuzz_regressions` replays the cases fixed here plus 20 random ones.
+
+  | 400 requests (seed `0x5eed_f111e7`) | applied | reduced | skipped | bailed |
+  |---|---|---|---|---|
+  | before | 202 | 8 | 179 | 11 |
+  | after | 283 | 59 | 58 | 0 |
+
+  After: 0 wrongly skipped (675 smooth edges left alone). The remaining 133 skipped
+  edges are sizes too large with auto-reduce off (a smaller working size is
+  reported) but for three that no size takes (the one checked sits on the tongue's
+  0.4 mm taper). "Before" counts smooth edges as skipped, or as applied when the
+  kernel silently dropped them from a mixed set. What changed:
+  - **Results that lost the solid.** A fillet or chamfer that eats through a thin
+    feature can come back as a valid *shell*; BRepCheck accepts it, and the pipeline
+    reported it as applied (all 11 bails). The shim now refuses a dress-up whose
+    result has fewer solids than its input, so the ladder reduces or reports it.
+  - **Smooth edges and seams** (the faces meet tangentially: a fillet's own
+    boundary, a cylinder's seam; common in "every edge of a face" requests) are
+    `EdgeStatus::Smooth` up front and kept out of every kernel call. They used to be
+    "failed: no suitable edges" alone, silently "applied" in a mixed set, and pushed
+    the whole set down the slow ladder. `all_applied()` counts them as fine;
+    `applied_count()` does not (only smooth edges is still an error).
+  - **Order.** When some chains fail after others were applied, the ladder runs once
+    more with the failed chains first and keeps the run that applied more edges
+    (fixed 6 of 22 order-dependent edges; the rest interact either way).
 
 ## Concurrency contract
 
@@ -867,19 +941,34 @@ verified on load.
   ("draft angle too large"); OCCT would otherwise build a degenerate cone.
 - `Shape::offset_solid` (hollowing by 3D offset) fails when the offset exceeds a
   convex radius. It errors and never crashes.
+- `BRepOffsetAPI_DraftAngle` (drafted extrusions, `Draft`) can loop forever on some
+  sections; it hung the joint fuzz on a tongue lead-in, which now uses
+  `Shape::taper` instead. User drafts still go through it.
+- No setback fillet corners: OpenCascade blends three or more filleted edges with a
+  rolling ball (three edges) or a filling patch (more); there is no setback option.
 
 ## Changelog for GUI
 
 - **Kernel batch (todo-kernel).**
   - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to
     `Cosmetic`). Struct literals need `threads: Default::default()`; I added it in
-    `ui_parts.rs`. A "Modeled threads" toggle in the Parts screen is still to do.
+    `ui_parts.rs`, whose placement banner has a "Modeled threads" checkbox.
   - `Appearance` gained `face_color: Vec<Option<[f32; 3]>>` (empty = none);
     `Body::face_colors` / `mesh_colors` already apply it.
   - Pattern/Mirror accept fillets, chamfers and drafts as sources (whole-body
     sources give a precise error instead).
   - `holes_imperial.json` now follows ASME B18.2.8, so `#4-40` close/normal is
     0.120/0.128 in (was 0.116/0.1285), and the inch tables have a loose class.
+- **Speed, fillet fuzz, setback (TODO §3/§5).**
+  - `FeatureKind::Fillet` lost `setback` (BREAKING for struct literals; I removed
+    it from `sample.rs`, `wizard.rs`, `ui_assembly.rs` and the fillet dialog, whose
+    disabled "Setback" / "Rolling ball" row is gone). Old files still load.
+  - New `EdgeStatus::Smooth` (an exhaustive match needs an arm): the edge's faces
+    already meet tangentially, nothing was done; not a failure (`all_applied()`
+    is true), not applied (`applied_count()`). The fillet dialog maps it to
+    `EdgeResult::Smooth`, counted as done.
+  - New `Shape::taper(v, inset)`: a ruled 45°-style taper of a planar region.
+  - Booleans are serial by default (`CW_PARALLEL_BOP=1` for the old behaviour).
 
 - **GUI_NEEDS #17–#20.**
   - **Movable split components (#17).** New `Component.context_frame:

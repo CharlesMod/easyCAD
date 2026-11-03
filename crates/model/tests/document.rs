@@ -35,7 +35,7 @@ fn block_doc() -> (Document, BodyId, FeatureId) {
     );
     doc.add_feature(
         "Round",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 2.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 2.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
     );
     (doc, BodyId::of(f), f)
 }
@@ -92,7 +92,7 @@ fn failing_feature_is_isolated() {
     let (mut doc, body, _) = block_doc();
     let bad = doc.add_feature(
         "Huge fillet",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 50.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 50.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
     );
     let ok = doc.add_feature(
         "Shell",
@@ -315,4 +315,26 @@ fn shell_without_open_faces_is_closed_hollow() {
         FeatureStatus::Error(e) => assert!(e.contains("no open faces"), "{e}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// The fillet `setback` flag was removed (OpenCascade has no setback vertex blend):
+/// documents saved with it, on or off, still load and regenerate, and saving drops it.
+#[test]
+fn old_fillet_setback_flag_still_loads() {
+    let (mut doc, _, _) = block_doc();
+    doc.add_feature(
+        "Round",
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 0.5.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
+    );
+    let json = doc.data.to_json().unwrap();
+    assert!(!json.contains("setback"));
+    let old = json.replace("\"skipped\": []", "\"setback\": true,\n          \"skipped\": []");
+    assert!(old.contains("\"setback\": true"), "fixture edit failed");
+    let data = DocData::from_json(&old).unwrap();
+    assert_eq!(data, doc.data);
+    let mut loaded = Document::new("x");
+    loaded.data = data;
+    let r = loaded.regenerate();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    assert!(r.reports.iter().all(|x| matches!(x.status, FeatureStatus::Ok)), "{:?}", r.reports.iter().map(|x| &x.status).collect::<Vec<_>>());
 }

@@ -105,7 +105,7 @@ fn patterned_holes_get_fits_and_teardrops() {
     assert!(out.errors().is_empty(), "{:?}", out.errors());
     assert_eq!(out.process.teardropped.len(), 3, "{:?}", out.process);
     // a fillet whose selector picks over the whole body has no copy of its own
-    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
+    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() });
     let bad = doc.add_feature("Bad", FeatureKind::Pattern { source: PatternSource::Features(vec![fillet]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 5.0.into(), count: Expr::from(2) } });
     assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("parallel to a direction over the whole body")), "{:?}", doc.regenerate().report(bad));
 }

@@ -11,9 +11,15 @@
 //!    first), re-resolving remaining edges on the new shape after every step.
 //! 4. A chain that still fails: **binary-search** its largest workable size
 //!    (reported; applied only with `auto_reduce`), then try its edges one by one,
-//!    searching a maximum for each edge that still fails.
+//!    searching a maximum for each edge that still fails. If some chains failed
+//!    while others went through, run once more with the failed chains first and
+//!    keep the run that applied more edges (fillets meeting at a corner).
 //! 5. Every intermediate result is validated (`BRepCheck_Analyzer`, ShapeFix on
-//!    failure) by the shim, so the returned shape is always valid.
+//!    failure) by the shim, so the returned shape is always valid; a result that
+//!    lost a solid (a size that ate through a hole or wall) counts as a failure.
+//!
+//! Smooth edges (two faces meeting tangentially: the kernel refuses them) are
+//! reported as [`EdgeStatus::Smooth`] up front and kept out of every kernel call.
 //!
 //! Partial success is not an error: you get the best valid shape plus a
 //! [`DressUpReport`] saying what happened to every requested edge.
@@ -44,11 +50,15 @@ pub enum EdgeStatus {
     /// Not applied. `max_size` is the largest size found to work, if any — the UI can
     /// offer "Apply 1.8 / Skip edge".
     Failed { reason: String, max_size: Option<f64> },
+    /// Nothing to do: the edge's two faces already meet tangentially (a fillet's own
+    /// boundary, a face split in two). Not applied, but not a failure either.
+    Smooth,
 }
 
 impl EdgeStatus {
+    /// A fillet / chamfer was built on the edge (at its size or reduced).
     pub fn is_applied(&self) -> bool {
-        !matches!(self, EdgeStatus::Failed { .. })
+        matches!(self, EdgeStatus::Applied | EdgeStatus::AppliedReduced { .. })
     }
 }
 
@@ -79,8 +89,9 @@ impl DressUpReport {
     pub fn applied_count(&self) -> usize {
         self.outcomes.iter().filter(|o| o.status.is_applied()).count()
     }
+    /// Every edge applied at its size (smooth edges, which need nothing, included).
     pub fn all_applied(&self) -> bool {
-        self.outcomes.iter().all(|o| o.status == EdgeStatus::Applied)
+        self.outcomes.iter().all(|o| matches!(o.status, EdgeStatus::Applied | EdgeStatus::Smooth))
     }
     /// e.g. "3 of 4 edges done · edge 7 maxes out at 1.80 mm".
     pub fn summary(&self) -> String {
@@ -88,6 +99,7 @@ impl DressUpReport {
         for o in &self.outcomes {
             match &o.status {
                 EdgeStatus::Applied => {}
+                EdgeStatus::Smooth => s += &format!(" · edge {} already smooth", o.edge),
                 EdgeStatus::AppliedReduced { applied, .. } => {
                     s += &format!(" · edge {} reduced to {:.2} mm", o.edge, applied)
                 }
@@ -157,15 +169,25 @@ struct Item {
 
 const MATCH_TOL: f64 = 1e-3;
 
-fn apply(kind: DressUpKind, s: &Shape, edges: &[u32], sizes: &[f64]) -> Result<Shape> {
-    let r = match kind {
-        DressUpKind::Fillet => s.fillet_raw(edges, sizes)?,
-        DressUpKind::Chamfer => s.chamfer_raw(edges, sizes)?,
-    };
-    if !r.is_valid() {
-        return Err(crate::Error("result is not a valid solid".into()));
+/// An edge whose two sides meet tangentially (a fillet's own boundary, a face split
+/// in two, the seam of a cylinder): no fillet or chamfer can take it.
+fn smooth(s: &Shape, info: &crate::EdgeInfo) -> bool {
+    match info.faces.as_slice() {
+        // a seam: one face on both sides
+        [_] => true,
+        [a, b] if a == b => true,
+        [_, _] => s.edge_convexity(info.index).is_ok_and(|c| c == 0),
+        _ => false,
     }
-    Ok(r)
+}
+
+fn apply(kind: DressUpKind, s: &Shape, edges: &[u32], sizes: &[f64]) -> Result<Shape> {
+    // the shim checks every fillet/chamfer result (BRepCheck, ShapeFix on failure)
+    // and errors when it stays invalid: no second check here
+    match kind {
+        DressUpKind::Fillet => s.fillet_raw(edges, sizes),
+        DressUpKind::Chamfer => s.chamfer_raw(edges, sizes),
+    }
 }
 
 /// Resolve items on `s`; dedupes edges, keeping the first size.
@@ -230,6 +252,9 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
     let mut items: Vec<Item> = Vec::new();
     for (k, &(e, size, reduce)) in edges.iter().enumerate() {
         match infos.get(e as usize) {
+            // the kernel refuses these ("no suitable edges"); say why, and keep them
+            // out of every attempt so the rest still goes through in one call
+            Some(info) if smooth(shape, info) => statuses[k] = Some(EdgeStatus::Smooth),
             Some(info) if size > 0.0 => {
                 items.push(Item { key: EdgeKey { point: info.midpoint, tangent: info.tangent }, size, request: Some(k), reduce })
             }
@@ -240,11 +265,11 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
 
     // 0. Fast path: everything at once on the input as it is (no healing, no chain
     // analysis). Most requests succeed here; the ladder below is for the rest.
-    if statuses.iter().all(|s| s.is_none()) {
+    if statuses.iter().any(|s| s.is_none()) {
         let mut idx: Vec<u32> = Vec::new();
         let mut sizes = Vec::new();
-        for &(e, size, _) in edges {
-            if !idx.contains(&e) {
+        for (k, &(e, size, _)) in edges.iter().enumerate() {
+            if statuses[k].is_none() && !idx.contains(&e) {
                 idx.push(e);
                 sizes.push(size);
             }
@@ -261,7 +286,8 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
                     groups.push(c);
                     groups.len() - 1
                 });
-                report.outcomes.push(EdgeOutcome { request: k, edge: e, chain: g, status: EdgeStatus::Applied });
+                let status = statuses[k].clone().unwrap_or(EdgeStatus::Applied);
+                report.outcomes.push(EdgeOutcome { request: k, edge: e, chain: g, status });
             }
             if opts.expand_tangent_chains {
                 let infos = shape.edges().unwrap_or_default();
@@ -342,7 +368,6 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
     }
 
     if !done {
-        report.strategy = Strategy::ByChains;
         // Order: convex chains first, then larger sizes first.
         let mut order: Vec<(i32, f64, usize)> = groups
             .iter()
@@ -358,81 +383,32 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
             })
             .collect();
         order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
-
-        for &(_, _, g) in &order {
-            let group: Vec<&Item> = groups[g].1.iter().collect();
-            let (idx, sizes, found) = resolve(&cur, &group)?;
-            for (it, f) in group.iter().zip(&found) {
-                if !f {
-                    set_status(
-                        &mut statuses,
-                        it,
-                        EdgeStatus::Failed { reason: "edge consumed by an earlier step".into(), max_size: None },
-                    );
-                }
-            }
-            if idx.is_empty() {
-                continue;
-            }
-            match apply(kind, &cur, &idx, &sizes) {
-                Ok(r) => {
-                    cur = r;
-                    for it in &group {
-                        set_status(&mut statuses, it, EdgeStatus::Applied);
-                    }
-                    continue;
-                }
-                Err(_) if group.len() == 1 => {}
-                Err(_) => {
-                    // 4a. Whole-chain max (reported, or applied with auto_reduce).
-                    if group.iter().all(|it| it.reduce) {
-                        if let Some((f, r)) = search_max(kind, &cur, &group, opts)? {
-                            cur = r;
-                            for it in &group {
-                                set_status(
-                                    &mut statuses,
-                                    it,
-                                    EdgeStatus::AppliedReduced { requested: it.size, applied: it.size * f },
-                                );
-                            }
-                            report.strategy = report.strategy.max(Strategy::Individual);
-                            continue;
-                        }
-                    }
-                }
-            }
-            // 4b. Edge by edge.
-            report.strategy = report.strategy.max(Strategy::Individual);
-            for it in &group {
-                let (idx, sizes, found) = resolve(&cur, &[it])?;
-                if !found[0] {
-                    set_status(
-                        &mut statuses,
-                        it,
-                        EdgeStatus::Failed { reason: "edge consumed by an earlier step".into(), max_size: None },
-                    );
-                    continue;
-                }
-                let err = match apply(kind, &cur, &idx, &sizes) {
-                    Ok(r) => {
-                        cur = r;
-                        set_status(&mut statuses, it, EdgeStatus::Applied);
-                        continue;
-                    }
-                    Err(e) => e.0,
+        let order: Vec<usize> = order.into_iter().map(|o| o.2).collect();
+        let (start, before) = (cur.clone(), statuses.clone());
+        let mut strategy = Strategy::ByChains;
+        cur = by_chains(kind, &start, &groups, &order, opts, &mut statuses, &mut strategy)?;
+        // 4c. A chain can fail only because of what was applied before it (two
+        // fillets meeting at a corner, one eating the other's face). Once, retry with
+        // the failed chains first; keep whichever run applied more edges.
+        let failed = |st: &[Option<EdgeStatus>], g: usize| groups[g].1.iter().any(|it| it.request.is_some_and(|k| matches!(st[k], Some(EdgeStatus::Failed { .. }))));
+        let (first, rest): (Vec<usize>, Vec<usize>) = order.iter().partition(|&&g| failed(&statuses, g));
+        if !first.is_empty() && !rest.is_empty() {
+            let mut st2 = before;
+            let mut strategy2 = Strategy::ByChains;
+            let order2: Vec<usize> = first.into_iter().chain(rest).collect();
+            if let Ok(c2) = by_chains(kind, &start, &groups, &order2, opts, &mut st2, &mut strategy2) {
+                let score = |st: &[Option<EdgeStatus>]| {
+                    let n = |f: fn(&EdgeStatus) -> bool| st.iter().filter(|s| s.as_ref().is_some_and(f)).count();
+                    (n(|s| s.is_applied()), n(|s| *s == EdgeStatus::Applied))
                 };
-                match search_max(kind, &cur, &[it], opts)? {
-                    Some((f, r)) if it.reduce => {
-                        cur = r;
-                        set_status(&mut statuses, it, EdgeStatus::AppliedReduced { requested: it.size, applied: it.size * f });
-                    }
-                    Some((f, _)) => {
-                        set_status(&mut statuses, it, EdgeStatus::Failed { reason: err, max_size: Some(it.size * f) })
-                    }
-                    None => set_status(&mut statuses, it, EdgeStatus::Failed { reason: err, max_size: None }),
+                if score(&st2) > score(&statuses) {
+                    cur = c2;
+                    statuses = st2;
+                    strategy = strategy2;
                 }
             }
         }
+        report.strategy = strategy;
         if statuses.iter().all(|s| !matches!(s, Some(st) if st.is_applied())) {
             report.strategy = Strategy::None;
         }
@@ -459,4 +435,101 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &Dres
         });
     }
     Ok((cur, report))
+}
+
+/// Step 3/4 of the ladder: apply the chain `groups` one by one in `order` on `start`
+/// (reducing or going edge by edge where a chain fails), recording each request's
+/// outcome in `statuses`. Returns the shape reached.
+fn by_chains(
+    kind: DressUpKind,
+    start: &Shape,
+    groups: &[(u32, Vec<Item>)],
+    order: &[usize],
+    opts: &DressUpOptions,
+    statuses: &mut [Option<EdgeStatus>],
+    strategy: &mut Strategy,
+) -> Result<Shape> {
+    let set_status = |statuses: &mut [Option<EdgeStatus>], it: &Item, st: EdgeStatus| {
+        if let Some(k) = it.request {
+            if statuses[k].is_none() {
+                statuses[k] = Some(st);
+            }
+        }
+    };
+    let mut cur = start.clone();
+    for &g in order {
+            let group: Vec<&Item> = groups[g].1.iter().collect();
+            let (idx, sizes, found) = resolve(&cur, &group)?;
+            for (it, f) in group.iter().zip(&found) {
+                if !f {
+                    set_status(
+                        statuses,
+                        it,
+                        EdgeStatus::Failed { reason: "edge consumed by an earlier step".into(), max_size: None },
+                    );
+                }
+            }
+            if idx.is_empty() {
+                continue;
+            }
+            match apply(kind, &cur, &idx, &sizes) {
+                Ok(r) => {
+                    cur = r;
+                    for it in &group {
+                        set_status(statuses, it, EdgeStatus::Applied);
+                    }
+                    continue;
+                }
+                Err(_) if group.len() == 1 => {}
+                Err(_) => {
+                    // 4a. Whole-chain max (reported, or applied with auto_reduce).
+                    if group.iter().all(|it| it.reduce) {
+                        if let Some((f, r)) = search_max(kind, &cur, &group, opts)? {
+                            cur = r;
+                            for it in &group {
+                                set_status(
+                                    statuses,
+                                    it,
+                                    EdgeStatus::AppliedReduced { requested: it.size, applied: it.size * f },
+                                );
+                            }
+                            *strategy = (*strategy).max(Strategy::Individual);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // 4b. Edge by edge.
+            *strategy = (*strategy).max(Strategy::Individual);
+            for it in &group {
+                let (idx, sizes, found) = resolve(&cur, &[it])?;
+                if !found[0] {
+                    set_status(
+                        statuses,
+                        it,
+                        EdgeStatus::Failed { reason: "edge consumed by an earlier step".into(), max_size: None },
+                    );
+                    continue;
+                }
+                let err = match apply(kind, &cur, &idx, &sizes) {
+                    Ok(r) => {
+                        cur = r;
+                        set_status(statuses, it, EdgeStatus::Applied);
+                        continue;
+                    }
+                    Err(e) => e.0,
+                };
+                match search_max(kind, &cur, &[it], opts)? {
+                    Some((f, r)) if it.reduce => {
+                        cur = r;
+                        set_status(statuses, it, EdgeStatus::AppliedReduced { requested: it.size, applied: it.size * f });
+                    }
+                    Some((f, _)) => {
+                        set_status(statuses, it, EdgeStatus::Failed { reason: err, max_size: Some(it.size * f) })
+                    }
+                    None => set_status(statuses, it, EdgeStatus::Failed { reason: err, max_size: None }),
+                }
+            }
+        }
+    Ok(cur)
 }

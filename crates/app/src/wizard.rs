@@ -364,7 +364,6 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
             auto_reduce: true,
             sets: Vec::new(),
             skipped: Vec::new(),
-            setback: false,
         },
     );
     // 4. closed shell
