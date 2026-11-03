@@ -323,6 +323,7 @@ pub fn sensor_node() -> Document {
             draft_deg: "0".into(),
             flip: false,
             body: Some(base),
+            extent: Default::default(),
         },
     );
     doc.add_feature(

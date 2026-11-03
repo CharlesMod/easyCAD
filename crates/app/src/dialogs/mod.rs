@@ -867,6 +867,7 @@ impl Dialog {
                 draft_deg: r.draft.expr(None),
                 flip: r.flip,
                 body: None,
+                extent: Default::default(),
             }),
             Body::Pattern(p) => {
                 if p.features.is_empty() {

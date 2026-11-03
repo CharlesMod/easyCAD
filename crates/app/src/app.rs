@@ -335,6 +335,13 @@ impl CaseworkApp {
                 self.stack.clear();
                 self.model = Some(Arc::new(out));
             }
+            Purpose::Drawing => {
+                if let Mode::Drawing(d) = &mut self.mode {
+                    if out.drawing.is_some() {
+                        d.result = out.drawing.clone();
+                    }
+                }
+            }
             Purpose::Preview => {
                 if self.dialog.is_some() {
                     let out = Arc::new(out);

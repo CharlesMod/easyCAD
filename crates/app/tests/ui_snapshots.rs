@@ -15,6 +15,13 @@ use casework_app::CaseworkApp;
 use egui_kittest::Harness;
 use glam::Vec3;
 
+/// The tests share one GPU (lavapipe) and the OCCT kernel; run them one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 const W: f32 = 1440.0;
 const H: f32 = 900.0;
 
@@ -95,6 +102,7 @@ fn screen_of(h: &Harness<'static, CaseworkApp>, p: Vec3) -> egui::Pos2 {
 
 #[test]
 fn main_screen() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     {
         let app = h.state_mut();
@@ -142,6 +150,7 @@ fn main_screen() {
 
 #[test]
 fn view_cube_corner_highlight() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     h.state_mut().cube_hover = Some(CubeRegion([1, -1, 1]));
     h.run_steps(2);
@@ -169,6 +178,7 @@ fn view_cube_corner_highlight() {
 
 #[test]
 fn pick_stack_popover() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     {
         let app = h.state_mut();
@@ -197,8 +207,8 @@ fn pick_stack_popover() {
             .find(|f| {
                 f.kind == casework_model::occt::SurfaceKind::Cylinder
                     && (f.radius - 1.25).abs() < 0.2
-                    && f.centroid.x > 0.0
-                    && f.centroid.y < 0.0
+                    && f.centroid.x < 0.0
+                    && f.centroid.y > 0.0
             })
             .expect("standoff bore");
         let c = hole.axis.unwrap().0;
@@ -231,6 +241,7 @@ fn pick_stack_popover() {
 
 #[test]
 fn fillet_dialog_with_reduced_radius_report() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     {
         let app = h.state_mut();
@@ -307,6 +318,7 @@ fn fillet_dialog_with_reduced_radius_report() {
 
 #[test]
 fn sketch_mode_dxf_offset() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     {
         let app = h.state_mut();
@@ -338,6 +350,7 @@ fn sketch_mode_dxf_offset() {
 
 #[test]
 fn process_panel_and_fit_chips() {
+    let _serial = serial();
     let mut doc = casework_app::sample::sensor_node();
     doc.set_active_profile("FDM 0.4 generic").unwrap();
     let mut h = harness(doc);
@@ -354,6 +367,7 @@ fn process_panel_and_fit_chips() {
 
 #[test]
 fn parts_joint_drawing_screens() {
+    let _serial = serial();
     let mut h = harness(casework_app::sample::sensor_node());
     {
         let app = h.state_mut();
@@ -396,12 +410,100 @@ fn parts_joint_drawing_screens() {
         app.close_dialog(false);
         app.mode = casework_app::app::Mode::Drawing(Box::default());
     }
-    h.run_steps(4);
+}
+
+#[test]
+fn drawing_sheet_with_views_and_dimensions() {
+    let _serial = serial();
+    use casework_model::drawing::*;
+    let mut h = harness(casework_app::sample::sensor_node());
+    h.state_mut().mode = casework_app::app::Mode::Drawing(Box::default());
+    settle(&mut h);
+    {
+        let app = h.state();
+        let casework_app::app::Mode::Drawing(d) = &app.mode else {
+            panic!()
+        };
+        let r = d.result.as_ref().expect("drawing computed");
+        assert_eq!(r.views.len(), 4);
+        assert!(
+            r.views.iter().all(|v| !v.edges.is_empty()),
+            "every view has HLR edges"
+        );
+        let ok = r
+            .annotations
+            .iter()
+            .filter(|a| a.status == AnnotationStatus::Ok)
+            .count();
+        assert!(
+            ok >= 3,
+            "dimensions resolve: {:?}",
+            r.annotations
+                .iter()
+                .map(|a| (&a.text, &a.status))
+                .collect::<Vec<_>>()
+        );
+    }
+    // a dimension whose edge no longer exists stays, shown orange as dangling
+    {
+        let app = h.state_mut();
+        let base = app
+            .model
+            .as_ref()
+            .unwrap()
+            .bodies
+            .iter()
+            .find(|b| b.body.name == "Base")
+            .unwrap()
+            .body
+            .id;
+        let now = app.now;
+        let casework_app::app::Mode::Drawing(d) = &mut app.mode else {
+            panic!()
+        };
+        let dr = d.draft.as_mut().unwrap();
+        let front = dr.views[1].id;
+        let gone = casework_model::select::EdgeSelector::Hint {
+            midpoint: glam::DVec3::new(0.0, -80.0, 50.0),
+            tangent: glam::DVec3::X,
+            kind: None,
+        };
+        dr.annotate(AnnotationKind::Linear {
+            view: front,
+            a: DimRef::Edge {
+                body: base,
+                edge: gone,
+            },
+            b: None,
+            kind: LinearKind::Horizontal,
+            offset: 30.0,
+        });
+        d.dirty_at = Some(now);
+        d.edit_gen += 1;
+    }
+    settle(&mut h);
+    {
+        let app = h.state();
+        let casework_app::app::Mode::Drawing(d) = &app.mode else {
+            panic!()
+        };
+        let r = d.result.as_ref().unwrap();
+        assert!(r
+            .annotations
+            .iter()
+            .any(|a| matches!(a.status, AnnotationStatus::Dangling(_))));
+    }
     save(&mut h, "drawing");
 }
 
 #[test]
 fn new_document_prompt() {
+    let _serial = serial();
+    // keep the "last used profile" setting out of the real config dir
+    std::env::set_var(
+        "XDG_CONFIG_HOME",
+        std::env::temp_dir().join("casework-test-config"),
+    );
     let mut h = harness(casework_app::sample::sensor_node());
     h.state_mut().new_doc_prompt = Some(("bracket".into(), "FDM 0.4 generic".into()));
     h.run_steps(3);

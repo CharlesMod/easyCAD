@@ -163,25 +163,22 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                         return;
                     }
                     Mode::Drawing(d) => {
+                        let name = d
+                            .draft
+                            .as_ref()
+                            .map(|x| x.name.clone())
+                            .unwrap_or_else(|| "Sheet 1".into());
                         chip(
                             ui,
-                            &format!("Drawing · Sheet 1 · {}", d.sheet_label()),
+                            &format!("Drawing · {name} · {}", d.sheet_label()),
                             theme::hex(0x2a2f37),
                         );
                         let mut back = false;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             back = widgets::button(ui, "Back to model").clicked();
-                            for f in ["SVG", "DXF", "Export PDF"] {
-                                ui.add_enabled(
-                                    false,
-                                    egui::Button::new(RichText::new(f).size(12.0)),
-                                )
-                                .on_disabled_hover_text(
-                                    "Drawing export needs the engine's 2D drawings (phase 2).",
-                                );
-                            }
                         });
                         if back {
+                            let _ = crate::ui_drawing::commit_now(app);
                             app.mode = Mode::Model;
                         }
                         return;

@@ -2534,9 +2534,13 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
 fn entity_mid(s: &Sketch, e: EntityId) -> Option<DVec2> {
     match s.entities.get(e.0 as usize)?.geom {
         Geom::Line { a, b } => Some((s.point(a) + s.point(b)) / 2.0),
-        Geom::Circle { center, radius } => {
-            Some(s.point(center) + DVec2::new(radius * std::f64::consts::FRAC_1_SQRT_2, radius * std::f64::consts::FRAC_1_SQRT_2))
-        }
+        Geom::Circle { center, radius } => Some(
+            s.point(center)
+                + DVec2::new(
+                    radius * std::f64::consts::FRAC_1_SQRT_2,
+                    radius * std::f64::consts::FRAC_1_SQRT_2,
+                ),
+        ),
         Geom::Arc { center, start, end } => {
             let pts = arc_points(s.point(center), s.point(start), s.point(end));
             pts.get(pts.len() / 2).copied()

@@ -22,6 +22,16 @@ pub enum Purpose {
     Model,
     /// A feature dialog's live preview.
     Preview,
+    /// A drawing sheet (HLR views + annotations) for the Drawing screen.
+    Drawing,
+}
+
+/// Serializes kernel-heavy work between the regen worker and background export
+/// threads (a crash was seen with several kernels running concurrently in tests).
+pub static KERNEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn kernel_lock() -> std::sync::MutexGuard<'static, ()> {
+    KERNEL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct Request {
@@ -33,6 +43,8 @@ pub struct Request {
     /// Also return the bodies after the first `n` features, for each `n` here
     /// (served from the cache; the fillet dialog maps report edges with them).
     pub prefixes: Vec<usize>,
+    /// For `Purpose::Drawing`: the (draft) drawing to compute.
+    pub drawing: Option<casework_model::drawing::Drawing>,
 }
 
 pub struct MeshedBody {
@@ -53,6 +65,7 @@ pub struct Output {
     pub picker: Arc<Picker>,
     pub bbox: Option<BBox>,
     pub prefix_bodies: HashMap<usize, Vec<Body>>,
+    pub drawing: Option<Arc<casework_model::drawing::DrawingResult>>,
     pub elapsed: Duration,
 }
 
@@ -98,6 +111,7 @@ fn pkey(p: Purpose) -> PurposeKey {
     PurposeKey(match p {
         Purpose::Model => 0,
         Purpose::Preview => 1,
+        Purpose::Drawing => 2,
     })
 }
 
@@ -127,18 +141,24 @@ impl Worker {
         library: Library,
         prefixes: Vec<usize>,
     ) -> u64 {
+        self.submit_full(Request {
+            id: 0,
+            purpose,
+            data,
+            blobs,
+            library,
+            prefixes,
+            drawing: None,
+        })
+    }
+
+    pub fn submit_full(&mut self, mut r: Request) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.pending.insert(pkey(purpose), id);
+        r.id = id;
+        self.pending.insert(pkey(r.purpose), id);
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Request {
-                id,
-                purpose,
-                data,
-                blobs,
-                library,
-                prefixes,
-            });
+            let _ = tx.send(r);
         }
         id
     }
@@ -195,6 +215,7 @@ impl Drop for Worker {
 
 fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
     let mut regen = Regenerator::default();
+    let mut dcache = casework_model::drawing::DrawingCache::default();
     while let Ok(mut req) = rx.recv() {
         // keep only the newest request of each purpose, model first
         let mut latest: Vec<Request> = Vec::new();
@@ -213,9 +234,9 @@ fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
             }
         }
         latest.push(req);
-        latest.sort_by_key(|r| r.purpose != Purpose::Model);
+        latest.sort_by_key(|r| r.purpose as u8);
         for r in latest {
-            let out = process(&mut regen, r);
+            let out = process(&mut regen, &mut dcache, r);
             if tx.send(out).is_err() {
                 return;
             }
@@ -224,9 +245,23 @@ fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
     }
 }
 
-fn process(regen: &mut Regenerator, r: Request) -> Output {
+fn process(
+    regen: &mut Regenerator,
+    dcache: &mut casework_model::drawing::DrawingCache,
+    r: Request,
+) -> Output {
+    let _kernel = kernel_lock();
     let t0 = Instant::now();
     let result = regen.regenerate(&r.data, &r.blobs, &r.library);
+    let drawing = r.drawing.as_ref().map(|d| {
+        // BOM for balloons, from the document data alone
+        let mut tmp = casework_model::document::Document::new(&r.data.name);
+        tmp.data = r.data.clone();
+        let bom = tmp.bom();
+        Arc::new(casework_model::drawing::compute(
+            &r.data, &result, &bom, d, dcache,
+        ))
+    });
     let mut prefix_bodies = HashMap::new();
     for n in r.prefixes {
         let mut d = r.data.clone();
@@ -258,11 +293,15 @@ fn process(regen: &mut Regenerator, r: Request) -> Output {
             }
         })
         .collect();
-    let picker = Arc::new(Picker::new(
-        bodies
-            .iter()
-            .filter_map(|b| b.mesh.as_ref().map(|m| (b.body.id, &**m))),
-    ));
+    let picker = if r.purpose == Purpose::Drawing {
+        Arc::new(Picker::new(std::iter::empty()))
+    } else {
+        Arc::new(Picker::new(
+            bodies
+                .iter()
+                .filter_map(|b| b.mesh.as_ref().map(|m| (b.body.id, &**m))),
+        ))
+    };
     let mut bbox: Option<BBox> = None;
     for b in &bodies {
         if let Some(m) = &b.mesh {
@@ -287,6 +326,7 @@ fn process(regen: &mut Regenerator, r: Request) -> Output {
         picker,
         bbox,
         prefix_bodies,
+        drawing,
         elapsed: t0.elapsed(),
     }
 }

@@ -704,7 +704,10 @@ mod tests {
 
     #[test]
     fn fit_contains_sphere() {
-        let mut c = Camera { rot: iso_rot(), ..Camera::default() };
+        let mut c = Camera {
+            rot: iso_rot(),
+            ..Camera::default()
+        };
         c.fit_sphere(Vec3::new(5.0, 5.0, 5.0), 40.0, 0.5);
         // every point of the sphere's silhouette projects inside the viewport
         let size = Vec2::new(400.0, 800.0);
