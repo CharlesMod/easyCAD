@@ -83,6 +83,20 @@ pub mod bridge {
         edge_ids: Vec<u32>,
     }
 
+    /// Hidden-line result: polylines in the projector frame (x along `x_dir`,
+    /// y along `dir × x_dir`).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct HlrData {
+        /// x, y pairs.
+        pts: Vec<f64>,
+        /// Per polyline: start (in points), count.
+        ranges: Vec<u32>,
+        /// Per polyline: bit 0 visible; bits 1-2 kind (0 sharp, 1 smooth, 2 outline).
+        flags: Vec<u8>,
+        /// True if the exact algorithm failed and the polygonal one was used.
+        poly_fallback: bool,
+    }
+
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct BBox {
         min: V3,
@@ -174,6 +188,8 @@ pub mod bridge {
         fn face_edges(s: &Shape, face: u32) -> Result<Vec<u32>>;
         fn tessellate(s: &Shape, lin_defl: f64, ang_defl_rad: f64) -> Result<MeshData>;
 
+        /// Hidden-line removal looking along `-dir` (dir points to the viewer).
+        fn hlr(s: &Shape, dir: V3, x_dir: V3, exact: bool, defl: f64) -> Result<HlrData>;
         fn mass_props(s: &Shape) -> Result<MassProps>;
         fn bounding_box(s: &Shape) -> Result<BBox>;
 

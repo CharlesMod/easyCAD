@@ -102,6 +102,9 @@ pub struct DocData {
     /// Per-hole teardrop on/off overrides.
     #[serde(default)]
     pub teardrop_overrides: Vec<TeardropOverride>,
+    /// 2D drawings.
+    #[serde(default)]
+    pub drawings: Vec<crate::drawing::Drawing>,
     pub next_id: u32,
 }
 
@@ -123,6 +126,7 @@ impl DocData {
             build_orientation: BuildOrientation::default(),
             body_orientations: Vec::new(),
             teardrop_overrides: Vec::new(),
+            drawings: Vec::new(),
             next_id: 1,
         }
     }
@@ -150,6 +154,13 @@ impl DocData {
     /// Build orientation of a body (override or document default).
     pub fn orientation_of(&self, body: BodyId) -> BuildOrientation {
         self.body_orientations.iter().find(|o| o.body == body).map(|o| o.orientation).unwrap_or(self.build_orientation)
+    }
+
+    pub fn drawing(&self, id: crate::drawing::DrawingId) -> Option<&crate::drawing::Drawing> {
+        self.drawings.iter().find(|d| d.id == id)
+    }
+    pub fn drawing_mut(&mut self, id: crate::drawing::DrawingId) -> Option<&mut crate::drawing::Drawing> {
+        self.drawings.iter_mut().find(|d| d.id == id)
     }
 
     pub fn sketch(&self, id: SketchId) -> Option<&Sketch> {
@@ -302,6 +313,7 @@ pub struct Document {
     pub max_undo: usize,
     regen: Regenerator,
     last: Option<RegenResult>,
+    drawing_cache: crate::drawing::DrawingCache,
 }
 
 impl Document {
@@ -320,6 +332,7 @@ impl Document {
             max_undo: 500,
             regen: Regenerator::default(),
             last: None,
+            drawing_cache: crate::drawing::DrawingCache::default(),
         }
     }
 
@@ -543,6 +556,44 @@ impl Document {
             ExportFormat::Step => crate::export::write_step(&refs, path),
         };
         r.map_err(|e| DocError::Other(e.to_string()))
+    }
+
+    /// Add an empty drawing (undoable).
+    pub fn add_drawing(&mut self, name: &str, sheet: crate::drawing::Sheet) -> crate::drawing::DrawingId {
+        self.edit(&format!("Add drawing {name}"), |d| {
+            let id = crate::drawing::DrawingId(d.alloc());
+            d.drawings.push(crate::drawing::Drawing::new(id, name, sheet));
+            Ok::<_, DocError>(id)
+        })
+        .unwrap()
+    }
+
+    /// Undoable change to one drawing.
+    pub fn edit_drawing<T>(&mut self, id: crate::drawing::DrawingId, label: &str, f: impl FnOnce(&mut crate::drawing::Drawing) -> T) -> Result<T, DocError> {
+        self.edit(label, |d| d.drawing_mut(id).map(f).ok_or_else(|| DocError::Other("no such drawing".into())))
+    }
+
+    /// Regenerate and compute a drawing (views, annotations, title block).
+    pub fn drawing_result(&mut self, id: crate::drawing::DrawingId) -> Result<crate::drawing::DrawingResult, DocError> {
+        let drawing = self.data.drawing(id).cloned().ok_or_else(|| DocError::Other("no such drawing".into()))?;
+        let regen = self.regenerate().clone();
+        let bom = self.bom();
+        Ok(crate::drawing::compute(&self.data, &regen, &bom, &drawing, &mut self.drawing_cache))
+    }
+
+    /// Export a drawing as SVG, DXF or PDF (by extension of `path`).
+    pub fn export_drawing(&mut self, id: crate::drawing::DrawingId, path: &Path) -> Result<(), DocError> {
+        let r = self.drawing_result(id)?;
+        let d = self.data.drawing(id).unwrap();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let bytes = match ext.as_str() {
+            "svg" => crate::drawing::to_svg(&r, d).into_bytes(),
+            "dxf" => crate::drawing::to_dxf(&r, d).into_bytes(),
+            "pdf" => crate::drawing::to_pdf(&r, d),
+            other => return Err(DocError::Other(format!("unknown drawing format `{other}`"))),
+        };
+        std::fs::write(path, bytes)?;
+        Ok(())
     }
 
     /// Accept the best candidate of an `Unresolved` feature: replaces `old` by `new`

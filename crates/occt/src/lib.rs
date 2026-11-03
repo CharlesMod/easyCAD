@@ -138,6 +138,24 @@ impl BBox {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HlrKind {
+    /// A sharp model edge.
+    Sharp,
+    /// A smooth (tangent-continuous) model edge.
+    Smooth,
+    /// A silhouette of a curved surface (no model edge).
+    Outline,
+}
+
+/// One projected polyline of a hidden-line drawing (projector coordinates).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HlrEdge {
+    pub points: Vec<[f64; 2]>,
+    pub visible: bool,
+    pub kind: HlrKind,
+}
+
 /// Triangle mesh of a shape with per-triangle face ids and per-edge polylines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
@@ -519,6 +537,29 @@ impl Shape {
     /// Triangulate. `lin_defl` in mm (e.g. 0.05–0.2), `ang_defl_deg` (e.g. 15).
     pub fn tessellate(&self, lin_defl: f64, ang_defl_deg: f64) -> Result<Mesh> {
         Ok(raw::tessellate(self.r(), lin_defl, ang_defl_deg.to_radians())?.into())
+    }
+
+    /// Hidden-line projection. `dir` points from the model toward the viewer;
+    /// output x runs along `x_dir`, y along `dir × x_dir`. `exact` uses
+    /// HLRBRep_Algo (falls back to the polygonal algorithm on failure; the flag is
+    /// returned).
+    pub fn hlr(&self, dir: DVec3, x_dir: DVec3, exact: bool, defl: f64) -> Result<(Vec<HlrEdge>, bool)> {
+        let d = raw::hlr(self.r(), v3(dir), v3(x_dir), exact, defl)?;
+        let edges = d
+            .ranges
+            .chunks_exact(2)
+            .zip(d.flags.iter())
+            .map(|(r, f)| HlrEdge {
+                points: (r[0]..r[0] + r[1]).map(|i| [d.pts[2 * i as usize], d.pts[2 * i as usize + 1]]).collect(),
+                visible: f & 1 == 1,
+                kind: match (f >> 1) & 3 {
+                    0 => HlrKind::Sharp,
+                    1 => HlrKind::Smooth,
+                    _ => HlrKind::Outline,
+                },
+            })
+            .collect();
+        Ok((edges, d.poly_fallback))
     }
 
     pub fn volume(&self) -> Result<f64> {

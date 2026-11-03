@@ -13,6 +13,11 @@
 #include <vector>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <HLRAlgo_Projector.hxx>
+#include <HLRBRep_Algo.hxx>
+#include <HLRBRep_HLRToShape.hxx>
+#include <HLRBRep_PolyAlgo.hxx>
+#include <HLRBRep_PolyHLRToShape.hxx>
 #include <BRepAdaptor_Curve2d.hxx>
 #include <BRepAdaptor_CompCurve.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -1172,6 +1177,79 @@ MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad) {
     }
   }
   return md;
+}
+
+namespace {
+void hlrCollect(const TopoDS_Shape &c, bool visible, uint8_t kind, double defl, HlrData &out) {
+  if (c.IsNull()) return;
+  for (TopExp_Explorer ex(c, TopAbs_EDGE); ex.More(); ex.Next()) {
+    TopoDS_Edge e = TopoDS::Edge(ex.Current());
+    if (BRep_Tool::Degenerated(e)) continue;
+    try {
+      BRepAdaptor_Curve cv(e);
+      GCPnts_TangentialDeflection td(cv, 0.1, defl);
+      if (td.NbPoints() < 2) continue;
+      uint32_t start = static_cast<uint32_t>(out.pts.size() / 2);
+      for (int i = 1; i <= td.NbPoints(); ++i) {
+        gp_Pnt p = td.Value(i);
+        out.pts.push_back(p.X());
+        out.pts.push_back(p.Y());
+      }
+      out.ranges.push_back(start);
+      out.ranges.push_back(static_cast<uint32_t>(td.NbPoints()));
+      out.flags.push_back(static_cast<uint8_t>((visible ? 1 : 0) | (kind << 1)));
+    } catch (...) {
+    }
+  }
+}
+} // namespace
+
+HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl) {
+  requireShape(s, "hlr");
+  if (defl <= 0) fail("hlr: deflection must be positive");
+  gp_Ax2 ax(gp_Pnt(0, 0, 0), D(dir, "view direction"), D(x_dir, "view x direction"));
+  HLRAlgo_Projector proj(ax);
+  HlrData out;
+  bool done = false;
+  if (exact) {
+    try {
+      Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
+      algo->Add(s.s);
+      algo->Projector(proj);
+      algo->Update();
+      algo->Hide();
+      HLRBRep_HLRToShape h(algo);
+      hlrCollect(h.VCompound(), true, 0, defl, out);
+      hlrCollect(h.Rg1LineVCompound(), true, 1, defl, out);
+      hlrCollect(h.OutLineVCompound(), true, 2, defl, out);
+      hlrCollect(h.HCompound(), false, 0, defl, out);
+      hlrCollect(h.Rg1LineHCompound(), false, 1, defl, out);
+      hlrCollect(h.OutLineHCompound(), false, 2, defl, out);
+      done = !out.ranges.empty();
+    } catch (...) {
+      done = false;
+    }
+  }
+  if (!done) {
+    out = HlrData();
+    out.poly_fallback = exact;
+    {
+      std::lock_guard<std::mutex> lock(meshMutex());
+      BRepMesh_IncrementalMesh mesher(s.s, defl, Standard_False, 0.2, Standard_False);
+    }
+    Handle(HLRBRep_PolyAlgo) algo = new HLRBRep_PolyAlgo(s.s);
+    algo->Projector(proj);
+    algo->Update();
+    HLRBRep_PolyHLRToShape h;
+    h.Update(algo);
+    hlrCollect(h.VCompound(), true, 0, defl, out);
+    hlrCollect(h.Rg1LineVCompound(), true, 1, defl, out);
+    hlrCollect(h.OutLineVCompound(), true, 2, defl, out);
+    hlrCollect(h.HCompound(), false, 0, defl, out);
+    hlrCollect(h.Rg1LineHCompound(), false, 1, defl, out);
+    hlrCollect(h.OutLineHCompound(), false, 2, defl, out);
+  }
+  return out;
 }
 
 MassProps mass_props(const Shape &s) {

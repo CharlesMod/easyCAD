@@ -3,6 +3,7 @@
 //! kernel bridge.
 
 pub mod document;
+pub mod drawing;
 pub mod dxf;
 pub mod export;
 pub mod feature;

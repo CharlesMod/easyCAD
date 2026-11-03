@@ -222,6 +222,60 @@ without, planes near the floor or lid, and the O-ring and snap checks. Each kind
 must give two valid solids with no interference, watertight meshes, and the reported
 clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) of it.
 
+## 2D drawings (`drawing`)
+
+- `DocData.drawings: Vec<Drawing>`. A `Drawing { id, name, sheet, views, annotations }`
+  has `add_view` and `annotate`. Document helpers are `Document::add_drawing`,
+  `edit_drawing(id, label, |d| ..)` (undoable), `drawing_result(id) -> DrawingResult`
+  and `export_drawing(id, path)` (format by extension: `.svg`, `.dxf` or `.pdf`).
+- **Sheet:** `PaperSize::{A4..A0, AnsiA..AnsiE}` × `PaperOrientation` plus a margin.
+  The `TitleBlock` fields are templates using `{param}`, `{meta.key}`, `{doc.name}`,
+  `{doc.revision}` and `{sheet.scale}`. They are resolved live with
+  `drawing::substitute`, and so is note text.
+- **View:**
+  - `orientation` is `Face(CubeFace)` (front = `NegY`, top = `PosZ`),
+    `Iso(IsoCorner { x, y, z: ±1 })` or `Rotation(DQuat)`. The quaternion maps model
+    to view, with view +Z toward the viewer.
+  - Also `rotation_deg` (in-sheet), `scale`, `position` (the sheet mm the view's
+    bounding box is centred on), `hidden_lines`, `exact` (HLRBRep_Algo, or
+    PolyAlgo; the exact algorithm falls back to PolyAlgo automatically and reports
+    `poly_fallback`), `smooth_edges`, and `bodies` (empty = all solids).
+  - Projection uses `ViewFrame` (`sheet(p3)`, `local`, `sheet_dir`), and
+    `ViewOrientation::basis()` gives (toward viewer, right, up).
+- **HLR:** `occt::Shape::hlr(dir, x_dir, exact, defl)`. Each `ViewEdge` has sheet
+  points, a visible flag, a kind (`Sharp`, `Smooth` or `Outline`) and
+  `source: Option<(BodyId, edge index)>`. Sources are found by matching against
+  analytically projected model edges (lines, circles/arcs, mesh polylines for other
+  curves). When edges coincide in projection, visible output takes the frontmost
+  and hidden output the backmost. Results are cached per (body geometry,
+  orientation, algorithm) in the document.
+- **Annotations** (`AnnotationKind`) reference geometry by `(ViewId, DimRef)`, where
+  `DimRef::Edge { body, edge: EdgeSelector }` or `DimRef::Vertex { body, near }`.
+  The kinds are:
+  - linear `Horizontal`/`Vertical`/`Aligned` (two refs, or one straight edge);
+  - `Ordinate`;
+  - `Radius` / diameter (the circle must be face-on);
+  - `Angle` (two straight edges);
+  - `Chamfer` ("leg × angle°");
+  - `Note`;
+  - `Leader`;
+  - `Balloon` (numbered by the body's row in `Document::bom()`);
+  - `CenterMark`;
+  - `Centerline`;
+  - `PartingLine` (from a `PartingJoint`/`Split` feature's plane, which must be seen
+    edge-on).
+
+  Each `AnnotationResult` has `status` (`Ok` or `Dangling(reason)`), `value` (model
+  mm or degrees, already divided by the view scale), `text` and `prims` (polylines
+  with a `LineStyle`, circles, texts, arrows in sheet mm). Dangling annotations stay
+  in the document and recover if the geometry returns (e.g. on undo).
+  `text_override` replaces the shown text.
+- **Export:** `drawing::primitives(result, drawing)` gives everything to draw;
+  `to_svg` (mm viewBox), `to_dxf` (R12 LINE/CIRCLE/TEXT/SOLID on the layers
+  VISIBLE, HIDDEN, DIM, CENTER, PARTING, FRAME and TEXT, `$INSUNITS` = mm) and
+  `to_pdf` (one vector page via the `pdf-writer` crate, base-14 Helvetica with
+  WinAnsi for ⌀ ° ×). The GUI can render `DrawingResult` directly.
+
 ## Process profiles, fits, teardrops, build orientation
 
 - `process::ProcessProfile` has `name`, `kind` (`Fdm/Sla/Sls/Molded/Cnc`),
@@ -298,7 +352,9 @@ verified on load.
   entities are counted in `DxfDrawing::skipped`.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.
   Arc–arc tangency picks internal or external from the configuration at solve start.
-- 2D drawings are not implemented yet.
+- Drawings have no GD&T frames, projected/auxiliary view relationships, section views or
+  hatching. Dimension text placement is basic (no collision avoidance). PDF text
+  width is estimated.
 - Drafts that would shrink a convex corner radius below zero over the height now fail
   ("draft angle too large"); OCCT would otherwise build a degenerate cone.
 - `Shape::offset_solid` (hollowing by 3D offset) fails when the offset exceeds a
@@ -333,3 +389,7 @@ verified on load.
   - New `occt::Shape` methods: `section`, `offset_region`, `fill_holes`,
     `region_contains`, `outer_wire_length`, `outer_wire_point`, `offset_solid`.
   - `Shape::split` now returns kernel errors instead of silently returning `None`.
+- **Drawings.** New module `drawing`.
+  - `DocData.drawings` (serde-defaulted).
+  - New `Document::{add_drawing, edit_drawing, drawing_result, export_drawing}`.
+  - New `occt::Shape::hlr` with `occt::{HlrEdge, HlrKind}`.

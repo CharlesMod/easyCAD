@@ -259,3 +259,28 @@ fn planar_regions_section_offset() {
     let (p, t) = ring.outer_wire_point(0.0).unwrap();
     assert!((p.z - 10.0).abs() < 1e-9 && (t.length() - 1.0).abs() < 1e-9);
 }
+
+#[test]
+fn hlr_front_view_of_a_drilled_box() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let s = b.cut(&Shape::cylinder(DVec3::new(20.0, 15.0, -1.0), DVec3::Z, 4.0, 22.0).unwrap()).unwrap();
+    for exact in [true, false] {
+        // front view: viewer at -Y, x = +X, y = dir × x = +Z
+        let (edges, fb) = s.hlr(DVec3::NEG_Y, DVec3::X, exact, 0.01).unwrap();
+        assert!(!fb);
+        let vis: Vec<[f64; 2]> = edges.iter().filter(|e| e.visible).flat_map(|e| e.points.clone()).collect();
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for p in &vis {
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        assert!((lo[0] - 0.0).abs() < 1e-3 && (hi[0] - 40.0).abs() < 1e-3, "x {lo:?} {hi:?}");
+        assert!((lo[1] - 0.0).abs() < 1e-3 && (hi[1] - 20.0).abs() < 1e-3, "y {lo:?} {hi:?}");
+        // the hole is hidden in the front view: two hidden vertical lines at x = 16 and 24
+        let hid: Vec<_> = edges.iter().filter(|e| !e.visible).collect();
+        assert!(hid.iter().any(|e| e.points.iter().all(|p| (p[0] - 16.0).abs() < 1e-3)), "exact={exact}");
+        assert!(hid.iter().any(|e| e.points.iter().all(|p| (p[0] - 24.0).abs() < 1e-3)));
+    }
+}

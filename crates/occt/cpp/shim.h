@@ -51,6 +51,7 @@ struct EdgeInfo;
 struct MeshData;
 struct BBox;
 struct MassProps;
+struct HlrData;
 
 std::unique_ptr<Shape> shape_clone(const Shape &s);
 bool shape_is_null(const Shape &s);
@@ -101,6 +102,7 @@ rust::Vec<EdgeInfo> edges(const Shape &s);
 rust::Vec<uint32_t> face_edges(const Shape &s, uint32_t face);
 MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad);
 
+HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl);
 MassProps mass_props(const Shape &s);
 BBox bounding_box(const Shape &s);
 
