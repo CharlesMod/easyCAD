@@ -44,6 +44,26 @@ today (adapter or limitation) and what would replace it.
     bounding box threw on a degenerate offset surface; `bbox` now falls back. The
     closed shell is also validated (two shells, believable void) with a fallback.
 
+## Assemblies
+
+17. **Movable in-context components.** `split_to_components` makes Base / Lid with a
+    `ContextRef` resolved in the frame of the component's context occurrence, which is
+    its only occurrence; moving that occurrence (a mate, the gizmo) re-expresses the
+    master's half in the new frame, so it stays where it was in the world and a
+    hinge never opens. *Adapter:* `adapters::anchor_in_context` adds a hidden,
+    grounded, out-of-BOM "design position" occurrence of each inside the master and
+    sets it as `Component.context` (marked `meta["gui.anchor.<occ>"]`, hidden in the
+    tree and counts); the visible occurrence then moves. *Want:* a captured context
+    frame (`Component.context_frame: Option<Transform>`, set by
+    `split_to_components`), or `split_to_components` doing the anchoring itself.
+18. **Mate DOF for the jog.** The dialog's draft mate rides along with each model
+    request and the worker runs `assembly::solve_mates` first: fine. *Want:* the
+    free direction(s) of each solved mate (axis / plane in world) so the jog control
+    can draw them on the model, and joint limits (min/max angle) to stop a jog.
+19. **Interference volume for display.** `Interference` has the volume but not the
+    common solid, so the GUI tints the whole pair red (translucent). *Want:*
+    `Interference.common: Option<Shape>` (world frame) to draw the overlap itself.
+
 ## Sketch
 
 12. **Offset constraint.** The GUI's offset makes new geometry pinned by

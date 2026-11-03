@@ -61,7 +61,7 @@ fn kind_name(k: ProcessKind) -> &'static str {
 }
 
 fn commit_profile(app: &mut CaseworkApp, label: &str, p: ProcessProfile) {
-    crate::adapters::update_profile(&mut app.doc, label, p);
+    app.doc.update_profile(label, p);
     app.after_edit();
 }
 

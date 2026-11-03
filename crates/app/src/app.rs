@@ -1033,7 +1033,7 @@ impl CaseworkApp {
             if self.now >= t {
                 self.pending_profile = None;
                 let label = format!("Fit allowances ({})", p.name);
-                adapters::update_profile(&mut self.doc, &label, p);
+                self.doc.update_profile(&label, p);
                 self.after_edit();
             } else {
                 ui.ctx()
