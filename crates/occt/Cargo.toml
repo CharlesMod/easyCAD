@@ -1,0 +1,15 @@
+[package]
+name = "occt"
+description = "Narrow cxx bridge to the OpenCascade kernel for Casework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cxx = "1"
+glam = "0.29"
+thiserror = "2"
+
+[build-dependencies]
+cxx-build = "1"
+occt-sys = "7.8.1"

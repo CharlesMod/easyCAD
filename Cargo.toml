@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/occt", "crates/model", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,235 @@
+use occt::{dressup, CurveKind, DVec3, Edge, EdgeStatus, Frame, Shape, ShapeKind, Strategy, SurfaceKind};
+
+fn close(a: f64, b: f64, tol: f64) -> bool {
+    (a - b).abs() <= tol * b.abs().max(1.0)
+}
+
+fn rect_face(w: f64, h: f64) -> Shape {
+    let p = |x, y| DVec3::new(x, y, 0.0);
+    let outer = [
+        Edge::Line(p(0.0, 0.0), p(w, 0.0)),
+        Edge::Line(p(w, 0.0), p(w, h)),
+        Edge::Line(p(w, h), p(0.0, h)),
+        Edge::Line(p(0.0, h), p(0.0, 0.0)),
+    ];
+    Shape::face(&Frame::XY, &outer, &[]).unwrap()
+}
+
+#[test]
+fn box_volume_bbox_and_topology() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(10.0, 20.0, 30.0)).unwrap();
+    assert!(close(b.volume().unwrap(), 6000.0, 1e-9));
+    let bb = b.bbox().unwrap();
+    assert!((bb.max - DVec3::new(10.0, 20.0, 30.0)).length() < 1e-6);
+    let faces = b.faces().unwrap();
+    assert_eq!(faces.len(), 6);
+    assert!(faces.iter().all(|f| f.kind == SurfaceKind::Plane));
+    let top = faces.iter().find(|f| f.normal.z > 0.99).unwrap();
+    assert!(close(top.centroid.z, 30.0, 1e-9) && close(top.area, 200.0, 1e-9));
+    let edges = b.edges().unwrap();
+    assert_eq!(edges.len(), 12);
+    assert!(edges.iter().all(|e| e.kind == CurveKind::Line && e.faces.len() == 2));
+    assert_eq!(b.face_edges(top.index).unwrap().len(), 4);
+    assert!(b.is_valid());
+    assert_eq!(b.kind(), Some(ShapeKind::Solid));
+}
+
+#[test]
+fn face_with_hole_extrude_revolve() {
+    let p = |x, y| DVec3::new(x, y, 0.0);
+    let outer = [
+        Edge::Line(p(0.0, 0.0), p(20.0, 0.0)),
+        Edge::Arc3(p(20.0, 0.0), p(30.0, 10.0), p(20.0, 20.0)),
+        Edge::Line(p(20.0, 20.0), p(0.0, 20.0)),
+        Edge::Line(p(0.0, 20.0), p(0.0, 0.0)),
+    ];
+    let hole = vec![Edge::Circle { center: p(10.0, 10.0), normal: DVec3::Z, radius: 3.0 }];
+    let f = Shape::face(&Frame::XY, &outer, &[hole]).unwrap();
+    let area = 400.0 + std::f64::consts::PI * 50.0 - std::f64::consts::PI * 9.0;
+    assert!(close(f.area().unwrap(), area, 1e-6));
+    let s = f.extrude(DVec3::new(0.0, 0.0, 5.0)).unwrap();
+    assert!(close(s.volume().unwrap(), area * 5.0, 1e-6));
+    let sym = f.extrude_ext(&Frame::XY, DVec3::Z, 10.0, true, 0.0).unwrap();
+    let bb = sym.bbox().unwrap();
+    assert!(close(bb.min.z, -5.0, 1e-6) && close(bb.max.z, 5.0, 1e-6));
+    // revolve a 2x4 rectangle offset from the axis -> tube
+    let r = Shape::face(
+        &Frame { origin: DVec3::ZERO, x_dir: DVec3::X, normal: DVec3::NEG_Y },
+        &[
+            Edge::Line(DVec3::new(5.0, 0.0, 0.0), DVec3::new(7.0, 0.0, 0.0)),
+            Edge::Line(DVec3::new(7.0, 0.0, 0.0), DVec3::new(7.0, 0.0, 4.0)),
+            Edge::Line(DVec3::new(7.0, 0.0, 4.0), DVec3::new(5.0, 0.0, 4.0)),
+            Edge::Line(DVec3::new(5.0, 0.0, 4.0), DVec3::new(5.0, 0.0, 0.0)),
+        ],
+        &[],
+    )
+    .unwrap();
+    let tube = r.revolve(DVec3::ZERO, DVec3::Z, 360.0).unwrap();
+    assert!(close(tube.volume().unwrap(), std::f64::consts::PI * (49.0 - 25.0) * 4.0, 1e-6));
+}
+
+#[test]
+fn draft_extrude_tapers_inward() {
+    let f = rect_face(20.0, 20.0);
+    let s = f.extrude_ext(&Frame::XY, DVec3::Z, 10.0, false, 5.0).unwrap();
+    let v = s.volume().unwrap();
+    assert!(v < 4000.0 && v > 3000.0, "drafted volume {v}");
+    let bb = s.bbox().unwrap();
+    assert!(close(bb.size().x, 20.0, 1e-3), "base keeps its size: {:?}", bb);
+    // the top face shrinks by 2*10*tan(5deg)
+    let top = s.faces().unwrap().into_iter().find(|f| f.normal.z > 0.99).unwrap();
+    let side = 20.0 - 2.0 * 10.0 * 5f64.to_radians().tan();
+    assert!(close(top.area, side * side, 1e-3), "top {} vs {}", top.area, side * side);
+}
+
+#[test]
+fn booleans_patterns_mirror_split() {
+    let a = Shape::make_box(DVec3::ZERO, DVec3::splat(10.0)).unwrap();
+    let c = Shape::cylinder(DVec3::new(5.0, 5.0, -1.0), DVec3::Z, 2.0, 12.0).unwrap();
+    let cut = a.cut(&c).unwrap();
+    assert!(close(cut.volume().unwrap(), 1000.0 - std::f64::consts::PI * 40.0, 1e-6));
+    let common = a.common(&c).unwrap();
+    assert!(close(common.volume().unwrap(), std::f64::consts::PI * 40.0, 1e-6));
+    let fused = a.fuse(&Shape::make_box(DVec3::new(10.0, 0.0, 0.0), DVec3::splat(10.0)).unwrap()).unwrap().unify().unwrap();
+    assert!(close(fused.volume().unwrap(), 2000.0, 1e-9));
+    assert_eq!(fused.faces().unwrap().len(), 6, "unify merges coplanar faces");
+
+    let pin = Shape::cylinder(DVec3::new(20.0, 0.0, 0.0), DVec3::Z, 1.0, 1.0).unwrap();
+    let lin = pin.linear_pattern(DVec3::X, 5.0, 4).unwrap();
+    assert_eq!(lin.solids().unwrap().len(), 4);
+    let circ = pin.circular_pattern(DVec3::ZERO, DVec3::Z, 6, 360.0).unwrap();
+    assert!(close(circ.volume().unwrap(), 6.0 * std::f64::consts::PI, 1e-6));
+    let m = a.mirrored(DVec3::ZERO, DVec3::X).unwrap();
+    let bb = m.bbox().unwrap();
+    assert!(close(bb.min.x, -10.0, 1e-6) && close(m.volume().unwrap(), 1000.0, 1e-9));
+
+    let (below, above) = a.split(DVec3::new(0.0, 0.0, 7.0), DVec3::Z).unwrap();
+    assert!(close(below.unwrap().volume().unwrap(), 700.0, 1e-9));
+    assert!(close(above.unwrap().volume().unwrap(), 300.0, 1e-9));
+    let (below, above) = a.split(DVec3::new(0.0, 0.0, 70.0), DVec3::Z).unwrap();
+    assert!(below.is_some() && above.is_none());
+}
+
+#[test]
+fn shell_and_draft() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let top = b.faces().unwrap().into_iter().find(|f| f.normal.z > 0.99).unwrap().index;
+    let s = b.shell(&[top], 2.0, false).unwrap();
+    let inner = 36.0 * 26.0 * 18.0;
+    assert!(close(s.volume().unwrap(), 24000.0 - inner, 1e-6));
+    assert!(close(s.bbox().unwrap().size().x, 40.0, 1e-6));
+    let out = b.shell(&[top], 2.0, true).unwrap();
+    assert!(close(out.bbox().unwrap().size().x, 44.0, 1e-3));
+
+    let sides: Vec<u32> = b.faces().unwrap().iter().filter(|f| f.normal.z.abs() < 0.1).map(|f| f.index).collect();
+    let d = b.draft(&sides, DVec3::Z, 3.0, &Frame::XY).unwrap();
+    assert!(d.is_valid());
+    assert!((d.volume().unwrap() - 24000.0).abs() > 10.0);
+}
+
+#[test]
+fn fillet_chamfer_and_tangent_chains() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let vertical: Vec<u32> = b.edges().unwrap().iter().filter(|e| e.tangent.z.abs() > 0.99).map(|e| e.index).collect();
+    assert_eq!(vertical.len(), 4);
+    for e in &vertical {
+        assert_eq!(b.edge_convexity(*e).unwrap(), 1);
+    }
+    let req: Vec<(u32, f64)> = vertical.iter().map(|e| (*e, 5.0)).collect();
+    let (f, rep) = dressup::fillet(&b, &req, &Default::default()).unwrap();
+    assert!(rep.all_applied(), "{rep:?}");
+    assert_eq!(rep.strategy, Strategy::AllAtOnce);
+    let want = (1200.0 - (4.0 - std::f64::consts::PI) * 25.0) * 20.0;
+    assert!(close(f.volume().unwrap(), want, 1e-6));
+    // tangent chain: top edges of the filleted box form one loop
+    let chains = f.tangent_chains().unwrap();
+    let top_edges: Vec<u32> = f.edges().unwrap().iter().filter(|e| (e.midpoint.z - 20.0).abs() < 1e-6).map(|e| e.index).collect();
+    assert_eq!(top_edges.len(), 8);
+    assert!(top_edges.iter().all(|e| chains[*e as usize] == chains[top_edges[0] as usize]));
+    // filleting one top edge pulls in the whole chain
+    let (g, rep) = dressup::fillet(&f, &[(top_edges[0], 1.0)], &Default::default()).unwrap();
+    assert!(rep.all_applied() && rep.expanded_edges == 7, "{rep:?}");
+    assert!(g.is_valid());
+
+    let (c, rep) = dressup::chamfer(&b, &req, &Default::default()).unwrap();
+    assert!(rep.all_applied());
+    assert!(close(c.volume().unwrap(), (1200.0 - 4.0 * 12.5) * 20.0, 1e-6));
+}
+
+/// A ledge only 2 mm tall cannot take a 3 mm fillet on its outer top edge, but the
+/// main block's top edges can: the pipeline must apply what works and report the rest.
+#[test]
+fn fillet_fallback_partial_success() {
+    let main = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 40.0, 20.0)).unwrap();
+    let ledge = Shape::make_box(DVec3::new(40.0, 0.0, 0.0), DVec3::new(3.0, 40.0, 2.0)).unwrap();
+    let body = main.fuse(&ledge).unwrap();
+    let edges = body.edges().unwrap();
+    let pick = |p: DVec3| edges.iter().min_by(|a, b| a.midpoint.distance(p).total_cmp(&b.midpoint.distance(p))).unwrap().index;
+    let main_top = [pick(DVec3::new(20.0, 0.0, 20.0)), pick(DVec3::new(20.0, 40.0, 20.0)), pick(DVec3::new(0.0, 20.0, 20.0))];
+    let ledge_edge = pick(DVec3::new(43.0, 20.0, 2.0));
+    let mut req: Vec<(u32, f64)> = main_top.iter().map(|e| (*e, 3.0)).collect();
+    req.push((ledge_edge, 3.0));
+
+    // a plain all-at-once fillet refuses
+    let ids: Vec<u32> = req.iter().map(|r| r.0).collect();
+    assert!(body.fillet_raw(&ids, &[3.0; 4]).is_err());
+
+    let (out, rep) = dressup::fillet(&body, &req, &Default::default()).unwrap();
+    assert!(out.is_valid());
+    assert_eq!(rep.applied_count(), 3, "{rep:#?}");
+    assert!(rep.strategy >= Strategy::ByChains);
+    let failed = rep.outcomes.iter().find(|o| o.edge == ledge_edge).unwrap();
+    match &failed.status {
+        EdgeStatus::Failed { max_size: Some(m), .. } => assert!(*m > 1.0 && *m < 2.0, "max {m}"),
+        s => panic!("unexpected {s:?}"),
+    }
+    assert!(out.volume().unwrap() < body.volume().unwrap());
+    println!("{}", rep.summary());
+
+    // auto_reduce applies the largest workable radius
+    let opts = dressup::DressUpOptions { auto_reduce: true, ..Default::default() };
+    let (out2, rep2) = dressup::fillet(&body, &req, &opts).unwrap();
+    assert!(out2.is_valid());
+    assert_eq!(rep2.applied_count(), 4, "{rep2:#?}");
+    assert!(matches!(rep2.outcomes[3].status, EdgeStatus::AppliedReduced { applied, .. } if applied < 2.0));
+}
+
+#[test]
+fn errors_are_results_not_aborts() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::splat(10.0)).unwrap();
+    assert!(Shape::make_box(DVec3::ZERO, DVec3::new(0.0, 1.0, 1.0)).is_err());
+    assert!(b.fillet_raw(&[0], &[50.0]).is_err());
+    assert!(b.fillet_raw(&[999], &[1.0]).is_err());
+    assert!(b.shell(&[], 0.0, false).is_err());
+    assert!(Shape::read_step_str("not a step file").is_err());
+    let open = [Edge::Line(DVec3::ZERO, DVec3::X), Edge::Line(DVec3::X, DVec3::Y)];
+    assert!(Shape::face(&Frame::XY, &open, &[]).is_err());
+}
+
+#[test]
+fn tessellate_and_io_roundtrip() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::splat(10.0)).unwrap();
+    let c = Shape::cylinder(DVec3::new(5.0, 5.0, -1.0), DVec3::Z, 2.0, 12.0).unwrap();
+    let s = b.cut(&c).unwrap();
+    let m = s.tessellate(0.05, 10.0).unwrap();
+    assert!(m.indices.len() > 20);
+    assert_eq!(m.indices.len(), m.tri_face.len());
+    assert_eq!(m.positions.len(), m.normals.len());
+    let nf = s.faces().unwrap().len() as u32;
+    assert!(m.tri_face.iter().all(|f| *f < nf));
+    assert_eq!(m.edges.len(), s.edges().unwrap().len());
+
+    let dir = std::env::temp_dir().join(format!("occt-io-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let step = dir.join("t.step");
+    s.write_step(&step).unwrap();
+    let back = Shape::read_step(&step).unwrap();
+    assert!(close(back.volume().unwrap(), s.volume().unwrap(), 1e-6));
+    let txt = s.to_step_string().unwrap();
+    assert!(txt.starts_with("ISO-10303-21"));
+    assert!(close(Shape::read_step_str(&txt).unwrap().volume().unwrap(), s.volume().unwrap(), 1e-6));
+    let stl = dir.join("t.stl");
+    s.write_stl(&stl, 0.05, false).unwrap();
+    assert!(std::fs::metadata(&stl).unwrap().len() > 84);
+    std::fs::remove_dir_all(&dir).ok();
+}
