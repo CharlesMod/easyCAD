@@ -237,20 +237,26 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                     app.redo();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::hover());
-                    ui.painter().rect_stroke(
+                    let (r, resp) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::click());
+                    let hov = resp.hovered();
+                    ui.painter().rect(
                         r,
                         4.0,
-                        Stroke::new(1.0, theme::BORDER_INPUT),
+                        if hov { theme::HOVER } else { Color32::TRANSPARENT },
+                        Stroke::new(1.0, if hov { theme::BORDER_CARD } else { theme::BORDER_INPUT }),
                         egui::StrokeKind::Inside,
                     );
-                    ui.painter().text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "mm",
-                        theme::mono(12.0),
-                        theme::TEXT,
-                    );
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::units::label(), theme::mono(12.0), theme::TEXT);
+                    if resp
+                        .on_hover_text("Display units (click to switch mm / in). The document stays in mm; fields accept 0.125in, 1/8\", 3mm.")
+                        .clicked()
+                    {
+                        crate::units::set_inch(!crate::units::inch());
+                        let mut st = crate::settings::Settings::load();
+                        st.inch = crate::units::inch();
+                        st.save();
+                        app.cache.usage.clear();
+                    }
                     ui.label(RichText::new("Units").size(12.0).color(theme::TEXT_MUTED));
                 });
             });
@@ -861,7 +867,7 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
                         } else if !p.comment.is_empty() {
                             p.comment.clone()
                         } else if !literal {
-                            vals.get(&p.name).map(|v| format!("= {v:.2}")).unwrap_or_default()
+                            vals.get(&p.name).map(|v| format!("= {}", crate::units::len(*v))).unwrap_or_default()
                         } else {
                             String::new()
                         };
@@ -939,6 +945,8 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
 /// Literals shown with two decimals like the mock ("86.00"); expressions as typed.
 pub fn display_expr(e: &str) -> String {
     match e.trim().parse::<f64>() {
+        // literals are mm; in inch display mode say so (the note shows inches)
+        Ok(v) if crate::units::inch() => format!("{v:.2} mm"),
         Ok(v) => format!("{v:.2}"),
         Err(_) => e.to_string(),
     }
@@ -973,7 +981,7 @@ pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> St
     let ev = |e: &casework_model::params::Expr| {
         e.eval(&vals)
             .ok()
-            .map(crate::dialogs::fmt)
+            .map(crate::units::short)
             .unwrap_or_else(|| e.0.clone())
     };
     let name = &f.name;
@@ -1115,7 +1123,16 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                                         kind.label()
                                     ),
                                 };
-                                let r = r.on_hover_text(tip);
+                                let timing =
+                                    match app.model.as_ref().and_then(|m| m.result.report(*id)) {
+                                        Some(rep) if rep.cached => format!(
+                                            "\nRegen: cached (last computed in {:.0} ms)",
+                                            rep.elapsed_ms
+                                        ),
+                                        Some(rep) => format!("\nRegen: {:.0} ms", rep.elapsed_ms),
+                                        None => String::new(),
+                                    };
+                                let r = r.on_hover_text(format!("{tip}{timing}"));
                                 if r.double_clicked() {
                                     dbl = Some(*id);
                                 } else if r.clicked() {

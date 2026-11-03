@@ -14,7 +14,7 @@ use casework_model::feature::BodyId;
 use casework_model::library::Library;
 use casework_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
 use casework_model::pick::Picker;
-use casework_model::regen::{Body, RegenResult, Regenerator};
+use casework_model::regen::{Body, MeshQuality, RegenResult, Regenerator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
@@ -45,6 +45,16 @@ pub struct Request {
     pub prefixes: Vec<usize>,
     /// For `Purpose::Drawing`: the (draft) drawing to compute.
     pub drawing: Option<casework_model::drawing::Drawing>,
+    /// Tessellation level (`Preview` while dragging).
+    pub quality: MeshQuality,
+    /// Section plane (origin, normal, in-plane x) to cut every solid with (joint dialog).
+    pub section: Option<(glam::DVec3, glam::DVec3, glam::DVec3)>,
+}
+
+/// One solid's cut at the section plane, as triangles in plane coordinates.
+pub struct SectionCut {
+    pub body: BodyId,
+    pub tris: Vec<[glam::DVec2; 3]>,
 }
 
 pub struct MeshedBody {
@@ -52,6 +62,8 @@ pub struct MeshedBody {
     pub mesh: Option<Arc<Mesh>>,
     pub error: Option<String>,
     /// Topology of the shape (indices match the mesh's face / edge ids).
+    /// Per-vertex colours when the body carries an appearance (coloured STEP).
+    pub colors: Option<Arc<Vec<[f32; 3]>>>,
     pub faces: Vec<FaceInfo>,
     pub edges: Vec<EdgeInfo>,
 }
@@ -66,6 +78,8 @@ pub struct Output {
     pub bbox: Option<BBox>,
     pub prefix_bodies: HashMap<usize, Vec<Body>>,
     pub drawing: Option<Arc<casework_model::drawing::DrawingResult>>,
+    pub sections: Vec<SectionCut>,
+    pub quality: MeshQuality,
     pub elapsed: Duration,
 }
 
@@ -149,6 +163,8 @@ impl Worker {
             library,
             prefixes,
             drawing: None,
+            quality: MeshQuality::Display,
+            section: None,
         })
     }
 
@@ -275,11 +291,16 @@ fn process(
         .map(|b| {
             let faces = b.shape().faces().unwrap_or_default();
             let edges = b.shape().edges().unwrap_or_default();
-            match b.mesh() {
+            let colors = b
+                .appearance()
+                .and_then(|_| b.mesh_colors(r.quality).ok())
+                .map(Arc::new);
+            match b.mesh_quality(r.quality) {
                 Ok(m) => MeshedBody {
                     body: b.clone(),
                     mesh: Some(m),
                     error: None,
+                    colors,
                     faces,
                     edges,
                 },
@@ -287,12 +308,39 @@ fn process(
                     body: b.clone(),
                     mesh: None,
                     error: Some(e),
+                    colors: None,
                     faces,
                     edges,
                 },
             }
         })
         .collect();
+    let mut sections = Vec::new();
+    if let Some((o, n, x)) = r.section {
+        let y = n.cross(x);
+        for b in bodies.iter().filter(|b| !b.body.reference) {
+            let Ok(face) = b.body.shape().section(o, n) else {
+                continue;
+            };
+            let Ok(m) = face.tessellate(0.02, 5.0) else {
+                continue;
+            };
+            let p2 = |i: u32| {
+                let p = m.positions[i as usize];
+                let v = glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) - o;
+                glam::DVec2::new(v.dot(x), v.dot(y))
+            };
+            let tris = m
+                .indices
+                .iter()
+                .map(|t| [p2(t[0]), p2(t[1]), p2(t[2])])
+                .collect();
+            sections.push(SectionCut {
+                body: b.body.id,
+                tris,
+            });
+        }
+    }
     let picker = if r.purpose == Purpose::Drawing {
         Arc::new(Picker::new(std::iter::empty()))
     } else {
@@ -327,6 +375,8 @@ fn process(
         bbox,
         prefix_bodies,
         drawing,
+        sections,
+        quality: r.quality,
         elapsed: t0.elapsed(),
     }
 }

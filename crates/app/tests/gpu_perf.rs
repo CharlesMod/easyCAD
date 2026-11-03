@@ -73,6 +73,8 @@ fn orbit_frames_reuse_uploaded_mesh() {
                 mesh: mesh.clone(),
                 color: [0.7, 0.7, 0.7, 1.0],
                 translucent: false,
+                colors: None,
+                offset: Vec3::ZERO,
             }],
             highlights: Vec::new(),
             grid: None,

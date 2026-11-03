@@ -553,7 +553,7 @@ impl FilletD {
                 continue;
             }
             let r_txt = match crate::widgets::eval(&s.radius.text, cx.env.values) {
-                Ok(v) => format!("{v:.2}"),
+                Ok(v) => crate::units::len(v),
                 Err(_) => s.radius.text.clone(),
             };
             let failing: Vec<usize> = (0..s.edges.len())

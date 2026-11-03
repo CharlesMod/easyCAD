@@ -388,6 +388,8 @@ fn parts_joint_drawing_screens() {
     {
         let app = h.state_mut();
         app.mode = casework_app::app::Mode::Model;
+        // FDM profile so the fit chips show resolved values
+        app.doc.set_active_profile("FDM 0.4 generic").unwrap();
         // roll back to just before the plain split, then add a real parting joint there
         let split = app
             .doc
@@ -438,18 +440,18 @@ fn drawing_sheet_with_views_and_dimensions() {
             r.views.iter().all(|v| !v.edges.is_empty()),
             "every view has HLR edges"
         );
-        let ok = r
+        let bad: Vec<_> = r
             .annotations
             .iter()
-            .filter(|a| a.status == AnnotationStatus::Ok)
-            .count();
+            .filter(|a| a.status != AnnotationStatus::Ok)
+            .map(|a| (&a.text, &a.status))
+            .collect();
+        assert!(bad.is_empty(), "every default annotation resolves: {bad:?}");
+        assert!(r.annotations.len() >= 6);
         assert!(
-            ok >= 3,
-            "dimensions resolve: {:?}",
-            r.annotations
-                .iter()
-                .map(|a| (&a.text, &a.status))
-                .collect::<Vec<_>>()
+            r.title.iter().any(|(l, v)| l == "Rev" && v == "A"),
+            "title block revision is the user field: {:?}",
+            r.title
         );
     }
     // a dimension whose edge no longer exists stays, shown orange as dangling

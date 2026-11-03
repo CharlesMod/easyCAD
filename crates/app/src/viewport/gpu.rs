@@ -36,6 +36,10 @@ pub struct DrawBody {
     pub color: [f32; 4],
     /// Drawn translucent after the opaque bodies (references, ghosts).
     pub translucent: bool,
+    /// Per-vertex colours (imported STEP appearance), parallel to the mesh positions.
+    pub colors: Option<Arc<Vec<[f32; 3]>>>,
+    /// Display translation (exploded previews).
+    pub offset: Vec3,
 }
 
 #[derive(Clone)]
@@ -89,6 +93,7 @@ struct Globals {
 struct DrawUniform {
     color: [f32; 4],
     params: [f32; 4],
+    offset: [f32; 4],
 }
 
 struct GpuMesh {
@@ -226,9 +231,9 @@ impl ViewportGpu {
         });
 
         let mesh_vb = [Some(wgpu::VertexBufferLayout {
-            array_stride: 24,
+            array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
         })];
         let line_vb = [Some(wgpu::VertexBufferLayout {
             array_stride: 12,
@@ -431,17 +436,26 @@ impl ViewportGpu {
         self.meshes.len()
     }
 
-    fn upload(&mut self, device: &wgpu::Device, m: &Arc<Mesh>) {
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        m: &Arc<Mesh>,
+        colors: Option<&Arc<Vec<[f32; 3]>>>,
+    ) {
         let k = key(m);
         if let Some(g) = self.meshes.get_mut(&k) {
             g.last_used = self.frame;
             return;
         }
-        let mut verts: Vec<f32> = Vec::with_capacity(m.positions.len() * 6);
+        let mut verts: Vec<f32> = Vec::with_capacity(m.positions.len() * 9);
         for (i, p) in m.positions.iter().enumerate() {
             let n = m.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+            let c = colors
+                .and_then(|c| c.get(i).copied())
+                .unwrap_or([1.0, 1.0, 1.0]);
             verts.extend_from_slice(p);
             verts.extend_from_slice(&n);
+            verts.extend_from_slice(&c);
         }
         // triangles sorted by face → contiguous ranges
         let mut order: Vec<u32> = (0..m.indices.len() as u32).collect();
@@ -566,10 +580,10 @@ impl ViewportGpu {
         self.frame += 1;
         self.ensure_target(device, f.size_px);
         for b in &f.bodies {
-            self.upload(device, &b.mesh);
+            self.upload(device, &b.mesh, b.colors.as_ref());
         }
         for h in &f.highlights {
-            self.upload(device, &h.mesh);
+            self.upload(device, &h.mesh, None);
         }
         // evict meshes unused for a while (keeps undo/redo flips cheap)
         let frame = self.frame;
@@ -610,13 +624,28 @@ impl ViewportGpu {
         let u = |c: [f32; 4], lit: f32| DrawUniform {
             color: c,
             params: [lit, 0.0, 0.0, 0.0],
+            offset: [0.0; 4],
+        };
+        let ub = |b: &DrawBody, c: [f32; 4], lit: f32| DrawUniform {
+            color: c,
+            params: [
+                lit,
+                if b.colors.is_some() && lit > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+            ],
+            offset: [b.offset.x, b.offset.y, b.offset.z, 0.0],
         };
         let wire = f.mode == DisplayMode::Wireframe;
         for b in f.bodies.iter().filter(|b| !b.translucent) {
             if wire {
                 continue;
             }
-            list.push((P::Opaque, key(&b.mesh), What::All, u(b.color, 1.0)));
+            list.push((P::Opaque, key(&b.mesh), What::All, ub(b, b.color, 1.0)));
         }
         if f.mode != DisplayMode::Shaded {
             let ec = if wire {
@@ -630,7 +659,7 @@ impl ViewportGpu {
                 } else {
                     ec
                 };
-                list.push((P::Lines, key(&b.mesh), What::Edges, u(c, 0.0)));
+                list.push((P::Lines, key(&b.mesh), What::Edges, ub(b, c, 0.0)));
             }
         }
         if f.grid.is_some() {
@@ -638,11 +667,11 @@ impl ViewportGpu {
         }
         for b in &f.bodies {
             if b.translucent {
-                list.push((P::Blend, key(&b.mesh), What::All, u(b.color, 0.6)));
+                list.push((P::Blend, key(&b.mesh), What::All, ub(b, b.color, 0.6)));
             } else if wire {
                 let mut c = b.color;
                 c[3] = 0.06;
-                list.push((P::Blend, key(&b.mesh), What::All, u(c, 0.0)));
+                list.push((P::Blend, key(&b.mesh), What::All, ub(b, c, 0.0)));
             }
         }
         for h in &f.highlights {

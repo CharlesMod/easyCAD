@@ -14,8 +14,10 @@ struct Globals {
 
 struct Draw {
     color: vec4<f32>,
-    // x = lighting amount (0 flat .. 1 lit), y = unused
+    // x = lighting amount (0 flat .. 1 lit), y = use vertex colours
     params: vec4<f32>,
+    // xyz = translation (exploded previews)
+    offset: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> d: Draw;
 
@@ -35,14 +37,17 @@ struct MeshOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) world: vec3<f32>,
+    @location(2) vcolor: vec3<f32>,
 };
 
 @vertex
-fn vs_mesh(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>) -> MeshOut {
+fn vs_mesh(@location(0) p0: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec3<f32>) -> MeshOut {
     var o: MeshOut;
+    let p = p0 + d.offset.xyz;
     o.pos = g.view_proj * vec4<f32>(p, 1.0);
     o.normal = n;
     o.world = p;
+    o.vcolor = c;
     return o;
 }
 
@@ -56,7 +61,7 @@ fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
     if (dot(n, v) < 0.0) {
         n = -n;
     }
-    let base = to_lin(d.color.rgb);
+    let base = to_lin(mix(d.color.rgb, i.vcolor, d.params.y));
     let l = normalize(g.light.xyz);
     let diff = max(dot(n, l), 0.0);
     let fill = max(dot(n, v), 0.0);
@@ -70,7 +75,7 @@ fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
 
 @vertex
 fn vs_line(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return g.view_proj * vec4<f32>(p, 1.0);
+    return g.view_proj * vec4<f32>(p + d.offset.xyz, 1.0);
 }
 
 @fragment

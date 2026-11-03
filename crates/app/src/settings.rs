@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default)]
     pub last_profile: Option<String>,
+    /// Display lengths in inches.
+    #[serde(default)]
+    pub inch: bool,
 }
 
 fn path() -> Option<std::path::PathBuf> {

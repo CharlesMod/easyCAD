@@ -6,7 +6,12 @@ Desktop front end on eframe/egui 0.37 with the wgpu backend.
 cargo run -p casework --release              # empty document
 cargo run -p casework --release -- --sample  # the sensor-node enclosure
 cargo run -p casework --release -- path/to/Enclosure.cwk
+cargo run -p casework --release -- --smoke /tmp/cw-smoke   # file I/O smoke test, exit code 1 on failure
 ```
+
+Display units: the `mm` chip in the title bar switches to inches (display only; the
+document stays mm). Fields accept `0.125in`, `1/8"`, `1 1/2"`, `3mm`; in inch
+mode a bare number means inches.
 
 ## Architecture
 
@@ -26,6 +31,8 @@ cargo run -p casework --release -- path/to/Enclosure.cwk
 | `ui_parts.rs` | Parts library, placement on hole edges, BOM. |
 | `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
+| `units.rs` | mm / in display and input normalization. |
+| `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
 ## Keyboard
 

@@ -2100,7 +2100,7 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
         return;
     }
     s.input = None;
-    let expr = text.trim().trim_start_matches('=').trim().to_string();
+    let expr = crate::units::normalize_input(text.trim().trim_start_matches('=').trim());
     let val = match crate::widgets::eval(&expr, &s.values) {
         Ok(v) => v,
         Err(e) => {
@@ -2419,7 +2419,11 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
             }
             let v = expr.eval(&s.values).unwrap_or(f64::NAN);
             let is_expr = expr.0.trim().parse::<f64>().is_err();
-            let txt = format!("{prefix}{v:.2}");
+            let txt = if prefix == "∠" {
+                format!("{prefix}{v:.2}°")
+            } else {
+                format!("{prefix}{}", crate::units::len(v))
+            };
             let at = to(m) + vec2(0.0, 18.0);
             let font = theme::mono(12.0);
             let w = p

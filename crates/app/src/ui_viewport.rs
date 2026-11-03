@@ -252,17 +252,19 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         }
         for k in &sel {
             if let PickKind::Edge(e) = k.kind {
-                draw_edge(&painter, app, m, rect, k.body, e, theme::ACCENT, 3.0);
+                draw_edge(&painter, app, m, rect, k.body, e, theme::ACCENT, 3.0, true);
             }
         }
         if let Some(c) = app.stack.current() {
             if let PickKind::Edge(e) = c.key.kind {
-                let col = if app.stack.current_is_hidden() {
+                // only the hidden pick candidate is drawn x-ray; everything else is depth-tested
+                let hidden = app.stack.current_is_hidden();
+                let col = if hidden {
                     theme::ORANGE_LIGHT
                 } else {
                     theme::ORANGE
                 };
-                draw_edge(&painter, app, m, rect, c.key.body, e, col, 2.5);
+                draw_edge(&painter, app, m, rect, c.key.body, e, col, 2.5, !hidden);
             }
         }
     }
@@ -305,6 +307,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         let cur = app.stack.current().map(|c| c.key);
         select(app, cur, mods.command || mods.shift);
     }
+    joint_plane_overlay(app, ui, rect);
     dialog_overlay(app, ui, rect);
     if let Some(mut ex) = app.export.take() {
         let r = Rect::from_center_size(rect.center(), vec2(370.0, 240.0));
@@ -367,6 +370,44 @@ fn mesh_of(m: &Output, b: casework_model::feature::BodyId) -> Option<&Arc<Mesh>>
     m.mesh(b)
 }
 
+/// The upper half created by the previewed joint, if the preview is a joint.
+pub fn explode_body(shown: &Output) -> Option<casework_model::feature::BodyId> {
+    let i = *shown.prefix_bodies.keys().min()?;
+    let f = shown.data.features.get(i)?;
+    matches!(
+        f.kind,
+        casework_model::feature::FeatureKind::PartingJoint { .. }
+    )
+    .then(|| casework_model::feature::BodyId::of(f.id))
+}
+
+/// The joint dialog's exploded preview: (upper half, translation).
+pub fn explode_offset(
+    app: &CaseworkApp,
+    shown: &Output,
+) -> Option<(casework_model::feature::BodyId, Vec3)> {
+    let d = app.dialog.as_ref()?;
+    let crate::dialogs::Body::Joint(j) = &d.body else {
+        return None;
+    };
+    if !j.explode {
+        return None;
+    }
+    let i = *shown.prefix_bodies.keys().min()?;
+    let f = shown.data.features.get(i)?;
+    if !matches!(
+        f.kind,
+        casework_model::feature::FeatureKind::PartingJoint { .. }
+    ) {
+        return None;
+    }
+    let h = shown.bbox.map(|b| b.size().z as f32).unwrap_or(30.0);
+    Some((
+        casework_model::feature::BodyId::of(f.id),
+        Vec3::Z * (h * 0.35).max(8.0),
+    ))
+}
+
 fn build_frame(
     app: &CaseworkApp,
     shown: &Output,
@@ -377,15 +418,27 @@ fn build_frame(
     let size = Vec2::new(rect.width(), rect.height());
     let cam = &app.camera;
     let mut bodies = Vec::new();
+    let explode = explode_offset(app, shown);
     for b in &shown.bodies {
         if !app.body_visible(b.body.id) {
             continue;
         }
         if let Some(m) = &b.mesh {
+            let mut color = body_color(b.body.reference, b.body.part.is_some());
+            if b.colors.is_some() {
+                // imported appearance: vertex colours, keep the reference translucency
+                color = [1.0, 1.0, 1.0, if b.body.reference { 0.6 } else { 1.0 }];
+            }
+            let offset = match explode {
+                Some((id, off)) if id == b.body.id => off,
+                _ => Vec3::ZERO,
+            };
             bodies.push(DrawBody {
                 mesh: m.clone(),
-                color: body_color(b.body.reference, b.body.part.is_some()),
+                color,
                 translucent: b.body.reference,
+                colors: b.colors.clone(),
+                offset,
             });
         }
     }
@@ -466,6 +519,27 @@ fn build_frame(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Is a point on the model surface visible from the camera (nothing in front of it)?
+pub fn point_visible(app: &CaseworkApp, m: &Output, p: Vec3) -> bool {
+    let cam = &app.camera;
+    let (o, d, dist) = if cam.ortho {
+        let back = cam.distance + 4.0 * cam.scene_radius;
+        (p - cam.forward() * back, cam.forward(), back)
+    } else {
+        let v = p - cam.eye();
+        (cam.eye(), v.normalize(), v.length())
+    };
+    let eps = 0.03_f32.max(dist * 2e-3);
+    let hits = m.picker.pick_all(o, d, EdgeTolerance::ortho(0.0));
+    !hits.iter().any(|h| {
+        matches!(h.kind, casework_model::pick::HitKind::Face(_))
+            && h.t < dist - eps
+            && app.body_visible(h.body)
+            && !m.body(h.body).is_some_and(|b| b.reference)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_edge(
     p: &egui::Painter,
     app: &CaseworkApp,
@@ -475,18 +549,54 @@ fn draw_edge(
     e: u32,
     col: Color32,
     w: f32,
+    depth_test: bool,
 ) {
     let Some(mesh) = m.mesh(body) else { return };
     let size = Vec2::new(rect.width(), rect.height());
-    for pl in mesh.edges.iter().filter(|pl| pl.edge == e) {
-        let pts: Vec<Pos2> = pl
-            .points
-            .iter()
-            .filter_map(|q| app.camera.project(Vec3::from_array(*q), size))
+    let to_screen = |q: Vec3| {
+        app.camera
+            .project(q, size)
             .map(|s| pos2(rect.left() + s.x, rect.top() + s.y))
-            .collect();
-        if pts.len() >= 2 {
-            p.add(egui::Shape::line(pts, Stroke::new(w, col)));
+    };
+    for pl in mesh.edges.iter().filter(|pl| pl.edge == e) {
+        // sample the polyline finely enough that partly hidden segments split correctly
+        let mut samples: Vec<Vec3> = Vec::new();
+        for w2 in pl.points.windows(2) {
+            let (a, b) = (Vec3::from_array(w2[0]), Vec3::from_array(w2[1]));
+            let len_px = match (to_screen(a), to_screen(b)) {
+                (Some(x), Some(y)) => x.distance(y),
+                _ => 0.0,
+            };
+            let n = if depth_test {
+                ((len_px / 8.0).ceil() as usize).clamp(1, 64)
+            } else {
+                1
+            };
+            for k in 0..n {
+                samples.push(a.lerp(b, k as f32 / n as f32));
+            }
+        }
+        if let Some(last) = pl.points.last() {
+            samples.push(Vec3::from_array(*last));
+        }
+        let mut run: Vec<Pos2> = Vec::new();
+        for q in samples {
+            let vis = !depth_test || point_visible(app, m, q);
+            match (vis, to_screen(q)) {
+                (true, Some(s)) => run.push(s),
+                _ => {
+                    if run.len() >= 2 {
+                        p.add(egui::Shape::line(
+                            std::mem::take(&mut run),
+                            Stroke::new(w, col),
+                        ));
+                    }
+                    run.clear();
+                }
+            }
+        }
+        if run.len() >= 2 {
+            p.add(egui::Shape::line(run, Stroke::new(w, col)));
         }
     }
 }
@@ -685,6 +795,118 @@ fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> O
     clicked
 }
 
+/// Joint dialog: the translucent parting plane over the model and a handle that
+/// drags it along Z (coarse previews while dragging, full quality on release).
+fn joint_plane_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+    let Some(bb) = app.model.as_ref().and_then(|m| m.bbox) else {
+        return;
+    };
+    let vals = crate::adapters::values(&app.doc.data);
+    let size = Vec2::new(rect.width(), rect.height());
+    let cam = app.camera.clone();
+    let Some(d) = app.dialog.as_mut() else { return };
+    let crate::dialogs::Body::Joint(j) = &mut d.body else {
+        return;
+    };
+    let Ok(z) = crate::widgets::eval(&j.z.text, &vals) else {
+        return;
+    };
+    let pad = 0.12 * bb.size().x.max(bb.size().y);
+    let (x0, x1, y0, y1) = (
+        bb.min.x - pad,
+        bb.max.x + pad,
+        bb.min.y - pad,
+        bb.max.y + pad,
+    );
+    let w = |x: f64, y: f64| Vec3::new(x as f32, y as f32, z as f32);
+    let corners = [w(x0, y0), w(x1, y0), w(x1, y1), w(x0, y1)];
+    let to = |p: Vec3| {
+        cam.project(p, size)
+            .map(|s| pos2(rect.left() + s.x, rect.top() + s.y))
+    };
+    let pts: Vec<Pos2> = corners.iter().filter_map(|c| to(*c)).collect();
+    if pts.len() == 4 {
+        let p = ui.painter_at(rect);
+        p.add(egui::Shape::convex_polygon(
+            pts.clone(),
+            Color32::from_rgba_unmultiplied(76, 155, 255, 34),
+            Stroke::new(1.2, theme::ACCENT),
+        ));
+    }
+    // handle on the plane corner furthest left on screen (the dialog sits on the right)
+    let anchor = corners
+        .iter()
+        .copied()
+        .filter_map(|c| to(c).map(|s| (c, s)))
+        .min_by(|a, b| a.1.x.total_cmp(&b.1.x))
+        .map(|x| x.0)
+        .unwrap_or(w(x1, y0));
+    let (Some(h), Some(hz)) = (to(anchor), to(anchor + Vec3::Z)) else {
+        return;
+    };
+    let dir = hz - h; // screen px per mm of Z
+    let hr = Rect::from_center_size(h, vec2(26.0, 26.0));
+    let id = egui::Id::unique("joint_handle");
+    let mut dz = 0.0f64;
+    let mut dragging = false;
+    let mut released = false;
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(hr.min)
+        .show(ui.ctx(), |ui| {
+            let (r, resp) = ui.allocate_exact_size(hr.size(), Sense::drag());
+            let hot = resp.hovered() || resp.dragged();
+            let p = ui.painter();
+            p.circle(
+                r.center(),
+                9.0,
+                if hot { theme::ACCENT } else { theme::ACCENT_BG },
+                Stroke::new(1.5, theme::ACCENT),
+            );
+            let n = dir.normalized();
+            for s in [1.0f32, -1.0] {
+                let tip = r.center() + n * (24.0 * s);
+                p.arrow(
+                    r.center() + n * (11.0 * s),
+                    n * (13.0 * s),
+                    Stroke::new(1.6, theme::ACCENT),
+                );
+                let _ = tip;
+            }
+            let resp = resp.on_hover_text(format!(
+                "Drag to move the parting plane (z = {})",
+                crate::units::len_u(z)
+            ));
+            if resp.dragged() {
+                dragging = true;
+                let dd = resp.drag_delta();
+                let l2 = dir.length_sq();
+                if l2 > 1e-6 {
+                    dz = (dd.dot(dir) / l2) as f64;
+                }
+            }
+            released = resp.drag_stopped();
+        });
+    if dragging && dz != 0.0 {
+        let nz = (z + dz).clamp(j.z_min + 0.5, j.z_max - 0.5);
+        j.z.text = crate::dialogs::fmt((nz * 10.0).round() / 10.0);
+    }
+    let slider = j.dragging;
+    let was = app.dragging;
+    app.dragging = dragging || slider;
+    if (dragging && dz != 0.0) || (released || (was && !app.dragging)) {
+        app.request_preview();
+    }
+    let p = ui.painter_at(rect);
+    p.text(
+        h + vec2(16.0, -16.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("z {}", crate::units::len(z)),
+        theme::mono(11.0),
+        theme::ACCENT_LINK,
+    );
+}
+
 fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     let Some(mut d) = app.dialog.take() else {
         return;
@@ -740,6 +962,7 @@ fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                 .order(egui::Order::Middle)
                 .fixed_pos(pos2(rect.left() + 12.0, rect.bottom() - 330.0))
                 .show(ui.ctx(), |ui| {
+                    ui.set_max_width(320.0);
                     Frame::new()
                         .fill(theme::CARD)
                         .stroke(Stroke::new(1.0, theme::BORDER_CARD))
@@ -763,7 +986,13 @@ fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                                     },
                                 );
                             });
-                            j.section(ui, &vals);
+                            let upper = preview.as_ref().and_then(|o| explode_body(o));
+                            let z = crate::widgets::eval(&j.z.text, &vals).unwrap_or(0.0);
+                            let cuts: &[crate::worker::SectionCut] = preview
+                                .as_ref()
+                                .map(|o| o.sections.as_slice())
+                                .unwrap_or(&[]);
+                            j.section(ui, cuts, upper, z);
                         });
                 });
         }

@@ -229,7 +229,9 @@ pub fn expr_field(
         }
     }
     let tip = match &value {
-        Ok(v) if text.trim().parse::<f64>().is_err() => format!("= {v:.3}"),
+        Ok(v) if text.trim().parse::<f64>().is_err() || crate::units::inch() => {
+            format!("= {}", crate::units::len_u(*v))
+        }
         Ok(_) => String::new(),
         Err(e) => e.clone(),
     };
@@ -309,6 +311,15 @@ pub fn fit_chip(
                     .color(theme::TEXT_MUTED),
             );
         });
+    let resolved = profile.resolve(nominal, *fit);
+    if (resolved - nominal).abs() > 1e-9 {
+        ui.label(
+            RichText::new(format!("→ {}", crate::units::len(resolved)))
+                .font(theme::mono(11.0))
+                .color(theme::TEXT_MUTED),
+        )
+        .on_hover_text(fit_tooltip(nominal, *fit, profile));
+    }
     changed
 }
 

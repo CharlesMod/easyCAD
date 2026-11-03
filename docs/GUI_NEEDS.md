@@ -45,6 +45,10 @@ today (adapter or limitation) and what would replace it.
 11. **BOM without a `Document`.** `Document::bom()` only reads `DocData`; the worker
     builds a throwaway `Document` to feed `drawing::compute`. *Want:* `DocData::bom()`.
 
+12a. **Fractional inches.** `1/8"` parses as `1 / (8 in)`. The GUI rewrites
+    `1/8"` → `(1/8*1in)` and `1 1/2"` → `((1+1/2)*1in)` before storing
+    (`units::normalize_input`). *Want:* the parser to bind `"` to a fraction.
+
 ## Sketch
 
 12. **Offset constraint.** The GUI's offset makes new geometry pinned by
@@ -66,7 +70,6 @@ today (adapter or limitation) and what would replace it.
 
 ## Coming (per the engine worker), not wired yet
 
-- Colored STEP import (per-face colours): the renderer has one colour per body
-  today; it needs a per-vertex colour attribute.
-- Preview vs final tessellation levels (use preview while dragging dialogs).
-- Pattern/mirror recipe re-application, ribs "to body".
+- Wired since: per-vertex colours from `Body::mesh_colors` (renderer has a colour
+  attribute), `MeshQuality::Preview` while dragging the joint plane, per-feature
+  `elapsed_ms` in history tooltips, `Shape::section` for the joint's live section.

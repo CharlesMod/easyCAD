@@ -132,31 +132,76 @@ pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
             )
         })
         .map(|f| f.id);
+    // model extents (solids) → a standard scale that fills the sheet
+    let ext = model
+        .as_ref()
+        .and_then(|m| {
+            let mut bb: Option<casework_model::occt::BBox> = None;
+            for b in m.bodies.iter().filter(|b| !b.body.reference) {
+                if let Ok(x) = b.body.shape().bbox() {
+                    bb = Some(match bb {
+                        None => x,
+                        Some(o) => casework_model::occt::BBox {
+                            min: o.min.min(x.min),
+                            max: o.max.max(x.max),
+                        },
+                    });
+                }
+            }
+            bb.map(|b| b.size())
+        })
+        .unwrap_or(glam::DVec3::new(100.0, 60.0, 40.0));
+    let sheet_size = Sheet::new(PaperSize::A3, PaperOrientation::Landscape).size_mm();
+    let layout = layout_for(ext, sheet_size);
+    // the revision is a user field, not the internal save counter
+    if !app.doc.data.meta.contains_key("revision") {
+        let _ = app.doc.edit("Revision", |d| {
+            d.meta.insert("revision".into(), "A".into());
+            Ok::<_, DocError>(())
+        });
+    }
     let _ = app.doc.edit_drawing(id, "Default views", |dr| {
-        let top = dr.add_view(
-            "Top",
-            ViewOrientation::Face(CubeFace::PosZ),
-            DVec2::new(110.0, 205.0),
-            1.0,
-        );
+        for f in &mut dr.sheet.title_block.fields {
+            if f.template.contains("{doc.revision}") {
+                f.template = "{meta.revision}".into();
+            }
+        }
+        let s = layout.scale;
+        let top = dr.add_view("Top", ViewOrientation::Face(CubeFace::PosZ), layout.top, s);
         let front = dr.add_view(
             "Front",
             ViewOrientation::Face(CubeFace::NegY),
-            DVec2::new(110.0, 95.0),
-            1.0,
+            layout.front,
+            s,
         );
         dr.add_view(
             "Right",
             ViewOrientation::Face(CubeFace::PosX),
-            DVec2::new(235.0, 95.0),
-            1.0,
+            layout.right,
+            s,
         );
         dr.add_view(
             "Iso",
             ViewOrientation::Iso(IsoCorner { x: 1, y: -1, z: 1 }),
-            DVec2::new(330.0, 215.0),
-            0.5,
+            layout.iso,
+            layout.iso_scale,
         );
+        // notes block (live values)
+        for (i, line) in [
+            "NOTES",
+            "1. Material: {meta.material}",
+            "2. Wall {wall} mm, draft {draft} on walls",
+            "3. Unless noted: dimensions in mm, scale {sheet.scale}",
+        ]
+        .iter()
+        .enumerate()
+        {
+            dr.annotate(AnnotationKind::Note {
+                position: DVec2::new(22.0, 42.0 - 6.0 * i as f64),
+                text: (*line).into(),
+                height: if i == 0 { 4.0 } else { 3.2 },
+            });
+        }
         let Some(m) = &model else { return };
         let Some(base) = m.bodies.iter().find(|b| !b.body.reference) else {
             return;
@@ -224,11 +269,6 @@ pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
                 feature: f,
             });
         }
-        dr.annotate(AnnotationKind::Note {
-            position: DVec2::new(25.0, 35.0),
-            text: "Wall {wall} mm · draft {draft}".into(),
-            height: 3.5,
-        });
     });
     Some(id)
 }
@@ -298,6 +338,8 @@ pub fn sync(app: &mut CaseworkApp) {
                 library: app.doc.library.clone(),
                 prefixes: Vec::new(),
                 drawing: Some(draft),
+                quality: casework_model::regen::MeshQuality::Display,
+                section: None,
             });
         }
     }
@@ -315,6 +357,7 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
         }
     }
     let mut export: Option<&'static str> = None;
+    let mut meta_edit: Option<(String, String)> = None;
     let crate::app::Mode::Drawing(d) = &mut app.mode else {
         return;
     };
@@ -442,7 +485,7 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
                 .inner_margin(Margin::symmetric(0, 12)),
         )
         .show(ui, |ui| {
-            left_panel(d, ui, &app.doc, now);
+            meta_edit = left_panel(d, ui, &app.doc, now);
         });
     egui::Panel::right("view_props")
         .default_size(300.0)
@@ -465,6 +508,12 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
         .show(ui, |ui| {
             sheet(d, ui, model.as_deref(), now);
         });
+    if let Some((k, v)) = meta_edit {
+        let _ = app.doc.edit(&format!("Set {k}"), |dd| {
+            dd.meta.insert(k.clone(), v);
+            Ok::<_, DocError>(())
+        });
+    }
     if let Some(ext) = export {
         if let (Some(r), Some(dr)) = (d.result.clone(), d.draft.clone()) {
             if let Some(path) = rfd::FileDialog::new()
@@ -472,11 +521,7 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
                 .set_file_name(format!("{}.{ext}", dr.name))
                 .save_file()
             {
-                let bytes = match ext {
-                    "svg" => to_svg(&r, &dr).into_bytes(),
-                    "dxf" => to_dxf(&r, &dr).into_bytes(),
-                    _ => to_pdf(&r, &dr),
-                };
+                let bytes = export_bytes(&r, &dr, ext);
                 match std::fs::write(&path, bytes) {
                     Ok(()) => app.toast(format!("Exported {}", path.display())),
                     Err(e) => app.warn(format!("Export failed: {e}")),
@@ -486,7 +531,13 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn left_panel(d: &mut DrawingUi, ui: &mut Ui, doc: &Document, now: f64) {
+/// Returns an edited document field (meta key, value) to commit.
+fn left_panel(
+    d: &mut DrawingUi,
+    ui: &mut Ui,
+    doc: &Document,
+    now: f64,
+) -> Option<(String, String)> {
     ui.spacing_mut().item_spacing.y = 2.0;
     Frame::new()
         .inner_margin(Margin::symmetric(14, 4))
@@ -537,7 +588,9 @@ fn left_panel(d: &mut DrawingUi, ui: &mut Ui, doc: &Document, now: f64) {
             bottom: 6,
         })
         .show(ui, |ui| theme::section_label(ui, "Views"));
-    let Some(draft) = &mut d.draft else { return };
+    let Some(draft) = &mut d.draft else {
+        return None;
+    };
     for (i, v) in draft.views.iter().enumerate() {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
         if Some(v.id) == d.selected {
@@ -611,6 +664,43 @@ fn left_panel(d: &mut DrawingUi, ui: &mut Ui, doc: &Document, now: f64) {
     if changed {
         d.changed(now);
     }
+    // document fields used by the title block ({meta.*}); committed on Enter / focus loss
+    let mut edit = None;
+    Frame::new()
+        .inner_margin(Margin {
+            left: 14,
+            right: 14,
+            top: 12,
+            bottom: 4,
+        })
+        .show(ui, |ui| {
+            theme::section_label(ui, "Document fields");
+            for (key, label) in [
+                ("revision", "Revision"),
+                ("material", "Material"),
+                ("author", "Drawn by"),
+                ("part_number", "Part no."),
+            ] {
+                let id = ui.scope_id().with(("meta", key));
+                let mut v = ui
+                    .data_mut(|m| m.get_temp::<String>(id))
+                    .unwrap_or_else(|| doc.data.meta.get(key).cloned().unwrap_or_default());
+                ui.horizontal(|ui| {
+                    ui.add_sized(vec2(64.0, 20.0), egui::Label::new(widgets::muted(label)));
+                    let r = ui.add(egui::TextEdit::singleline(&mut v).desired_width(140.0));
+                    if r.changed() {
+                        ui.data_mut(|m| m.insert_temp(id, v.clone()));
+                    }
+                    if r.lost_focus() {
+                        ui.data_mut(|m| m.remove::<String>(id));
+                        if doc.data.meta.get(key).map(|s| s.as_str()).unwrap_or("") != v {
+                            edit = Some((key.to_string(), v.clone()));
+                        }
+                    }
+                });
+            }
+        });
+    edit
 }
 
 fn scale_label(s: f64) -> String {
@@ -1045,7 +1135,7 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
                 }
             );
             p.text(
-                x.p(DVec2::new((vr.min.x + vr.max.x) / 2.0, vr.min.y - 22.0)),
+                x.p(DVec2::new((vr.min.x + vr.max.x) / 2.0, vr.min.y - 24.0)),
                 egui::Align2::CENTER_CENTER,
                 label,
                 egui::FontId::proportional((2.6 * k).max(7.0)),
@@ -1375,5 +1465,72 @@ pub fn annotation_view(k: &AnnotationKind) -> Option<ViewId> {
         | AnnotationKind::Centerline { view, .. }
         | AnnotationKind::PartingLine { view, .. } => Some(*view),
         AnnotationKind::Note { .. } => None,
+    }
+}
+
+/// Standard-scale third-angle layout for model extents on a sheet.
+pub struct Layout {
+    pub scale: f64,
+    pub iso_scale: f64,
+    pub top: DVec2,
+    pub front: DVec2,
+    pub right: DVec2,
+    pub iso: DVec2,
+}
+
+pub const STANDARD_SCALES: [f64; 11] = [10.0, 5.0, 4.0, 2.0, 1.0, 0.5, 0.4, 0.25, 0.2, 0.1, 0.05];
+
+pub fn layout_for(ext: glam::DVec3, sheet: DVec2) -> Layout {
+    let (sx, sy, sz) = (ext.x.max(1.0), ext.y.max(1.0), ext.z.max(1.0));
+    let gap = 36.0; // room for dimensions and view labels between views
+    let (left, bottom) = (22.0, 62.0); // notes block below
+    let avail_w = sheet.x * 0.68 - left; // the right third holds the iso and title block
+    let avail_h = sheet.y - bottom - 22.0;
+    let scale = STANDARD_SCALES
+        .iter()
+        .copied()
+        .find(|s| (sx + sy) * s + 2.0 * gap <= avail_w && (sy + sz) * s + 2.0 * gap <= avail_h)
+        .unwrap_or(0.05);
+    let fx = left + gap + sx * scale / 2.0;
+    let fy = bottom + gap * 0.5 + sz * scale / 2.0;
+    let iso_scale = STANDARD_SCALES
+        .iter()
+        .copied()
+        .find(|s| *s <= scale + 1e-9 && (sx + sy) * s * 0.85 < sheet.x * 0.3)
+        .unwrap_or(scale / 2.0);
+    Layout {
+        scale,
+        iso_scale,
+        front: DVec2::new(fx, fy),
+        top: DVec2::new(fx, fy + sz * scale / 2.0 + gap + sy * scale / 2.0),
+        right: DVec2::new(fx + sx * scale / 2.0 + gap + sy * scale / 2.0, fy),
+        iso: DVec2::new(sheet.x * 0.82, sheet.y * 0.6),
+    }
+}
+
+/// The bytes of a drawing export (`svg`, `dxf` or `pdf`): what the toolbar buttons write.
+pub fn export_bytes(r: &DrawingResult, d: &Drawing, ext: &str) -> Vec<u8> {
+    match ext {
+        "svg" => to_svg(r, d).into_bytes(),
+        "dxf" => to_dxf(r, d).into_bytes(),
+        _ => to_pdf(r, d),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_picks_a_standard_scale_that_fits() {
+        let a3 = DVec2::new(420.0, 297.0);
+        let l = layout_for(glam::DVec3::new(90.6, 54.6, 32.0), a3);
+        assert_eq!(l.scale, 1.0);
+        assert!(l.top.y + 54.6 / 2.0 < 297.0 - 10.0);
+        let big = layout_for(glam::DVec3::new(400.0, 300.0, 200.0), a3);
+        assert_eq!(big.scale, 0.25);
+        let tiny = layout_for(glam::DVec3::new(12.0, 8.0, 5.0), a3);
+        assert_eq!(tiny.scale, 5.0);
+        assert!(STANDARD_SCALES.contains(&tiny.iso_scale));
     }
 }

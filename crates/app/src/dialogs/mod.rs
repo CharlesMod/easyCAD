@@ -115,7 +115,7 @@ impl Field {
     }
     /// Expression for the feature. A fit equal to the engine default is not stored.
     pub fn expr(&self, default_fit: Option<Fit>) -> Expr {
-        let e = Expr::new(self.text.trim());
+        let e = Expr::new(crate::units::normalize_input(&self.text));
         match self.fit {
             Some(f) if Some(f) != default_fit => e.fit(f),
             _ => e,

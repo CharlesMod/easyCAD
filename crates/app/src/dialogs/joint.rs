@@ -9,7 +9,7 @@ use casework_model::joint::{Half, JointKind as EK, JointReport, Rim, SnapPositio
 use casework_model::params::Expr;
 use casework_model::process::{Fit, FitClass};
 use casework_model::regen::FeatureStatus;
-use egui::{pos2, vec2, Color32, Pos2, Rect, RichText, Stroke, Ui};
+use egui::{pos2, vec2, Color32, RichText, Stroke, Ui};
 
 use super::{BuildCx, DialogCx, Field};
 use crate::theme;
@@ -75,6 +75,8 @@ pub struct JointD {
     pub z_max: f64,
     /// From the last preview.
     pub report: Option<JointReport>,
+    /// The z slider is being dragged (coarse previews).
+    pub dragging: bool,
     pub status: Option<FeatureStatus>,
 }
 
@@ -106,12 +108,13 @@ impl JointD {
             rim_h: f("3"),
             t_width: f(&format!("{wall} * 0.5")),
             t_height: f("1.3"),
-            t_clear: f("0.1"),
+            // clearances come from the fit class / process profile, not a typed number
+            t_clear: f("0"),
             t_extra: f("0.2"),
             t_lead: f("0.3"),
             l_width: f(&format!("{wall} / 2")),
             l_height: f("1.6"),
-            l_clear: f("0.1"),
+            l_clear: f("0"),
             cord: "AS568-0xx".into(),
             o_squeeze: f("0.25"),
             o_depth: f(""),
@@ -129,6 +132,7 @@ impl JointD {
             z_min,
             z_max,
             report: None,
+            dragging: false,
             status: None,
         }
     }
@@ -360,10 +364,6 @@ impl JointD {
         }
     }
 
-    fn val(fl: &Field, vals: &casework_model::params::Values) -> f64 {
-        crate::widgets::eval(&fl.text, vals).unwrap_or(0.0)
-    }
-
     pub fn ui(&mut self, ui: &mut Ui, id: egui::Id, cx: &DialogCx) -> bool {
         let env = &cx.env;
         let mut ch = false;
@@ -380,14 +380,14 @@ impl JointD {
         });
         ch |= self.z.row(ui, id.with("z"), "Split plane z", env);
         let mut zv = crate::widgets::eval(&self.z.text, env.values).unwrap_or(self.z_min);
-        if ui
-            .add(
-                egui::Slider::new(&mut zv, self.z_min..=self.z_max)
-                    .step_by(0.5)
-                    .show_value(false),
-            )
-            .changed()
-        {
+        ui.spacing_mut().slider_width = ui.available_width();
+        let sr = ui.add(
+            egui::Slider::new(&mut zv, self.z_min..=self.z_max)
+                .step_by(0.5)
+                .show_value(false),
+        );
+        self.dragging = sr.dragged();
+        if sr.changed() {
             self.z.text = super::fmt(zv);
             ch = true;
         }
@@ -467,14 +467,12 @@ impl JointD {
             Kind::Tongue => {
                 ch |= row(ui, &mut self.t_width, "tw", "Tongue width", pin);
                 ch |= row(ui, &mut self.t_height, "th", "Tongue height", None);
-                ch |= row(ui, &mut self.t_clear, "tc", "Clearance / side", gap);
                 ch |= row(ui, &mut self.t_extra, "te", "Extra groove depth", gap);
                 ch |= row(ui, &mut self.t_lead, "tl", "Lead-in chamfer", None);
             }
             Kind::Lip => {
                 ch |= row(ui, &mut self.l_width, "lw", "Lip width", pin);
                 ch |= row(ui, &mut self.l_height, "lh", "Lip height", None);
-                ch |= row(ui, &mut self.l_clear, "lc", "Clearance", gap);
             }
             Kind::ORing => {
                 ui.horizontal(|ui| {
@@ -515,7 +513,7 @@ impl JointD {
                 ch |= row(ui, &mut self.s_under, "su", "Undercut", None);
                 ch |= row(ui, &mut self.s_ins, "si", "Insertion angle", None);
                 ch |= row(ui, &mut self.s_ret, "sr", "Retention angle", None);
-                ch |= row(ui, &mut self.s_clear, "sc", "Clearance", gap);
+                ch |= row(ui, &mut self.s_clear, "sc", "Window clearance", None);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Material").size(12.0).color(theme::TEXT_DIM));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -630,178 +628,116 @@ impl JointD {
         }
     }
 
-    /// The live wall section (bottom-left card).
-    pub fn section(&self, ui: &mut Ui, vals: &casework_model::params::Values) {
-        let wall = vals.get("wall").copied().unwrap_or(2.0) as f32;
+    /// The live wall section (bottom-left card): the real cut of both halves at a
+    /// plane across a straight stretch of wall (computed by the worker with
+    /// `Shape::section`), zoomed on the front wall around the parting plane.
+    pub fn section(
+        &self,
+        ui: &mut Ui,
+        cuts: &[crate::worker::SectionCut],
+        upper: Option<BodyId>,
+        z: f64,
+    ) {
         let (rect, _) = ui.allocate_exact_size(vec2(320.0, 200.0), egui::Sense::hover());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 6.0, theme::SKETCH_BG);
-        let s = 22.0f32;
-        let base_y = rect.center().y + 14.0;
-        let x0 = rect.left() + 120.0;
-        let gap = if self.explode { 22.0 } else { 0.0 };
-        let wall_px = if self.rim_on {
-            (Self::val(&self.rim_w, vals) as f32).max(wall) * s
-        } else {
-            wall * s
-        };
-        let lower = theme::hex(0x8b929d);
-        let upper = theme::hex(0xa3aab4);
-        let rect_px = |x: f32, y: f32, w: f32, h: f32, c: Color32| {
-            p.rect(
-                Rect::from_min_size(pos2(x, y), vec2(w, h)),
-                0.0,
-                c,
-                Stroke::new(1.0, theme::EDGE_DARK),
-                egui::StrokeKind::Inside,
+        let all: Vec<&[glam::DVec2; 3]> = cuts.iter().flat_map(|c| c.tris.iter()).collect();
+        if all.is_empty() {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "computing section…",
+                theme::prop(12.0),
+                theme::TEXT_MUTED,
             );
+            return;
+        }
+        // plane coords: u = world Y (front wall at the minimum), v = world Z
+        let umin = all
+            .iter()
+            .flat_map(|t| t.iter())
+            .map(|q| q.x)
+            .fold(f64::INFINITY, f64::min);
+        let gap = if self.explode { 2.0 } else { 0.0 };
+        let (wu, wv) = (14.0, 14.0 * rect.height() as f64 / rect.width() as f64);
+        let (u0, v0) = (umin - 3.0, z - wv / 2.0);
+        let k = rect.width() as f64 / wu;
+        let to = |q: glam::DVec2, dv: f64| {
+            pos2(
+                rect.left() + ((q.x - u0) * k) as f32,
+                rect.bottom() - ((q.y + dv - v0) * k) as f32,
+            )
         };
-        let hole = |x: f32, y: f32, w: f32, h: f32| {
-            p.rect_filled(
-                Rect::from_min_size(pos2(x, y), vec2(w, h)),
-                0.0,
-                theme::SKETCH_BG,
-            );
+        for c in cuts {
+            let up = Some(c.body) == upper;
+            let col = if up {
+                theme::hex(0xc7ccd4)
+            } else {
+                theme::hex(0x7d848e)
+            };
+            let dv = if up { gap } else { 0.0 };
+            let mut mesh = egui::Mesh::default();
+            for t in &c.tris {
+                let base = mesh.vertices.len() as u32;
+                for q in t {
+                    mesh.colored_vertex(to(*q, dv), col);
+                }
+                mesh.add_triangle(base, base + 1, base + 2);
+            }
+            p.add(mesh);
+        }
+        let y = to(glam::DVec2::new(u0, z), 0.0).y;
+        p.add(egui::Shape::dashed_line(
+            &[pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(1.0, theme::ACCENT),
+            6.0,
+            4.0,
+        ));
+        let note = match &self.report {
+            Some(r) => match r.clearance_per_side {
+                Some(c) => format!(
+                    "{} · wall {:.2} · clearance {:.3}/side",
+                    self.kind.label(),
+                    r.effective_wall,
+                    c
+                ),
+                None => format!("{} · wall {:.2}", self.kind.label(), r.effective_wall),
+            },
+            None => self.kind.label().to_string(),
         };
-        rect_px(x0, base_y, wall_px, 66.0, lower);
-        rect_px(x0, base_y - gap - 66.0, wall_px, 66.0, upper);
-        let v = |fl: &Field| Self::val(fl, vals) as f32;
-        let cx = x0 + wall_px / 2.0;
-        let (male_y, male_c, female_y, dir) = if self.male_lower {
-            (base_y, lower, base_y - gap, -1.0)
-        } else {
-            (base_y - gap, upper, base_y, 1.0)
-        };
-        let note = match self.kind {
-            Kind::Tongue => {
-                let (tw, th) = (v(&self.t_width) * s, v(&self.t_height) * s);
-                let gw = tw + 2.0 * v(&self.t_clear) * s;
-                let gd = th + v(&self.t_extra) * s;
-                let ty = if dir < 0.0 { male_y - th } else { male_y };
-                rect_px(cx - tw / 2.0, ty, tw, th, male_c);
-                hole(
-                    cx - gw / 2.0,
-                    if dir < 0.0 { female_y - gd } else { female_y },
-                    gw,
-                    gd,
-                );
-                format!(
-                    "tongue {:.2} × {:.2} · groove {:.2}",
-                    tw / s,
-                    th / s,
-                    gw / s
-                )
-            }
-            Kind::Lip => {
-                let (lw, lh) = (v(&self.l_width) * s, v(&self.l_height) * s);
-                let lx = x0 + wall_px - lw;
-                rect_px(
-                    lx,
-                    if dir < 0.0 { male_y - lh } else { male_y },
-                    lw,
-                    lh,
-                    male_c,
-                );
-                hole(
-                    lx - v(&self.l_clear) * s,
-                    if dir < 0.0 { female_y - lh } else { female_y },
-                    lw + v(&self.l_clear) * s,
-                    lh,
-                );
-                format!("lip {:.2} × {:.2}", lw / s, lh / s)
-            }
-            Kind::ORing => {
-                let cord = casework_model::joint::cords()
-                    .into_iter()
-                    .find(|c| c.0 == self.cord)
-                    .map(|c| c.1)
-                    .unwrap_or(1.78) as f32;
-                let sq = v(&self.o_squeeze);
-                let sq = if sq > 1.0 { sq / 100.0 } else { sq };
-                let gd = self
-                    .report
-                    .as_ref()
-                    .and_then(|r| r.oring.as_ref())
-                    .map(|o| o.gland_depth as f32)
-                    .unwrap_or(cord * (1.0 - sq))
-                    * s;
-                let gw = self
-                    .report
-                    .as_ref()
-                    .and_then(|r| r.oring.as_ref())
-                    .map(|o| o.gland_width as f32)
-                    .unwrap_or(cord * 1.35)
-                    * s;
-                let gy = if self.male_lower {
-                    base_y
-                } else {
-                    base_y - gap - gd
-                };
-                hole(cx - gw / 2.0, gy, gw, gd);
-                let r = cord * s / 2.0;
-                p.circle(
-                    pos2(
-                        cx,
-                        if self.male_lower {
-                            base_y + gd - r
-                        } else {
-                            gy + r
-                        },
-                    ),
-                    r,
-                    theme::hex(0x2b2f36),
-                    Stroke::new(1.2, theme::ACCENT),
-                );
-                format!("gland {:.2} × {:.2} · cord ⌀{cord:.2}", gw / s, gd / s)
-            }
-            Kind::Snap => {
-                let (bl, bt, uc) = (
-                    v(&self.s_len) * s * 0.6,
-                    v(&self.s_thick) * s,
-                    v(&self.s_under) * s,
-                );
-                let bx = x0 + wall_px + 2.0;
-                rect_px(bx, base_y - bl * 0.7, bt, bl, lower);
-                p.add(egui::Shape::convex_polygon(
-                    vec![
-                        pos2(bx, base_y - bl * 0.7),
-                        pos2(bx - uc, base_y - bl * 0.7 + uc * 1.5),
-                        pos2(bx, base_y - bl * 0.7 + uc * 3.0),
-                    ],
-                    lower,
-                    Stroke::new(1.0, theme::EDGE_DARK),
-                ));
-                format!(
-                    "L {:.2} · t {:.2} · undercut {:.2} · {}",
-                    bl / s / 0.6,
-                    bt / s,
-                    uc / s,
-                    self.material
-                )
-            }
-        };
-        p.text(
-            pos2(rect.left() + 12.0, rect.top() + 16.0),
-            egui::Align2::LEFT_CENTER,
-            note,
-            theme::mono(11.0),
-            theme::TEXT,
+        ui.label(
+            RichText::new(note)
+                .font(theme::mono(11.0))
+                .color(theme::TEXT_DIM),
         );
         p.text(
-            pos2(rect.left() + 12.0, base_y + 30.0),
+            pos2(rect.left() + 8.0, rect.bottom() - 12.0),
             egui::Align2::LEFT_CENTER,
             "outside",
             theme::prop(11.0),
             theme::TEXT_MUTED,
         );
         p.text(
-            pos2(x0 + wall_px + 50.0, base_y + 30.0),
+            pos2(rect.left() + 8.0, rect.top() + 12.0),
             egui::Align2::LEFT_CENTER,
-            "cavity",
+            "upper half",
+            theme::prop(10.0),
+            theme::TEXT_MUTED,
+        );
+        p.text(
+            pos2(rect.right() - 8.0, rect.bottom() - 12.0),
+            egui::Align2::RIGHT_CENTER,
+            "cavity →",
             theme::prop(11.0),
             theme::TEXT_MUTED,
         );
-        let _: Option<Pos2> = None;
+        p.text(
+            pos2(rect.right() - 8.0, y - 8.0),
+            egui::Align2::RIGHT_CENTER,
+            "parting plane",
+            theme::prop(10.0),
+            theme::ACCENT_LINK,
+        );
     }
 }
 

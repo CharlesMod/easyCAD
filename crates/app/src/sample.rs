@@ -333,8 +333,14 @@ pub fn sensor_node() -> Document {
             plane: Plane::XZ,
         },
     );
-    doc.data
-        .meta
-        .insert("title".into(), "sensor-node enclosure".into());
+    for (k, v) in [
+        ("title", "sensor-node enclosure"),
+        ("revision", "A"),
+        ("material", "PC/ABS, black"),
+        ("author", "HW"),
+        ("part_number", "SN-ENC-001"),
+    ] {
+        doc.data.meta.insert(k.into(), v.into());
+    }
     doc
 }

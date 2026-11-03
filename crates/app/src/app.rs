@@ -18,6 +18,7 @@ use crate::pickstack::{Filter, PickKey, PickStack};
 use crate::sketch_mode::SketchSession;
 use crate::viewport::gpu::DisplayMode;
 use crate::worker::{Output, Purpose, Worker};
+use casework_model::regen::MeshQuality;
 
 /// Debounce for parameter / dialog edits before regenerating.
 pub const DEBOUNCE: f64 = 0.18;
@@ -104,6 +105,8 @@ pub struct CaseworkApp {
     pub show_build_plate: bool,
     /// Measured width of the floating dialog card (for right alignment).
     pub dialog_card_w: f32,
+    /// A viewport handle / slider is being dragged (coarse previews).
+    pub dragging: bool,
     pub now: f64,
     pub quit: bool,
 }
@@ -118,6 +121,7 @@ impl CaseworkApp {
             }
             None => false,
         };
+        crate::units::set_inch(crate::settings::Settings::load().inch);
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(move || ctx.request_repaint());
         let doc = doc.unwrap_or_else(|| Document::new("Untitled"));
@@ -165,6 +169,7 @@ impl CaseworkApp {
             new_doc_prompt: None,
             show_build_plate: false,
             dialog_card_w: 390.0,
+            dragging: false,
             now: 0.0,
             quit: false,
         }
@@ -226,13 +231,23 @@ impl CaseworkApp {
         self.preview_dirty = None;
         match self.preview_data() {
             Some((data, prefixes)) => {
-                self.worker.submit(
-                    Purpose::Preview,
+                let section = self.joint_section_plane();
+                self.worker.submit_full(crate::worker::Request {
+                    id: 0,
+                    purpose: Purpose::Preview,
                     data,
-                    self.doc.blobs.clone(),
-                    self.doc.library.clone(),
+                    blobs: self.doc.blobs.clone(),
+                    library: self.doc.library.clone(),
                     prefixes,
-                );
+                    drawing: None,
+                    // coarse meshes while a handle or slider is being dragged
+                    quality: if self.dragging {
+                        MeshQuality::Preview
+                    } else {
+                        MeshQuality::Display
+                    },
+                    section,
+                });
             }
             None => {
                 self.worker.cancel(Purpose::Preview);
@@ -242,8 +257,25 @@ impl CaseworkApp {
     }
 
     pub fn request_preview(&mut self) {
-        self.preview_dirty = Some(self.now + DEBOUNCE);
+        let wait = if self.dragging { 0.03 } else { DEBOUNCE };
+        self.preview_dirty = Some(self.now + wait);
         self.cache.hot = None;
+    }
+
+    /// Plane through a straight stretch of wall for the joint dialog's live section:
+    /// x = centre + 30 % of the width (clear of a centred cutout), seen along +X.
+    pub fn joint_section_plane(&self) -> Option<(glam::DVec3, glam::DVec3, glam::DVec3)> {
+        let d = self.dialog.as_ref()?;
+        if !matches!(d.body, crate::dialogs::Body::Joint(_)) {
+            return None;
+        }
+        let bb = self.model.as_ref()?.bbox?;
+        let x = bb.center().x + 0.3 * bb.size().x;
+        Some((
+            glam::DVec3::new(x, 0.0, 0.0),
+            glam::DVec3::X,
+            glam::DVec3::Y,
+        ))
     }
 
     /// Refresh `cache` if the document or the model changed.
@@ -430,7 +462,8 @@ impl CaseworkApp {
     }
 
     pub fn set_param(&mut self, name: &str, expr: &str) -> Result<(), DocError> {
-        adapters::set_param(&mut self.doc, name, expr)?;
+        let expr = crate::units::normalize_input(expr);
+        adapters::set_param(&mut self.doc, name, &expr)?;
         self.after_edit();
         Ok(())
     }
@@ -674,9 +707,8 @@ impl CaseworkApp {
             .set_title("Open .cwk document folder")
             .pick_folder()
         {
-            match Document::load_from_dir(&dir) {
-                Ok(d) => self.load(d, Some(dir)),
-                Err(e) => self.warn(format!("Open failed: {e}")),
+            if let Err(e) = self.open_path(&dir) {
+                self.warn(format!("Open failed: {e}"));
             }
         }
     }
@@ -688,19 +720,30 @@ impl CaseworkApp {
                 .set_file_name(format!("{}.cwk", self.doc.data.name))
                 .save_file(),
         };
-        let Some(mut p) = path else { return };
+        let Some(p) = path else { return };
+        match self.save_to(p) {
+            Ok(p) => self.toast(format!("Saved {}", p.display())),
+            Err(e) => self.warn(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Save to a `.cwk` folder (the path the Save dialogs use).
+    pub fn save_to(&mut self, mut p: PathBuf) -> Result<PathBuf, String> {
         if p.extension().is_none_or(|e| e != "cwk") {
             p.set_extension("cwk");
         }
         adapters::apply_bindings(&mut self.doc.data);
-        match self.doc.save_to_dir(&p) {
-            Ok(()) => {
-                self.saved_revision = self.doc.data.revision;
-                self.toast(format!("Saved {}", p.display()));
-                self.path = Some(p);
-            }
-            Err(e) => self.warn(format!("Save failed: {e}")),
-        }
+        self.doc.save_to_dir(&p).map_err(|e| e.to_string())?;
+        self.saved_revision = self.doc.data.revision;
+        self.path = Some(p.clone());
+        Ok(p)
+    }
+
+    /// Open a `.cwk` folder (the path the Open dialog uses).
+    pub fn open_path(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        let d = Document::load_from_dir(dir).map_err(|e| e.to_string())?;
+        self.load(d, Some(dir.to_path_buf()));
+        Ok(())
     }
 
     pub fn import_file(&mut self) {
@@ -710,6 +753,15 @@ impl CaseworkApp {
         else {
             return;
         };
+        match self.import_path(&p) {
+            Ok(msg) => self.toast(msg),
+            Err(e) => self.warn(e),
+        }
+    }
+
+    /// Import a STEP (locked reference body) or a DXF (opens sketch mode with its
+    /// layers). Shared by the Import dialog and the smoke test.
+    pub fn import_path(&mut self, p: &std::path::Path) -> Result<String, String> {
         let ext = p
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
@@ -718,33 +770,27 @@ impl CaseworkApp {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read(&p) {
-            Ok(bytes) if ext == "dxf" => {
-                let imp = self.doc.import_dxf(&name, bytes);
-                match self.doc.dxf(imp) {
-                    Ok(d) => {
-                        self.dialog = None;
-                        self.mode = Mode::Sketch(Box::new(SketchSession::from_dxf(
-                            imp,
-                            &name,
-                            d,
-                            &self.doc.data,
-                        )));
-                    }
-                    Err(e) => self.warn(format!("DXF: {e}")),
-                }
-            }
-            Ok(bytes) => {
-                let stem = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or(name);
-                self.doc.import_step(&stem, bytes, true);
-                self.toast(format!("Imported {stem} as a locked reference body"));
-                self.fit_pending = true;
-                self.request_model();
-            }
-            Err(e) => self.warn(format!("Import failed: {e}")),
+        let bytes = std::fs::read(p).map_err(|e| format!("Import failed: {e}"))?;
+        if ext == "dxf" {
+            let imp = self.doc.import_dxf(&name, bytes);
+            let d = self.doc.dxf(imp).map_err(|e| format!("DXF: {e}"))?;
+            self.dialog = None;
+            self.mode = Mode::Sketch(Box::new(SketchSession::from_dxf(
+                imp,
+                &name,
+                d,
+                &self.doc.data,
+            )));
+            Ok(format!("Imported {name}: pick layers, then Finish sketch"))
+        } else {
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(name);
+            self.doc.import_step(&stem, bytes, true);
+            self.fit_pending = true;
+            self.request_model();
+            Ok(format!("Imported {stem} as a locked reference body"))
         }
     }
 
