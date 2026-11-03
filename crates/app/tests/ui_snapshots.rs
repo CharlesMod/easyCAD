@@ -56,18 +56,34 @@ fn settle(h: &mut Harness<'static, CaseworkApp>) {
 
 fn save(h: &mut Harness<'static, CaseworkApp>, name: &str) -> image::RgbaImage {
     let img = h.render().expect("render");
-    img.save(out_dir().join(format!("{name}.png"))).unwrap();
+    write_png(&img, &out_dir().join(format!("{name}.png")));
     img
+}
+
+/// Write a snapshot unless the one on disk is the same picture (renders jitter by a
+/// few pixels from run to run; rewriting them only churns the working tree).
+fn write_png(img: &image::RgbaImage, path: &std::path::Path) {
+    if let Ok(old) = image::open(path).map(|i| i.to_rgba8()) {
+        if old.dimensions() == img.dimensions() {
+            let differ = old
+                .pixels()
+                .zip(img.pixels())
+                .filter(|(a, b)| (0..3).any(|i| (a.0[i] as i32 - b.0[i] as i32).abs() > 24))
+                .count();
+            if differ * 1000 < (img.width() * img.height()) as usize {
+                return;
+            }
+        }
+    }
+    img.save(path).unwrap();
 }
 
 fn crop(img: &image::RgbaImage, r: egui::Rect, name: &str) {
     let (x, y) = (r.left().max(0.0) as u32, r.top().max(0.0) as u32);
     let w = (r.width() as u32).min(img.width() - x);
     let hh = (r.height() as u32).min(img.height() - y);
-    image::imageops::crop_imm(img, x, y, w, hh)
-        .to_image()
-        .save(out_dir().join(format!("{name}.png")))
-        .unwrap();
+    let c = image::imageops::crop_imm(img, x, y, w, hh).to_image();
+    write_png(&c, &out_dir().join(format!("{name}.png")));
 }
 
 /// The viewport must show geometry: plenty of pixels differ from the background.
