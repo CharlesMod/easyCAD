@@ -389,6 +389,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     joint_plane_overlay(app, ui, rect);
     dialog_overlay(app, ui, rect);
     crate::ui_mates::glyphs(app, ui, rect);
+    crate::ui_mates::free_motion(app, ui, rect);
     crate::ui_mates::mate_card(app, ui, rect);
     crate::ui_interference::card(app, ui, rect);
     crate::ui_welcome::welcome(app, ui, rect);

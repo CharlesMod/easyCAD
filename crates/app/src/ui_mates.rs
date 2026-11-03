@@ -469,3 +469,107 @@ pub fn glyphs(app: &EasyCadApp, ui: &Ui, rect: Rect) {
         }
     }
 }
+
+/// One free direction of a mate, in the view frame (GUI_NEEDS #18).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FreeGlyph {
+    /// A double arrow along `dir` through `at`.
+    Slide { at: Vec3, dir: Vec3 },
+    /// A ring about `axis` through `at`.
+    Turn { at: Vec3, axis: Vec3 },
+}
+
+/// The mate whose free motion is shown: the one being edited in the Mates dialog,
+/// else the one selected in the Mates folder.
+pub fn shown_mate(app: &EasyCadApp) -> Option<MateId> {
+    match &app.asm.mate {
+        Some(mu) => Some(mu.editing.unwrap_or(DRAFT)),
+        None => app.asm.sel_mate,
+    }
+}
+
+/// The shown mate's free directions after solving (`MateReport.free`), placed in
+/// the view frame. Translations sit at the centre of the moving side.
+pub fn free_glyphs(app: &EasyCadApp) -> Vec<FreeGlyph> {
+    let Some(id) = shown_mate(app) else { return Vec::new() };
+    let Some(m) = &app.model else { return Vec::new() };
+    let Some(a) = &m.asm else { return Vec::new() };
+    let Some(rep) = a.solve.as_ref().and_then(|s| s.mates.iter().find(|r| r.mate == id)) else { return Vec::new() };
+    let to_view = a.frame.inverse().affine();
+    let moving = match &app.asm.mate {
+        Some(mu) => mu.b.as_ref().map(|s| s.conn.occurrence.clone()),
+        None => app.doc.data.mates.iter().find(|x| x.id == id).map(|x| x.b.occurrence.clone()),
+    };
+    let center = moving.and_then(|p| crate::ui_gizmo::occ_center(app, &p));
+    let v = |p: DVec3| to_view.transform_point3(p).as_vec3();
+    let d = |p: DVec3| to_view.transform_vector3(p).as_vec3().normalize_or_zero();
+    let mut out = Vec::new();
+    for f in &rep.free {
+        match *f {
+            easycad_model::assembly::FreeDof::Translate { dir } => {
+                if let Some(c) = center {
+                    out.push(FreeGlyph::Slide { at: c, dir: d(dir) });
+                }
+            }
+            easycad_model::assembly::FreeDof::Rotate { origin, axis } => out.push(FreeGlyph::Turn { at: v(origin), axis: d(axis) }),
+            easycad_model::assembly::FreeDof::Spin { origin } => {
+                for ax in [DVec3::X, DVec3::Y, DVec3::Z] {
+                    out.push(FreeGlyph::Turn { at: v(origin), axis: d(ax) });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Draw the shown mate's free motion: arrows for translations, rings for rotations.
+pub fn free_motion(app: &EasyCadApp, ui: &Ui, rect: Rect) {
+    if app.asm.sel_mate.is_none() && app.asm.mate.is_none() {
+        return;
+    }
+    let glyphs = free_glyphs(app);
+    if glyphs.is_empty() {
+        return;
+    }
+    let size = Vec2::new(rect.width(), rect.height());
+    let p = ui.painter_at(rect);
+    let cam = &app.camera;
+    let proj = |q: Vec3| cam.project(q, size).map(|s| pos2(rect.left() + s.x, rect.top() + s.y));
+    let unit = cam.world_per_point(size.y).max(1e-4);
+    let col = theme::ACCENT_LINK;
+    let st = Stroke::new(2.0, col);
+    for g in glyphs {
+        match g {
+            FreeGlyph::Slide { at, dir } => {
+                let len = unit * 70.0;
+                let (Some(a), Some(b), Some(c)) = (proj(at), proj(at + dir * len), proj(at - dir * len)) else { continue };
+                p.arrow(a, b - a, st);
+                p.arrow(a, c - a, st);
+                p.circle_filled(a, 3.0, col);
+                p.text(b + vec2(6.0, -6.0), egui::Align2::LEFT_BOTTOM, "slides", theme::prop(11.0), col);
+            }
+            FreeGlyph::Turn { at, axis } => {
+                let r = unit * 45.0;
+                let u = axis.any_orthonormal_vector();
+                let w = axis.cross(u);
+                let pts: Vec<egui::Pos2> = (0..=48)
+                    .filter_map(|i| {
+                        let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                        proj(at + (u * t.cos() + w * t.sin()) * r)
+                    })
+                    .collect();
+                if pts.len() < 2 {
+                    continue;
+                }
+                p.add(egui::Shape::line(pts.clone(), st));
+                // an arrowhead on the ring, and the axis
+                let (a, b) = (pts[pts.len() * 3 / 4], pts[pts.len() * 3 / 4 + 1]);
+                p.arrow(a, (b - a).normalized() * 10.0, st);
+                if let (Some(a0), Some(a1)) = (proj(at - axis * r * 1.4), proj(at + axis * r * 1.4)) {
+                    p.add(egui::Shape::dashed_line(&[a0, a1], Stroke::new(1.2, col), 6.0, 4.0));
+                    p.text(a1 + vec2(6.0, -6.0), egui::Align2::LEFT_BOTTOM, "turns", theme::prop(11.0), col);
+                }
+            }
+        }
+    }
+}

@@ -51,6 +51,7 @@ pub struct AsmUi {
     /// E2E state dump).
     pub row_rects: Vec<(OccPath, egui::Rect)>,
     pub link_rects: Vec<(ComponentId, egui::Rect)>,
+    pub mate_rects: Vec<(easycad_model::assembly::MateId, egui::Rect)>,
     /// The selected row of the Mates folder (its free motion is drawn).
     pub sel_mate: Option<easycad_model::assembly::MateId>,
 }
@@ -557,6 +558,7 @@ pub fn tree(app: &mut EasyCadApp, ui: &mut Ui) {
     let mut acts: Vec<TreeAct> = Vec::new();
     app.asm.row_rects.clear();
     app.asm.link_rects.clear();
+    app.asm.mate_rects.clear();
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let released = ui.input(|i| i.pointer.any_released());
     let mut drop_target: Option<OccPath> = None;
@@ -979,11 +981,13 @@ fn mates_folder(app: &mut EasyCadApp, ui: &mut Ui, d: &DocData) {
         return;
     }
     let mut edit = None;
+    let mut select = None;
     let mut toggle = None;
     let mut delete = None;
     for m in &d.mates {
         let status = solve.as_ref().and_then(|s| s.mates.iter().find(|r| r.mate == m.id)).map(|r| r.status.clone());
-        let (r, resp) = tree_row(ui, 36.0, 28.0, false);
+        let (r, resp) = tree_row(ui, 36.0, 28.0, app.asm.sel_mate == Some(m.id));
+        app.asm.mate_rects.push((m.id, r));
         let (col, tip) = match &status {
             Some(MateStatus::Solved) => (theme::TEXT, "Solved".to_string()),
             Some(MateStatus::Redundant) => (theme::TEXT_DIM, "Redundant: both sides were already placed and it holds".into()),
@@ -1004,9 +1008,11 @@ fn mates_folder(app: &mut EasyCadApp, ui: &mut Ui, d: &DocData) {
                 theme::TEXT_LABEL
             },
         );
-        let resp = resp.on_hover_text(format!("{tip}\nDouble-click to edit (jog its free motion)"));
+        let resp = resp.on_hover_text(format!("{tip}\nClick to show its free motion · double-click to edit (jog it)"));
         if resp.double_clicked() {
             edit = Some(m.id);
+        } else if resp.clicked() {
+            select = Some(m.id);
         }
         resp.context_menu(|ui| {
             if ui.button("Edit…").clicked() {
@@ -1022,6 +1028,9 @@ fn mates_folder(app: &mut EasyCadApp, ui: &mut Ui, d: &DocData) {
                 ui.close();
             }
         });
+    }
+    if let Some(id) = select {
+        app.asm.sel_mate = if app.asm.sel_mate == Some(id) { None } else { Some(id) };
     }
     if let Some(id) = edit {
         app.open_mate(Some(id));

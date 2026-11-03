@@ -438,3 +438,89 @@ fn alternate_navigation_presets_by_mouse() {
     assert_eq!(easycad_app::settings::Settings::load().nav, NavPreset::easyCAD);
     let _ = std::fs::remove_dir_all(&cfg);
 }
+
+/// A straight edge along X on an occurrence's front face (y min), at its top or
+/// bottom: the hinge line of the wizard's box.
+fn front_edge(app: &EasyCadApp, name: &str, top: bool) -> easycad_app::pickstack::PickKey {
+    use easycad_app::pickstack::{PickKey, PickKind};
+    let path = occ_path(app, name);
+    let m = app.model.as_ref().unwrap();
+    let mut best: Option<(f64, PickKey)> = None;
+    for c in m.ctx.iter().filter(|c| c.path == path && !c.mb.body.reference) {
+        for e in &c.mb.edges {
+            if e.kind != easycad_model::occt::CurveKind::Line || e.tangent.x.abs() < 0.99 || e.length < 20.0 {
+                continue;
+            }
+            let p = c.xf.transform_point3(e.midpoint);
+            let score = -p.y * 1000.0 + if top { p.z } else { -p.z };
+            if best.as_ref().is_none_or(|b| score > b.0) {
+                best = Some((score, PickKey { body: c.key, kind: PickKind::Edge(e.index) }));
+            }
+        }
+    }
+    best.expect("front edge").1
+}
+
+#[test]
+fn mate_free_motion_and_interference_overlap() {
+    use easycad_app::ui_mates::FreeGlyph;
+    let _serial = serial();
+    let mut h = harness(wizard_doc(true));
+    // a hinge on the front seam, swung 12° into the base
+    h.state_mut().open_mate(None);
+    let a = front_edge(h.state(), "Base:1", true);
+    let b = front_edge(h.state(), "Lid:1", false);
+    assert!(h.state_mut().mate_pick(a));
+    assert!(h.state_mut().mate_pick(b));
+    h.state_mut().asm.mate.as_mut().unwrap().angle = -12.0;
+    h.state_mut().request_model();
+    settle(&mut h);
+    // while the dialog is open the draft's free motion shows
+    let g = easycad_app::ui_mates::free_glyphs(h.state());
+    assert_eq!(g.len(), 1, "{g:?}");
+    h.state_mut().commit_mate();
+    settle(&mut h);
+    assert!(easycad_app::ui_mates::free_glyphs(h.state()).is_empty(), "nothing selected, nothing drawn");
+
+    // click the mate's row in the Mates folder: its free rotation is drawn
+    let id = h.state().doc.data.mates[0].id;
+    let r = h.state().asm.mate_rects.iter().find(|(m, _)| *m == id).map(|x| x.1).expect("a Mates row");
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
+    assert_eq!(h.state().asm.sel_mate, Some(id));
+    let g = easycad_app::ui_mates::free_glyphs(h.state());
+    match g.as_slice() {
+        [FreeGlyph::Turn { at, axis }] => {
+            assert!(axis.x.abs() > 0.99, "the hinge turns about X: {axis}");
+            let base = easycad_app::ui_gizmo::occ_bounds(h.state(), &occ_path(h.state(), "Base:1")).unwrap();
+            assert!((at.y - base.0.y).abs() < 3.0, "on the front seam: {at} vs {base:?}");
+        }
+        g => panic!("one rotation expected: {g:?}"),
+    }
+    save(&mut h, "mate_free_motion");
+    // a second click (not a double-click) clears it
+    h.run_steps(15);
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
+    assert_eq!(h.state().asm.sel_mate, None);
+
+    // interference: the lid turned into the base overlaps it; the overlap solid is drawn
+    h.state_mut().check_interference();
+    for _ in 0..600 {
+        h.run_steps(1);
+        if h.state().asm.interference.as_ref().is_some_and(|i| i.job.is_none()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    h.run_steps(3);
+    let i = h.state().asm.interference.as_ref().unwrap();
+    let rep = i.report.clone().expect("report");
+    assert!(!rep.pairs.is_empty(), "{rep:?}");
+    let p = &rep.pairs[0];
+    assert!(p.volume > 0.0, "{p:?}");
+    assert!(p.common.is_some(), "the overlap solid (GUI_NEEDS #19)");
+    let shown = i.shown_overlaps();
+    assert!(!shown.is_empty() && !shown[0].indices.is_empty(), "meshed for display");
+    let vp = h.state().viewport_rect.shrink(40.0);
+    let img = save(&mut h, "interference_overlap");
+    assert!(reddish(&img, vp) > 20, "the overlap and the pair show red");
+}

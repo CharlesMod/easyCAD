@@ -43,7 +43,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
       `tests/ui_clicks.rs`. Found: a cached link status kept the old folder for 5 s after the
       document moved, and the drag label was painted under the rows. The presets (SolidWorks,
       Onshape, Blender) already existed; the test picks SolidWorks and Onshape in Settings and drags.
-- [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
+- [x] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
+      Free motion: arrows / rings for the mate being edited or the Mates row clicked. The overlap
+      solid (wired in fef16bd) is verified by `ui_clicks::mate_free_motion_and_interference_overlap`.
 - [ ] **[ui]** History strip hint when the active root has no features of its own.
 - [ ] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21).
 
