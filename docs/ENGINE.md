@@ -751,8 +751,16 @@ verified on load.
 - Pattern/Mirror re-runs the source feature's recipe under the transform: extrude,
   revolve, rib, screw boss, standoffs, inserted parts and nested patterns. Boss
   fillets, part copies (counted in the BOM), fits and teardrops therefore all follow.
-  Whole-body operations (fillet, shell, draft, split, joint) cannot be patterned and
-  give a clear error.
+  Fillets, chamfers and drafts are re-run with their selectors moved onto the copy
+  (`EdgeSelector::placed`/`FaceSelector::placed`; a draft's neutral plane and pull
+  move too), so patterning [boss, its fillet] rounds every copy. Selectors that pick
+  over the whole body (`Parallel`, `Extreme`, `AllWithNormal`, `Cylinders`, `Circles`
+  without `near`) have no copy and give an error naming the selector. Shell, split,
+  parting joint, STEP import and in-context references cannot be patterned (a copy
+  would shell or split the same body again); the error says so and points to
+  patterning the body (`PatternSource::Body`).
+  Edge hints on closed circles are matched to the nearest point of the circle, not
+  its midpoint, since a rebuilt or mirrored circle has its seam elsewhere.
 - Threads are cosmetic. Every table cites its source (standards checked against
   published tables, 2026-11; vendor tables name the vendor: ruthex inserts, EJOT PT
   screws). Values that vary by vendor (standoff across-flats and studs, insert

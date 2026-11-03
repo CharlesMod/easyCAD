@@ -848,6 +848,16 @@ impl Ctx<'_> {
     /// Execute a feature recipe into `st`. Patterns call this again for their source
     /// features with a transform pushed on `self.xf`.
     fn exec_kind(&mut self, kind: &FeatureKind, name: &str, fid: FeatureId, st: &mut ModelState) -> R<()> {
+        // dress-ups and drafts under a pattern transform act on the placed copy's
+        // edges and faces
+        let placed;
+        let kind = match kind {
+            FeatureKind::Fillet { .. } | FeatureKind::Chamfer { .. } | FeatureKind::Draft { .. } if !self.xf.is_empty() => {
+                placed = self.placed_selectors(kind, name)?;
+                &placed
+            }
+            _ => kind,
+        };
         match kind {
             FeatureKind::Extrude { sketch, profiles, distance, symmetric, reverse, draft_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles)?;
@@ -1538,20 +1548,22 @@ impl Ctx<'_> {
                 // Re-run each source feature's recipe at every transformed placement,
                 // so bosses keep their fillets, parts are copied, fits and process
                 // stages apply as for the original.
+                // Fillets, chamfers and drafts re-resolve their selectors on each
+                // placed copy (see `placed_selectors`).
                 for f in fs {
                     let src = self.doc.feature(*f).cloned().ok_or_else(|| Fail::msg(format!("feature {f:?} does not exist")))?;
-                    if !matches!(
-                        src.kind,
-                        FeatureKind::Extrude { .. }
-                            | FeatureKind::Revolve { .. }
-                            | FeatureKind::Rib { .. }
-                            | FeatureKind::ScrewBoss { .. }
-                            | FeatureKind::StandoffsFromPcb { .. }
-                            | FeatureKind::InsertPart { .. }
-                            | FeatureKind::Pattern { .. }
-                            | FeatureKind::Mirror { .. }
-                    ) {
-                        return fail(format!("`{}` ({}) cannot be patterned; pattern the body instead", src.name, src.kind.label()));
+                    let why = match src.kind {
+                        FeatureKind::Shell { .. } => Some("hollows the whole body, so a copy would shell it a second time"),
+                        FeatureKind::Split { .. } | FeatureKind::PartingJoint { .. } => Some("cuts the whole body in two, so a copy would cut it again"),
+                        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => Some("brings in a body that has no recipe to repeat"),
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        return fail(format!(
+                            "`{}` ({}) cannot be patterned: it {why}. Pattern the features before it, or pattern the body",
+                            src.name,
+                            src.kind.label()
+                        ));
                     }
                     if src.suppressed {
                         continue;
@@ -1567,9 +1579,42 @@ impl Ctx<'_> {
                         r.map_err(|e| Fail::msg(format!("pattern instance of `{}`: {}", src.name, e.msg)))?;
                     }
                 }
+                // edge requests index the source feature's edge sets, not the pattern's
+                self.edge_requests.clear();
+                self.skipped_edges.clear();
             }
         }
         Ok(())
+    }
+
+    /// A fillet, chamfer or draft with its selectors (and draft plane and pull)
+    /// moved by the pattern transform stack, so a pattern instance dresses the
+    /// copy's edges. Selectors that pick over the whole body have no copy.
+    fn placed_selectors(&self, kind: &FeatureKind, name: &str) -> R<FeatureKind> {
+        let (point, dir) = (|p| self.tx_point(p), |v| self.tx_dir(v));
+        let pl = crate::select::Placement { point: &point, dir: &dir };
+        let global = |what: &str| {
+            Fail::msg(format!(
+                "`{name}` selects {what} over the whole body, so its pattern copy would select the same edges; pick the edges or faces instead, or pattern the body"
+            ))
+        };
+        let edges = |v: &[crate::select::EdgeSelector]| v.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<Vec<_>>>();
+        let sets = |v: &[EdgeSet]| v.iter().map(|s| Ok(EdgeSet { edges: edges(&s.edges)?, ..s.clone() })).collect::<R<Vec<_>>>();
+        let mut k = kind.clone();
+        match &mut k {
+            FeatureKind::Fillet { edges: e, sets: s, skipped, .. } | FeatureKind::Chamfer { edges: e, sets: s, skipped, .. } => {
+                *e = edges(e)?;
+                *s = sets(s)?;
+                *skipped = edges(skipped)?;
+            }
+            FeatureKind::Draft { faces, neutral, pull, .. } => {
+                *faces = faces.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<_>>()?;
+                *neutral = Plane { origin: point(neutral.origin), x_dir: dir(neutral.x_dir), normal: dir(neutral.normal) };
+                *pull = dir(*pull);
+            }
+            _ => {}
+        }
+        Ok(k)
     }
 }
 

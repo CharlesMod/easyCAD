@@ -48,7 +48,8 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
       Still marked: shortest ISO 7380-1 lengths, #6-32/#10-32 inch inserts, M2/M2.5 counterbore depths (no source).
 - [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).
 - [ ] Closed loops of mates are checked, not solved.
-- [ ] Pattern/mirror of whole-body features (fillet, shell) returns "cannot be patterned".
+- [x] Pattern/mirror of whole-body features: fillets, chamfers and drafts follow the copies (selectors moved
+      onto each instance); whole-body selectors, shell, split and joints get a precise "why not" error.
 - [ ] Threads are cosmetic only.
 
 ## 6. After the MVP
