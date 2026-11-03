@@ -562,13 +562,21 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
   Vec<StepLink { child, name, matrix: [f64; 12] }> }>, roots }` with
   `StepTree::read(&str)` and `to_step_string()`; `Shape::children()`.
 - **Linked `.cwk` components.** `Document::link_component(cwk_dir, host_dir)` copies
-  the file's root content (params become the component's local params, blobs are
-  copied) into a locked component with `ComponentSource::Linked { path (relative to
-  host_dir), hash (sha256 of its doc.json) }`. The copy is a cache, so the host
-  opens without the file. `link_status(id, host_dir) -> LinkStatus::{NotLinked,
-  UpToDate, OutOfDate, Missing(reason)}`, `update_link(id, host_dir)` (undoable),
-  `break_link(id)` (becomes a normal editable component). Linking a file that is
-  itself an assembly is refused (TODO).
+  the file's content into a locked component with `ComponentSource::Linked { path
+  (relative to host_dir), hash (sha256 of its doc.json) }`: its root params become
+  the component's local params, its root features/sketches/imports the component's,
+  its blobs are copied. A file that is itself an assembly brings its whole tree: its
+  components become locked components with `owner = Some(linked)` (their params see
+  the file's root params), its occurrences become the linked component's children.
+  Ids are remapped and remembered in `Component.link_ids`, so `update_link` keeps
+  every component and occurrence id (mate paths into the linked tree survive
+  updates). In-context features inside get `root = Some(linked)`, so they resolve
+  wherever the linked component is placed. The file's mates are not copied (its
+  solved transforms are); links nested inside a linked file are embedded. The copy
+  is a cache, so the host opens without the file. `link_status(id, host_dir) ->
+  LinkStatus::{NotLinked, UpToDate, OutOfDate, Missing(reason)}`,
+  `update_link(id, host_dir)` (undoable), `break_link(id)` (the linked component
+  and its owned components become editable).
 - **Structure helpers.** `Document::move_root_into_component(name)` turns a flat
   document into an assembly: root sketches/features/imports move into a new
   component placed once (grounded); params stay at the document level.
@@ -581,8 +589,7 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
 Limits (all return clean errors or are documented here): mates solve by
 propagation (a closed loop of mates is checked, not solved; no joint limits); in-context features use the frame of their component's
 first occurrence; drawings, `Document::export` and `Document::bom()` still see the
-root component only; linked files cannot be assemblies; STEP components are
-read-only.
+root component only; STEP components are read-only.
 
 ## File format (`.cwk`), sync-friendly
 
@@ -638,6 +645,9 @@ verified on load.
 
 ## Changelog for GUI
 
+- **In-context frame and linked assemblies.** New serde-defaulted fields:
+  `Component.{context, owner, link_ids}`, `ContextRef.root` (add `root: None` to
+  struct literals), `AssemblyResult.notes`. Linked files may now be assemblies.
 - **Mates on nested occurrences.** `MateConnector.occurrence` paths can be nested;
   see "Mates" for which occurrence moves. `MateSolve.moved` / `floating` now list
   occurrences at any depth, and `solve_mates` writes nested local transforms.

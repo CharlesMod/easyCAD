@@ -309,6 +309,10 @@ pub enum FeatureKind {
         /// With `NewBody`: add it as a reference body (shown, never printed).
         #[serde(default)]
         reference: bool,
+        /// `None`: `source` starts at the document root. `Some(c)`: `source` starts
+        /// at component `c`'s context occurrence (used inside linked assemblies).
+        #[serde(default)]
+        root: Option<crate::assembly::ComponentId>,
     },
 }
 

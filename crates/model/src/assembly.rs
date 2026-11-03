@@ -175,6 +175,19 @@ pub struct Component {
     /// Process profile name used to make it (`None` = the document's active one).
     #[serde(default)]
     pub process: Option<String>,
+    /// The occurrence (path from the root) whose frame in-context features of this
+    /// component are built in. `None` = its first occurrence (depth first).
+    #[serde(default)]
+    pub context: Option<OccPath>,
+    /// Set on components brought in by a linked assembly file: the linked
+    /// component that owns them. They are replaced on update and unlocked on break;
+    /// their params see the owner's params (the file's root params).
+    #[serde(default)]
+    pub owner: Option<ComponentId>,
+    /// Linked components: id in the file -> id in this document, for every
+    /// component and occurrence brought in, so ids stay stable across updates.
+    #[serde(default)]
+    pub link_ids: Vec<(u32, u32)>,
 }
 
 /// How the two connectors of a mate move relative to each other.
@@ -393,10 +406,21 @@ impl DocData {
             return Some(d);
         }
         let c = self.component(id)?;
-        for p in &c.params.list {
-            match d.params.list.iter_mut().find(|q| q.name == p.name) {
-                Some(q) => *q = p.clone(),
-                None => d.params.list.push(p.clone()),
+        // document params, then the owning linked component's (a linked file's root
+        // params), then the component's own
+        let mut chain = vec![c];
+        while let Some(o) = chain.last().and_then(|x| x.owner).and_then(|o| self.component(o)) {
+            if chain.len() > 64 || chain.iter().any(|x| x.id == o.id) {
+                break;
+            }
+            chain.push(o);
+        }
+        for layer in chain.iter().rev() {
+            for p in &layer.params.list {
+                match d.params.list.iter_mut().find(|q| q.name == p.name) {
+                    Some(q) => *q = p.clone(),
+                    None => d.params.list.push(p.clone()),
+                }
             }
         }
         d.name = c.name.clone();
@@ -512,11 +536,9 @@ impl Document {
         let c = self.data.component(comp).ok_or_else(|| DocError::Other(format!("component {comp:?} does not exist")))?;
         let mut local = c.params.clone();
         local.set(name, expr)?;
-        let mut all = self.data.params.clone();
-        for p in &local.list {
-            all.set(&p.name, p.expr.clone())?;
-        }
-        all.evaluate()?;
+        let mut trial = self.data.clone();
+        trial.component_mut(comp).unwrap().params = local.clone();
+        trial.component_view(comp).unwrap().params.evaluate()?;
         self.edit_component(comp, &format!("Set {name}"), |c| c.params = local)
     }
 }
@@ -583,6 +605,8 @@ pub struct AssemblyResult {
     pub instances: Vec<Instance>,
     /// Dependency cycles, unknown components.
     pub issues: Vec<AssemblyIssue>,
+    /// Informational (e.g. which occurrence an in-context component is built in).
+    pub notes: Vec<String>,
 }
 
 impl AssemblyResult {
@@ -622,29 +646,53 @@ impl AssemblyCache {
     }
 }
 
-/// Components `c` references in context (by occurrence path).
-fn context_sources(d: &DocData, c: ComponentId) -> Vec<OccPath> {
+/// Key of an in-context source in the regenerator's context tables.
+pub(crate) fn ctx_key(root: Option<ComponentId>, source: &[OccurrenceId]) -> OccPath {
+    let mut k = Vec::with_capacity(source.len() + 2);
+    if let Some(c) = root {
+        k.push(OccurrenceId(u32::MAX));
+        k.push(OccurrenceId(c.0));
+    }
+    k.extend_from_slice(source);
+    k
+}
+
+type Frames = HashMap<ComponentId, (OccPath, Transform)>;
+
+/// In-context sources of component `c`: (table key, absolute path or why not).
+fn context_sources(d: &DocData, c: ComponentId, frames: &Frames) -> Vec<(OccPath, Result<OccPath, String>)> {
     let feats: &[Feature] = if c == ComponentId::ROOT { &d.features } else { d.component(c).map(|c| c.features.as_slice()).unwrap_or(&[]) };
-    let mut v: Vec<OccPath> = feats
+    let mut v: Vec<(OccPath, Result<OccPath, String>)> = feats
         .iter()
         .filter(|f| !f.suppressed)
         .filter_map(|f| match &f.kind {
-            FeatureKind::ContextRef { source, .. } => Some(source.clone()),
+            FeatureKind::ContextRef { source, root, .. } => {
+                let abs = match root {
+                    None => Ok(source.clone()),
+                    Some(r) => match frames.get(r) {
+                        Some((p, _)) => Ok(p.iter().chain(source).copied().collect()),
+                        None => Err(format!("in-context source: `{}` is not placed anywhere", d.component_name(*r))),
+                    },
+                };
+                Some((ctx_key(*root, source), abs))
+            }
             _ => None,
         })
         .collect();
-    v.sort();
-    v.dedup();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v.dedup_by(|a, b| a.0 == b.0);
     v
 }
 
 /// Order components so in-context sources come first; components on a cycle are
 /// reported and appended at the end. Returns (order, cycles as name chains).
-fn regen_order(d: &DocData) -> (Vec<ComponentId>, Vec<(Vec<ComponentId>, String)>) {
+fn regen_order(d: &DocData, frames: &Frames) -> (Vec<ComponentId>, Vec<(Vec<ComponentId>, String)>) {
     let mut ids = vec![ComponentId::ROOT];
     ids.extend(d.components.iter().map(|c| c.id));
-    let deps: BTreeMap<ComponentId, Vec<ComponentId>> =
-        ids.iter().map(|c| (*c, context_sources(d, *c).iter().filter_map(|p| d.component_at(p).ok()).collect())).collect();
+    let deps: BTreeMap<ComponentId, Vec<ComponentId>> = ids
+        .iter()
+        .map(|c| (*c, context_sources(d, *c, frames).iter().filter_map(|(_, p)| p.as_ref().ok().and_then(|p| d.component_at(p).ok())).collect()))
+        .collect();
     #[derive(Clone, Copy, PartialEq)]
     enum St {
         Visiting,
@@ -692,23 +740,46 @@ fn regen_order(d: &DocData) -> (Vec<ComponentId>, Vec<(Vec<ComponentId>, String)
     (order, named)
 }
 
-/// First occurrence path of each component (its in-context editing frame).
-fn first_paths(d: &DocData) -> HashMap<ComponentId, (OccPath, Transform)> {
+/// The in-context frame of each placed component: its `context` occurrence if set
+/// (and valid), else its first occurrence (depth first). Also notes for components
+/// with in-context features and several occurrences, and invalid `context` paths.
+fn context_frames(d: &DocData) -> (Frames, Vec<AssemblyIssue>, Vec<String>) {
     let mut m = HashMap::new();
+    let mut issues = Vec::new();
+    let mut notes = Vec::new();
     m.insert(ComponentId::ROOT, (Vec::new(), Transform::IDENTITY));
-    for (p, o, w) in d.all_occurrences() {
-        m.entry(o.component).or_insert((p, w));
+    let all = d.all_occurrences();
+    let mut count: HashMap<ComponentId, usize> = HashMap::new();
+    for (p, o, w) in &all {
+        *count.entry(o.component).or_default() += 1;
+        m.entry(o.component).or_insert((p.clone(), *w));
     }
-    m
+    for c in &d.components {
+        if let Some(p) = &c.context {
+            match (d.component_at(p), d.world_transform(p)) {
+                (Ok(cc), Ok(w)) if cc == c.id => {
+                    m.insert(c.id, (p.clone(), w));
+                }
+                _ => issues.push(AssemblyIssue { component: Some(c.id), message: format!("the context occurrence of `{}` is not one of its occurrences", c.name) }),
+            }
+        }
+        let in_ctx = c.features.iter().any(|f| !f.suppressed && matches!(f.kind, FeatureKind::ContextRef { .. }));
+        if in_ctx && count.get(&c.id).copied().unwrap_or(0) > 1 {
+            let at = m.get(&c.id).map(|(p, _)| p.iter().filter_map(|o| d.occurrence(*o).map(|o| o.name.clone())).collect::<Vec<_>>().join(" / ")).unwrap_or_default();
+            notes.push(format!("`{}` has in-context references and {} occurrences; it is built in the frame of `{at}`", c.name, count[&c.id]));
+        }
+    }
+    (m, issues, notes)
 }
 
 /// Regenerate every component (dependencies first) and place the instances.
 /// `root` is the document's own regenerator (shared with `Document::regenerate`).
 pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: &mut Regenerator, cache: &mut AssemblyCache) -> AssemblyResult {
-    let (order, cycles) = regen_order(d);
+    let (frames, frame_issues, notes) = context_frames(d);
+    let (order, cycles) = regen_order(d, &frames);
     let mut issues: Vec<AssemblyIssue> = cycles.iter().map(|(c, m)| AssemblyIssue { component: c.first().copied(), message: m.clone() }).collect();
+    issues.extend(frame_issues);
     let on_cycle: BTreeMap<ComponentId, String> = cycles.iter().flat_map(|(c, m)| c.iter().map(move |x| (*x, m.clone()))).collect();
-    let frames = first_paths(d);
     let mut results: Vec<ComponentResult> = Vec::new();
     for c in order {
         let Some(view) = d.component_view(c) else { continue };
@@ -717,26 +788,33 @@ pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: 
         let mut ctx = HashMap::new();
         let mut keys = HashMap::new();
         let mut errs = HashMap::new();
-        for src in context_sources(d, c) {
+        for (key, abs) in context_sources(d, c, &frames) {
+            let src = match abs {
+                Ok(p) => p,
+                Err(e) => {
+                    errs.insert(key, e);
+                    continue;
+                }
+            };
             let sc = match d.component_at(&src) {
                 Ok(sc) => sc,
                 Err(e) => {
-                    errs.insert(src, format!("in-context source: {e}"));
+                    errs.insert(key, format!("in-context source: {e}"));
                     continue;
                 }
             };
             if let (Some(m), true) = (on_cycle.get(&c), on_cycle.contains_key(&sc)) {
-                errs.insert(src, m.clone());
+                errs.insert(key, m.clone());
                 continue;
             }
             let Some(sr) = results.iter().find(|r| r.component == sc) else {
-                errs.insert(src, format!("in-context source `{}` has not been regenerated", d.component_name(sc)));
+                errs.insert(key, format!("in-context source `{}` has not been regenerated", d.component_name(sc)));
                 continue;
             };
             let rel = match d.world_transform(&src) {
                 Ok(w) => host.inverse().mul(&w),
                 Err(e) => {
-                    errs.insert(src, e);
+                    errs.insert(key, e);
                     continue;
                 }
             };
@@ -751,16 +829,16 @@ pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: 
                         bodies.push(ContextBody { name: b.name.clone(), reference: b.reference, shape: s });
                     }
                     Err(e) => {
-                        errs.insert(src.clone(), e.to_string());
+                        errs.insert(key.clone(), e.to_string());
                     }
                 }
             }
             {
                 use std::hash::{Hash, Hasher};
                 rel.to_rows().iter().for_each(|x| x.to_bits().hash(&mut h));
-                keys.insert(src.clone(), h.finish());
+                keys.insert(key.clone(), h.finish());
             }
-            ctx.insert(src, Arc::new(bodies));
+            ctx.insert(key, Arc::new(bodies));
         }
         let regen = if c == ComponentId::ROOT { &mut *root } else { cache.regenerator(c) };
         regen.context = ctx;
@@ -811,7 +889,7 @@ pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: 
         }
     }
     instances.sort_by(|a, b| a.path.cmp(&b.path));
-    AssemblyResult { components: results, instances, issues }
+    AssemblyResult { components: results, instances, issues, notes }
 }
 
 fn step_tree(blob: &str, blobs: &BlobStore, cache: &mut AssemblyCache) -> Result<Arc<occt::StepTree>, String> {
@@ -1616,19 +1694,86 @@ fn read_linked(dir: &std::path::Path) -> Result<(DocData, String, Vec<Vec<u8>>),
     let json = std::fs::read_to_string(dir.join(crate::document::DOC_FILE))?;
     let hash = crate::document::sha256_hex(json.as_bytes());
     let src = Document::load_from_dir(dir)?;
-    if !src.data.components.is_empty() || !src.data.occurrences.is_empty() {
-        // TODO: link files that are assemblies themselves (remap their component ids).
-        return Err(DocError::Other("linking a file that is itself an assembly is not supported yet; link its parts".into()));
-    }
     let blobs = src.blob_refs().iter().filter_map(|h| src.blobs.get(h)).map(|b| (*b).clone()).collect();
     Ok((src.data, hash, blobs))
 }
 
-fn copy_linked(c: &mut Component, src: &DocData) {
+/// Id remapping for content copied from a linked file.
+struct LinkMap {
+    map: BTreeMap<u32, u32>,
+    old: BTreeMap<u32, u32>,
+    owner: ComponentId,
+}
+
+impl LinkMap {
+    fn id(&mut self, d: &mut DocData, old: u32) -> u32 {
+        if old == 0 {
+            return self.owner.0; // the linked file's root is the linked component
+        }
+        if let Some(n) = self.map.get(&old) {
+            return *n;
+        }
+        let n = self.old.get(&old).copied().unwrap_or_else(|| d.alloc());
+        self.map.insert(old, n);
+        n
+    }
+    fn occ(&mut self, d: &mut DocData, o: &Occurrence) -> Occurrence {
+        Occurrence { id: OccurrenceId(self.id(d, o.id.0)), component: ComponentId(self.id(d, o.component.0)), ..o.clone() }
+    }
+    fn path(&mut self, d: &mut DocData, p: &[OccurrenceId]) -> OccPath {
+        p.iter().map(|o| OccurrenceId(self.id(d, o.0))).collect()
+    }
+    fn features(&mut self, d: &mut DocData, fs: &[Feature]) -> Vec<Feature> {
+        fs.iter()
+            .map(|f| {
+                let mut f = f.clone();
+                if let FeatureKind::ContextRef { source, root, .. } = &mut f.kind {
+                    *source = self.path(d, source);
+                    // paths inside the file start at its root = the linked component
+                    *root = Some(match root {
+                        None => self.owner,
+                        Some(c) => ComponentId(self.id(d, c.0)),
+                    });
+                }
+                f
+            })
+            .collect()
+    }
+}
+
+/// Copy a linked file's content into component `owner` (and owned sub-components),
+/// reusing the ids of a previous copy.
+fn import_linked(d: &mut DocData, owner: ComponentId, src: &DocData, path: String, hash: String) -> Result<(), DocError> {
+    let prev = d.component(owner).map(|c| c.link_ids.iter().copied().collect()).unwrap_or_default();
+    let mut lm = LinkMap { map: BTreeMap::new(), old: prev, owner };
+    d.components.retain(|c| c.owner != Some(owner));
+    let mut comps = Vec::new();
+    for c in &src.components {
+        let id = ComponentId(lm.id(d, c.id.0));
+        let children = c.children.iter().map(|o| lm.occ(d, o)).collect();
+        let features = lm.features(d, &c.features);
+        let context = c.context.as_ref().map(|p| lm.path(d, p));
+        let source = match &c.source {
+            ComponentSource::Linked { .. } => ComponentSource::Native, // nested links are embedded
+            s => s.clone(),
+        };
+        comps.push(Component { id, children, features, context, source, owner: Some(owner), locked: true, link_ids: Vec::new(), ..c.clone() });
+    }
+    let features = lm.features(d, &src.features);
+    let children: Vec<Occurrence> = src.occurrences.iter().map(|o| lm.occ(d, o)).collect();
+    d.next_id = d.next_id.max(src.next_id);
+    let link_ids: Vec<(u32, u32)> = lm.map.into_iter().collect();
+    let c = d.component_mut(owner).ok_or_else(|| DocError::Other("no such component".into()))?;
     c.params = src.params.clone();
     c.sketches = src.sketches.clone();
-    c.features = src.features.clone();
+    c.features = features;
     c.imports = src.imports.clone();
+    c.children = children;
+    c.source = ComponentSource::Linked { path, hash };
+    c.link_ids = link_ids;
+    d.components.extend(comps);
+    d.components.sort_by_key(|c| c.id);
+    Ok(())
 }
 
 impl Document {
@@ -1643,12 +1788,11 @@ impl Document {
         }
         let path = relative_path(host_dir, cwk);
         self.edit(&format!("Link {}", src.name), |d| {
-            let id = ComponentId(d.alloc());
-            let mut c = Component { id, name: src.name.clone(), source: ComponentSource::Linked { path, hash }, locked: true, ..Default::default() };
-            copy_linked(&mut c, &src);
             // ids inside the linked content stay unique against later allocations
             d.next_id = d.next_id.max(src.next_id);
-            d.components.push(c);
+            let id = ComponentId(d.alloc());
+            d.components.push(Component { id, name: src.name.clone(), locked: true, ..Default::default() });
+            import_linked(d, id, &src, path, hash)?;
             Ok::<_, DocError>(id)
         })
     }
@@ -1672,13 +1816,7 @@ impl Document {
         for b in blobs {
             self.blobs.put(b);
         }
-        self.edit(&format!("Update link {}", src.name), |d| {
-            d.next_id = d.next_id.max(src.next_id);
-            let c = d.component_mut(id).ok_or_else(|| DocError::Other("no such component".into()))?;
-            copy_linked(c, &src);
-            c.source = ComponentSource::Linked { path, hash };
-            Ok(())
-        })
+        self.edit(&format!("Update link {}", src.name), |d| import_linked(d, id, &src, path, hash))
     }
 
     /// Break a link: the cached content becomes a normal, editable component.
@@ -1690,6 +1828,11 @@ impl Document {
             }
             c.source = ComponentSource::Native;
             c.locked = false;
+            c.link_ids.clear();
+            // `owner` stays: it scopes params (the file's root params live on `id`)
+            for o in d.components.iter_mut().filter(|o| o.owner == Some(id)) {
+                o.locked = matches!(o.source, ComponentSource::Step { .. });
+            }
             Ok(())
         })
     }
@@ -1766,7 +1909,7 @@ impl Document {
                     id: fid,
                     name: format!("{body} (in context)"),
                     suppressed: false,
-                    kind: FeatureKind::ContextRef { source: src.clone(), body: Some(body.clone()), op: crate::feature::BoolOp::NewBody, target: None, offset: zero(), reference: false },
+                    kind: FeatureKind::ContextRef { source: src.clone(), body: Some(body.clone()), op: crate::feature::BoolOp::NewBody, target: None, offset: zero(), reference: false, root: None },
                 };
                 d.components.push(Component { id, name: cname.clone(), features: vec![feat], ..Default::default() });
                 let occ = OccurrenceId(d.alloc());

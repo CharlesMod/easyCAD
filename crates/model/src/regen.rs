@@ -428,9 +428,10 @@ impl Regenerator {
             key.hash(&mut h);
             fingerprint(f, doc, &vals).hash(&mut h);
             param_err.hash(&mut h);
-            if let FeatureKind::ContextRef { source, .. } = &f.kind {
-                self.context_keys.get(source).hash(&mut h);
-                self.context_errors.get(source).hash(&mut h);
+            if let FeatureKind::ContextRef { source, root, .. } = &f.kind {
+                let k = crate::assembly::ctx_key(*root, source);
+                self.context_keys.get(&k).hash(&mut h);
+                self.context_errors.get(&k).hash(&mut h);
             }
             key = h.finish();
             if let Some(hit) = self.cache.get(&key).cloned() {
@@ -1000,9 +1001,10 @@ impl Ctx<'_> {
                     self.apply_op(st, fid, name, BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
                 }
             }
-            FeatureKind::ContextRef { source, body, op, target, offset, reference } => {
-                let Some(bodies) = self.regen.context.get(source).cloned() else {
-                    return fail(self.regen.context_errors.get(source).cloned().unwrap_or_else(|| {
+            FeatureKind::ContextRef { source, body, op, target, offset, reference, root } => {
+                let key = crate::assembly::ctx_key(*root, source);
+                let Some(bodies) = self.regen.context.get(&key).cloned() else {
+                    return fail(self.regen.context_errors.get(&key).cloned().unwrap_or_else(|| {
                         format!("in-context source {source:?} is not available (regenerate the assembly)")
                     }));
                 };

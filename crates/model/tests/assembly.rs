@@ -176,7 +176,7 @@ fn base_lid_doc() -> (Document, [ComponentId; 3], [OccurrenceId; 3], FeatureId) 
     let ol = doc.add_occurrence(ComponentId::ROOT, lid, "Lid:1", at).unwrap();
     let op = doc.add_occurrence(ComponentId::ROOT, board, "Board:1", Transform::translation(DVec3::new(100.0, 0.0, 5.0))).unwrap();
     let ctx = doc
-        .add_feature_in(lid, "Fit to base", FeatureKind::ContextRef { source: vec![ob], body: None, op: BoolOp::Cut, target: Some(plate), offset: 0.0.into(), reference: false })
+        .add_feature_in(lid, "Fit to base", FeatureKind::ContextRef { source: vec![ob], body: None, op: BoolOp::Cut, target: Some(plate), offset: 0.0.into(), reference: false, root: None })
         .unwrap();
     (doc, [base, lid, board], [ob, ol, op], ctx)
 }
@@ -213,7 +213,7 @@ fn lid_in_context_follows_the_base() {
 fn in_context_cycle_is_reported() {
     let (mut doc, [base, _lid, _], [_, ol, _], _) = base_lid_doc();
     let f = doc
-        .add_feature_in(base, "Back-ref", FeatureKind::ContextRef { source: vec![ol], body: None, op: BoolOp::NewBody, target: None, offset: 0.0.into(), reference: true })
+        .add_feature_in(base, "Back-ref", FeatureKind::ContextRef { source: vec![ol], body: None, op: BoolOp::NewBody, target: None, offset: 0.0.into(), reference: true, root: None })
         .unwrap();
     let r = doc.regenerate_assembly().clone();
     let cyc: Vec<_> = r.issues.iter().filter(|i| i.message.contains("in-context dependency cycle")).collect();
@@ -655,4 +655,78 @@ fn mates_on_nested_occurrences() {
     // Screw:1 of Bracket:1 still sits on its target (bracket moved again? no: unchanged)
     let w = doc.data.world_transform(&[a, s1]).unwrap();
     assert!((w.point(DVec3::ZERO) - target).length() < 1e-9);
+}
+
+/// Linked `.cwk` files that are assemblies themselves: the tree comes along with
+/// stable ids across updates, and in-context features inside resolve relative to
+/// where the linked component is placed.
+#[test]
+fn linked_assembly_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rack, _, _, [_, b2]) = bracket_assembly();
+    let rack_dir = dir.path().join("Rack.cwk");
+    rack.save_to_dir(&rack_dir).unwrap();
+    let (boxdoc, ..) = base_lid_doc();
+    let box_dir = dir.path().join("Box.cwk");
+    boxdoc.save_to_dir(&box_dir).unwrap();
+
+    let mut doc = Document::new("Cabinet");
+    let r = doc.link_component(&rack_dir, dir.path()).unwrap();
+    let o1 = doc.add_occurrence(ComponentId::ROOT, r, "Rack:1", Transform::IDENTITY).unwrap();
+    let o2 = doc.add_occurrence(ComponentId::ROOT, r, "Rack:2", Transform::translation(DVec3::Z * 100.0)).unwrap();
+    let res = doc.regenerate_assembly().clone();
+    assert!(res.errors().is_empty(), "{:?}", res.errors());
+    assert_eq!(res.instances.len(), 2 * 2 * 5, "2 racks × 2 brackets × (plate + 4 screws)");
+    assert!(doc.data.components.iter().filter(|c| c.owner == Some(r)).all(|c| c.locked));
+    // a mate path into the linked tree
+    let b2_here = doc.data.component(r).unwrap().children[1].id;
+    let w_before = doc.data.world_transform(&[o2, b2_here]).unwrap();
+    // the file changes (Bracket:2 moves): out of date, update keeps the ids
+    rack.edit_occurrence(b2, "move", |o| o.transform.translation.x = 150.0).unwrap();
+    rack.save_to_dir(&rack_dir).unwrap();
+    assert_eq!(doc.link_status(r, dir.path()), LinkStatus::OutOfDate);
+    let ids_before: Vec<u32> = doc.data.components.iter().map(|c| c.id.0).collect();
+    doc.update_link(r, dir.path()).unwrap();
+    let ids_after: Vec<u32> = doc.data.components.iter().map(|c| c.id.0).collect();
+    assert_eq!(ids_before, ids_after);
+    assert_eq!(doc.data.component(r).unwrap().children[1].id, b2_here);
+    let w_after = doc.data.world_transform(&[o2, b2_here]).unwrap();
+    assert!((w_after.translation.x - w_before.translation.x - 50.0).abs() < 1e-9);
+    assert!(doc.regenerate_assembly().errors().is_empty());
+    let _ = o1;
+
+    // a linked file with in-context features, placed away from the origin
+    let bx = doc.link_component(&box_dir, dir.path()).unwrap();
+    doc.add_occurrence(ComponentId::ROOT, bx, "Box:1", Transform::new(DQuat::from_rotation_z(0.5), DVec3::new(500.0, 0.0, 0.0))).unwrap();
+    let res = doc.regenerate_assembly().clone();
+    assert!(res.errors().is_empty(), "{:?}", res.errors());
+    let lid = doc.data.components.iter().find(|c| c.owner == Some(bx) && c.name == "Lid").unwrap().id;
+    let v = res.component(lid).unwrap().regen.bodies[0].shape().volume().unwrap();
+    assert!((v - 60.0 * 40.0 * 2.0 - 56.0 * 36.0 * 5.0).abs() < 0.01 * v, "{v}");
+    // break the link: everything becomes editable
+    doc.break_link(bx).unwrap();
+    assert!(doc.data.components.iter().filter(|c| c.owner == Some(bx)).all(|c| !c.locked));
+    doc.set_component_param(lid, "wall", "3").unwrap();
+    assert!(doc.regenerate_assembly().errors().is_empty(), "the file's params still apply");
+}
+
+#[test]
+fn in_context_frame_is_selectable() {
+    let (mut doc, [base, lid, _], [ob, ol, _], _) = base_lid_doc();
+    // a second lid occurrence elsewhere: noted, still built in Lid:1's frame
+    let ol2 = doc.add_occurrence(ComponentId::ROOT, lid, "Lid:2", Transform::translation(DVec3::new(0.0, 300.0, 0.0))).unwrap();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty());
+    assert!(r.notes.iter().any(|n| n.contains("Lid:1")), "{:?}", r.notes);
+    let v1 = r.component(lid).unwrap().regen.bodies[0].shape().volume().unwrap();
+    // choose Lid:2 as the context: it is away from the base, so nothing is cut
+    doc.edit_component(lid, "context", |c| c.context = Some(vec![ol2])).unwrap();
+    let r = doc.regenerate_assembly().clone();
+    let v2 = r.component(lid).unwrap().regen.bodies[0].shape().volume().unwrap();
+    assert!(v2 > v1 + 1000.0, "{v1} {v2}");
+    assert!(r.notes.iter().any(|n| n.contains("Lid:2")), "{:?}", r.notes);
+    // an invalid context is an issue
+    doc.edit_component(lid, "context", |c| c.context = Some(vec![ob])).unwrap();
+    assert!(doc.regenerate_assembly().issues.iter().any(|i| i.message.contains("context occurrence")));
+    let _ = (base, ol);
 }
