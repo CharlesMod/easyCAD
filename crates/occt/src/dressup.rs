@@ -158,14 +158,12 @@ struct Item {
 const MATCH_TOL: f64 = 1e-3;
 
 fn apply(kind: DressUpKind, s: &Shape, edges: &[u32], sizes: &[f64]) -> Result<Shape> {
-    let r = match kind {
-        DressUpKind::Fillet => s.fillet_raw(edges, sizes)?,
-        DressUpKind::Chamfer => s.chamfer_raw(edges, sizes)?,
-    };
-    if !r.is_valid() {
-        return Err(crate::Error("result is not a valid solid".into()));
+    // the shim checks every fillet/chamfer result (BRepCheck, ShapeFix on failure)
+    // and errors when it stays invalid: no second check here
+    match kind {
+        DressUpKind::Fillet => s.fillet_raw(edges, sizes),
+        DressUpKind::Chamfer => s.chamfer_raw(edges, sizes),
     }
-    Ok(r)
 }
 
 /// Resolve items on `s`; dedupes edges, keeping the first size.

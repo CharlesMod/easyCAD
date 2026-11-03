@@ -30,6 +30,9 @@
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepLib.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Solid.hxx>
@@ -48,6 +51,7 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeFillet2d.hxx>
 #include <BRepGProp.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
@@ -206,9 +210,22 @@ TopTools_IndexedMapOfShape mapOf(const TopoDS_Shape &s, TopAbs_ShapeEnum kind) {
   return m;
 }
 
-// Parallel booleans / meshing (set CW_SERIAL_BOP=1 to compare against serial).
+// Booleans run serially: on enclosure-sized models OCCT's parallel boolean costs
+// about 3x the CPU for no gain in wall time (and loses when the machine is busy);
+// independent booleans are run concurrently by the callers instead (the joint's
+// two halves). CW_PARALLEL_BOP=1 turns the parallel boolean back on to compare,
+// CW_NO_OBB=1 the oriented-box prefilter off. Meshing stays parallel (it scales):
+// CW_SERIAL_MESH=1 to compare.
 bool parallelBop() {
-  static const bool on = std::getenv("CW_SERIAL_BOP") == nullptr;
+  static const bool on = std::getenv("CW_PARALLEL_BOP") != nullptr;
+  return on;
+}
+bool useObb() {
+  static const bool on = std::getenv("CW_NO_OBB") == nullptr;
+  return on;
+}
+bool parallelMesh() {
+  static const bool on = std::getenv("CW_SERIAL_MESH") == nullptr;
   return on;
 }
 
@@ -321,7 +338,7 @@ TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op
   alg->SetTools(tools);
   alg->SetNonDestructive(Standard_True);
   alg->SetRunParallel(parallelBop());
-  alg->SetUseOBB(parallelBop());
+  alg->SetUseOBB(useObb());
   alg->Build();
   if (!alg->IsDone() || alg->HasErrors()) {
     std::ostringstream ss;
@@ -585,7 +602,7 @@ std::unique_ptr<Shape> fuse_all(const Shape &c) {
   f.SetTools(tools);
   f.SetNonDestructive(Standard_True);
   f.SetRunParallel(parallelBop());
-  f.SetUseOBB(parallelBop());
+  f.SetUseOBB(useObb());
   f.Build();
   if (!f.IsDone() || f.HasErrors()) {
     std::ostringstream ss;
@@ -1127,6 +1144,30 @@ TopoDS_Shape facesFromWires(const gp_Pln &pln, const std::vector<TopoDS_Wire> &w
   if (n == 0) fail("offset region vanished");
   return c;
 }
+// MakeOffset's arc joins leave zero-length arcs where two edges meet almost
+// tangentially (a line ending 1e-7 off its arc). They are harmless in the region,
+// but a drafted extrusion of it turns them into cones whose radius goes negative.
+// Rebuild such a wire without them (the neighbours' ends coincide within tolerance).
+TopoDS_Wire dropTinyEdges(const TopoDS_Wire &w) {
+  std::vector<TopoDS_Edge> keep;
+  bool tiny = false;
+  for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
+    GProp_GProps g;
+    BRepGProp::LinearProperties(ex.Current(), g);
+    if (g.Mass() < 1e-4) {
+      tiny = true;
+      continue;
+    }
+    keep.push_back(ex.Current());
+  }
+  if (!tiny || keep.empty()) return w;
+  try {
+    OCC_CATCH_SIGNALS
+    return wireFrom(keep);
+  } catch (...) {
+    return w;
+  }
+}
 } // namespace
 
 std::unique_ptr<Shape> section_face(const Shape &s, V3 origin, V3 normal) {
@@ -1297,12 +1338,92 @@ std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
     if (res.IsNull()) fail("2D offset failed");
     for (TopExp_Explorer ex(res, TopAbs_WIRE); ex.More(); ex.Next()) {
       TopoDS_Wire w = TopoDS::Wire(ex.Current());
-      if (BRep_Tool::IsClosed(w)) wires.push_back(w);
+      if (BRep_Tool::IsClosed(w)) wires.push_back(dropTinyEdges(w));
     }
   }
   if (first) fail("offset_face: no planar face");
   if (wires.empty()) fail("offset region vanished");
   return wrap(facesFromWires(pln, wires, normal));
+}
+
+std::unique_ptr<Shape> taper_prism(const Shape &s, V3 v, double inset) {
+  requireShape(s, "taper");
+  gp_Vec vec = Vv(v);
+  if (vec.Magnitude() < kTol) fail("taper height must be non-zero");
+  if (inset <= 0) fail("taper inset must be positive");
+  std::vector<TopoDS_Face> bottom = facesOf(s.s);
+  gp_Trsf up;
+  up.SetTranslation(vec);
+  std::vector<TopoDS_Face> top = facesOf(BRepBuilderAPI_Transform(offset_face(s, -inset)->s, up, Standard_True).Shape());
+  if (bottom.size() != 1 || top.size() != 1) fail("taper: the region splits or vanishes at that inset");
+  auto loops = [](const TopoDS_Face &f) {
+    TopoDS_Wire outer = BRepTools::OuterWire(f);
+    std::vector<TopoDS_Wire> holes;
+    for (TopExp_Explorer ex(f, TopAbs_WIRE); ex.More(); ex.Next())
+      if (!ex.Current().IsSame(outer)) holes.push_back(TopoDS::Wire(ex.Current()));
+    return std::make_pair(outer, holes);
+  };
+  auto [bo, bh] = loops(bottom[0]);
+  auto [to, th] = loops(top[0]);
+  if (bh.size() != th.size()) fail("taper: a hole vanishes at that inset");
+  auto centre = [](const TopoDS_Shape &w) {
+    Bnd_Box b;
+    BRepBndLib::Add(w, b);
+    double x0, y0, z0, x1, y1, z1;
+    b.Get(x0, y0, z0, x1, y1, z1);
+    return gp_Pnt((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  };
+  auto nEdges = [](const TopoDS_Wire &w) {
+    int n = 0;
+    for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) ++n;
+    return n;
+  };
+  // ruled side faces of a loop pair; sewn with both caps into one closed shell
+  // (no boolean: the loops never cross)
+  BRepBuilderAPI_Sewing sew(1e-6);
+  sew.Add(bottom[0]);
+  sew.Add(top[0]);
+  auto loft = [&](const TopoDS_Wire &a, const TopoDS_Wire &b) {
+    if (nEdges(a) != nEdges(b)) fail("taper: a corner changes shape at that inset");
+    BRepOffsetAPI_ThruSections ts(Standard_False, Standard_True);
+    ts.AddWire(a);
+    ts.AddWire(b);
+    ts.Build();
+    if (!ts.IsDone()) fail("taper: ruled loft failed");
+    for (TopExp_Explorer ex(ts.Shape(), TopAbs_FACE); ex.More(); ex.Next()) sew.Add(ex.Current());
+  };
+  loft(bo, to);
+  std::vector<bool> used(th.size(), false);
+  for (const auto &h : bh) {
+    gp_Pnt c = centre(h);
+    int best = -1;
+    double bd = 1e300;
+    for (size_t j = 0; j < th.size(); ++j) {
+      double d = centre(th[j]).Translated(-vec).Distance(c);
+      if (!used[j] && d < bd) {
+        bd = d;
+        best = static_cast<int>(j);
+      }
+    }
+    used[static_cast<size_t>(best)] = true;
+    loft(h, th[static_cast<size_t>(best)]);
+  }
+  sew.Perform();
+  TopoDS_Shape sewn = sew.SewedShape();
+  TopExp_Explorer sx(sewn, TopAbs_SHELL);
+  if (!sx.More()) fail("taper: the faces do not close");
+  TopoDS_Shell shell = TopoDS::Shell(sx.Current());
+  sx.Next();
+  if (sx.More() || !BRep_Tool::IsClosed(shell)) fail("taper: the faces do not close");
+  TopoDS_Solid solid;
+  BRep_Builder bb;
+  bb.MakeSolid(solid);
+  bb.Add(solid, shell);
+  BRepLib::OrientClosedSolid(solid);
+  TopoDS_Shape r = solid;
+  BRepCheck_Analyzer an(r);
+  if (!an.IsValid()) fail("taper: the result is not a valid solid");
+  return wrap(r);
 }
 
 std::unique_ptr<Shape> fill_holes(const Shape &s) {
@@ -1527,7 +1648,7 @@ MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad) {
   // threads may be reading (booleans, HLR, STL) or meshing at another density. A fresh
   // copy also means each quality level gets its own density (BRepMesh never coarsens).
   TopoDS_Shape m = privateCopy(s.s);
-  BRepMesh_IncrementalMesh mesher(m, lin_defl, Standard_False, ang_defl_rad, parallelBop());
+  BRepMesh_IncrementalMesh mesher(m, lin_defl, Standard_False, ang_defl_rad, parallelMesh());
   if (!mesher.IsDone()) fail("meshing failed");
   MeshData md;
   auto fm = mapOf(m, TopAbs_FACE);

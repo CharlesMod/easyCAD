@@ -392,6 +392,15 @@ impl Shape {
         wrap(raw::extrude_draft(self.r(), v3(v), draft_deg.to_radians(), &neutral.raw()))
     }
 
+    /// Planar region(s) extruded by `v` while every boundary moves inward by
+    /// `inset` (outer loops shrink, holes grow): a ruled taper built from the 2D
+    /// offset of the region, without OCCT's draft algorithm (which can hang on
+    /// near-tangent sections). `inset == |v|` is a 45° lead-in. Errors when the
+    /// offset changes a loop's edge count (a corner arc vanished) or the region.
+    pub fn taper(&self, v: DVec3, inset: f64) -> Result<Shape> {
+        wrap(raw::taper_prism(self.r(), v3(v), inset))
+    }
+
     pub fn revolve(&self, axis_origin: DVec3, axis_dir: DVec3, angle_deg: f64) -> Result<Shape> {
         wrap(raw::revolve(self.r(), v3(axis_origin), v3(axis_dir), angle_deg.to_radians()))
     }

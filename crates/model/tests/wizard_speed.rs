@@ -3,12 +3,20 @@
 //! `easycad_app::wizard::build` into `tests/data/wizard_*.ecad`.
 //!
 //! `cargo test -p easycad-model --release --test wizard_speed -- --nocapture`
-//! prints per-feature times for a cold regen and for single parameter edits.
+//! prints per-feature times for a cold regen and for single parameter edits
+//! (`CW_PROF=1` adds the steps inside the shell, standoffs and joint).
+//!
+//! Release builds assert the budget: a parameter edit regenerates in under 300 ms
+//! (typically ~200-250 ms on a 20-core machine shared with other builds; the
+//! assertion allows 1.5x for a busy machine) and undo is a cache hit.
 
 use std::path::Path;
 use std::time::Instant;
 
 use easycad_model::document::Document;
+
+/// Per parameter edit (ms); asserted with 1.5x headroom.
+const BUDGET_MS: f64 = 300.0;
 
 fn load(name: &str) -> Document {
     Document::load_from_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(name)).unwrap()
@@ -61,6 +69,20 @@ fn wizard_enclosure_regen_times() {
             }
         }
         println!("best of 3: cold {:.0} ms · `wall` edit {:.0} ms · `lid_split` edit {:.0} ms · undo ×2 {:.2} ms", best[0], best[1], best[2], best[3]);
+        // what the GUI does next: tessellate the changed bodies (the board's mesh is reused)
+        let mut doc = load(file);
+        doc.regenerate();
+        doc.set_param("wall", "2.3").unwrap();
+        let bodies = doc.regenerate().bodies.clone();
+        let t = Instant::now();
+        for b in &bodies {
+            b.mesh().unwrap();
+        }
+        println!("re-tessellation after the edit: {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        if !cfg!(debug_assertions) {
+            assert!(best[1] < BUDGET_MS * 1.5 && best[2] < BUDGET_MS * 1.5, "{file}: parameter edit over budget: {best:?}");
+            assert!(best[3] < 5.0, "{file}: undo is not a cache hit: {best:?}");
+        }
     }
     // the assembly version (Enclosure master → Base + Lid in context, the board)
     let mut doc = load("wizard_step_asm.ecad");
@@ -73,6 +95,10 @@ fn wizard_enclosure_regen_times() {
     assert!(r.errors().is_empty(), "{:?}", r.errors());
     let edit = t.elapsed().as_secs_f64() * 1000.0;
     println!("== assembly: cold {cold:.0} ms · `wall` edit {edit:.0} ms");
+    if !cfg!(debug_assertions) {
+        // the master's regen plus the in-context Base / Lid (cheap: context refs)
+        assert!(edit < BUDGET_MS * 2.0, "assembly `wall` edit {edit:.0} ms");
+    }
     for c in &r.components {
         println!("    {:<12} recomputed {} ({:.0} ms)", c.name, c.regen.recomputed, c.regen.reports.iter().filter(|x| !x.cached).map(|x| x.elapsed_ms).sum::<f64>());
     }

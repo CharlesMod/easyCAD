@@ -575,23 +575,30 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 ));
             }
             let tband = band(tw, "tongue")?;
+            lap("tongue band");
             let li = ev(lead_in)?.min(tw * 0.45).min(th * 0.9);
-            let tongue = if li > 1e-3 {
+            // the tongue as one or two solids, fused into the half with everything else
+            let tongue: Vec<Shape> = if li > 1e-3 {
                 // lead-in: the top `li` of the tongue tapers 45° on both sides. Built
-                // directly as a drafted prism (cheap, deterministic); a raw chamfer is
-                // the fallback, and no lead-in (with a warning) the last resort.
+                // directly as a ruled taper on top of the straight part (both go to the
+                // half's one fuse: no boolean here); a raw chamfer is the fallback, a
+                // step next, and no lead-in (with a warning) the last resort.
                 let dirv = n * -side(*tongue_on);
                 let body = k(prism(&tband, n, 0.0, -side(*tongue_on) * (th - li)), "tongue")?;
-                let drafted = tband.translated(dirv * (th - li)).and_then(|f| {
-                    let fr = Frame { origin: plane.origin + dirv * (th - li), x_dir: plane.x_dir, normal: dirv };
-                    f.extrude_ext(&fr, dirv, li, false, 45.0)
-                });
-                let full_v = tband.area().unwrap_or(0.0) * th;
+                let band_a = tband.area().unwrap_or(0.0);
+                let full_v = band_a * th;
                 let plausible = |s: &Shape| s.is_valid() && s.count(occt::ShapeKind::Solid) == 1 && s.volume().is_ok_and(|v| v < full_v && v > full_v * (th - li) / th * 0.999);
-                let fused = drafted.and_then(|top| body.fuse(&top)).map(tidy);
-                match fused {
-                    Ok(t) if plausible(&t) => t,
-                    _ => {
+                // the taper alone (a ruled loft to the band inset by `li`; OCCT's draft
+                // algorithm hangs on some sections): smaller than its straight prism
+                let drafted = tband
+                    .translated(dirv * (th - li))
+                    .and_then(|f| f.taper(dirv * li, li))
+                    .ok()
+                    .filter(|d| d.volume().is_ok_and(|v| v > 1e-9 && v < band_a * li));
+                lap(if drafted.is_some() { "tongue taper" } else { "tongue taper failed" });
+                match drafted {
+                    Some(top) => vec![body, top],
+                    None => {
                         let full = k(prism(&tband, n, 0.0, -side(*tongue_on) * th), "tongue")?;
                         let top = if *tongue_on == Half::Lower { n } else { -n };
                         let sel = crate::select::EdgeSelector::OfFace(crate::select::FaceSelector::Extreme { normal: top, which: crate::select::Extremum::Max });
@@ -605,7 +612,7 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                             let top = prism(&narrow, n, -side(*tongue_on) * (th - li), -side(*tongue_on) * th).ok()?;
                             body.fuse(&top).ok().map(tidy).filter(|s| plausible(s))
                         };
-                        match chamfered {
+                        vec![match chamfered {
                             Some(t) => t,
                             None => match stepped() {
                                 Some(t) => {
@@ -617,15 +624,17 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                                     full
                                 }
                             },
-                        }
+                        }]
                     }
                 }
             } else {
-                k(prism(&tband, n, 0.0, -side(*tongue_on) * th), "tongue")?
+                vec![k(prism(&tband, n, 0.0, -side(*tongue_on) * th), "tongue")?]
             };
             let groove = k(prism(&band(gw, "groove")?, n, 0.0, -side(*tongue_on) * depth), "groove")?;
             let g_half = other(*tongue_on);
-            add(*tongue_on, tongue, &mut pend)?;
+            for t in tongue {
+                add(*tongue_on, t, &mut pend)?;
+            }
             cut(g_half, &groove, &mut pend, "groove", depth)?;
             rep.clearance_per_side = Some((gw - tw) / 2.0);
         }
@@ -864,18 +873,12 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
     let [lo_ops, up_ops] = pend.take();
     // the halves are independent: finish them concurrently
     let (lo, up) = std::thread::scope(|sc| {
-        let h = sc.spawn(|| apply_pending(upper, up_ops));
-        let lo = apply_pending(lower, lo_ops);
+        let h = sc.spawn(|| apply_pending(upper, up_ops, "upper"));
+        let lo = apply_pending(lower, lo_ops, "lower");
         (lo, h.join().unwrap_or_else(|_| Err("joint worker panicked".to_string())))
     });
     lower = lo?;
     upper = up?;
-    lap("joint geometry");
-    for (nm, s) in [("lower", &lower), ("upper", &upper)] {
-        if !s.is_valid() || s.count(occt::ShapeKind::Solid) == 0 {
-            return Err(format!("the {nm} half came out invalid; joint not applied"));
-        }
-    }
     lap("validate");
     Ok((lower, upper, rep))
 }
@@ -895,12 +898,14 @@ impl Pending {
     }
 }
 
-fn apply_pending(mut s: Shape, (adds, cuts): (Vec<Shape>, Vec<Shape>)) -> JR<Shape> {
+/// Fuse `adds` into `s`, cut `cuts`, unify; the result is checked valid (one
+/// `BRepCheck` per half, done here so both halves check concurrently).
+fn apply_pending(mut s: Shape, (adds, cuts): (Vec<Shape>, Vec<Shape>), name: &str) -> JR<Shape> {
     let prof = std::env::var("CW_PROF").is_ok();
     let t = std::time::Instant::now();
     let lap = |w: &str| {
         if prof {
-            eprintln!("    apply {w}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0)
+            eprintln!("    apply {name} {w}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0)
         }
     };
     if !adds.is_empty() {
@@ -914,8 +919,17 @@ fn apply_pending(mut s: Shape, (adds, cuts): (Vec<Shape>, Vec<Shape>)) -> JR<Sha
         s = k(s.cut(&tool), "joint cut")?;
         lap("cut");
     }
-    let r = tidy(s);
+    let u = s.unify();
+    lap("unify");
+    let r = match u {
+        Ok(u) if u.is_valid() => u,
+        _ if s.is_valid() => s,
+        _ => return Err(format!("the {name} half came out invalid; joint not applied")),
+    };
     lap("tidy");
+    if r.count(occt::ShapeKind::Solid) == 0 {
+        return Err(format!("the {name} half came out invalid; joint not applied"));
+    }
     Ok(r)
 }
 

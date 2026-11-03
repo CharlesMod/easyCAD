@@ -96,6 +96,7 @@ std::unique_ptr<Shape> make_cone(V3 base, V3 dir, double r1, double r2, double h
 std::unique_ptr<Shape> face_from_edges(const Frame &frame, rust::Slice<const EdgeSpec> edges);
 std::unique_ptr<Shape> extrude(const Shape &s, V3 v);
 std::unique_ptr<Shape> extrude_draft(const Shape &s, V3 v, double angle_rad, const Frame &neutral);
+std::unique_ptr<Shape> taper_prism(const Shape &s, V3 v, double inset);
 std::unique_ptr<Shape> revolve(const Shape &s, V3 origin, V3 dir, double angle_rad);
 
 std::unique_ptr<Shape> boolean(const Shape &a, const Shape &b, uint32_t op);

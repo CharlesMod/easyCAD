@@ -391,8 +391,10 @@ cavity, 4 filleted bosses, rib, tongue & groove joint with rim; best of 5, relea
 What changed:
 - Joints defer their booleans to one fuse and one cut per half, and run the split,
   the ring analysis and the two halves on two threads.
-- Booleans and BRepMesh use OCCT's parallel mode and oriented bounding boxes; set
-  `CW_SERIAL_BOP=1` to compare against serial.
+- Booleans run serially with oriented bounding boxes; BRepMesh runs in parallel.
+  On these models OCCT's parallel boolean took about 3x the CPU for no gain in wall
+  time, and lost when other processes were busy. `CW_PARALLEL_BOP=1`,
+  `CW_NO_OBB=1` and `CW_SERIAL_MESH=1` switch each back to compare.
 - Meshing starts from a clean triangulation, so each `MeshQuality` (Preview,
   Display, Final) gets its own density, computed once per shape.
 - `FeatureReport.elapsed_ms` gives per-feature cost (the joint dominates).
@@ -400,6 +402,43 @@ What changed:
 
 Regenerating independent bodies in parallel is not done. Features form one cached
 chain, and most time sits in single large booleans.
+
+**PCB wizard enclosure** (`crates/model/tests/wizard_speed.rs`: the saved
+`tests/data/wizard_{step,dxf}.ecad`, FDM, tongue & groove with rim; best of 3,
+release, a 20-core machine shared with four other agents' builds, so the numbers
+move by ±20 %). The test asserts a parameter edit under 1.5 × 300 ms and undo
+under 5 ms; `CW_PROF=1` prints the steps inside the shell, standoffs and joint.
+
+| step | before | after |
+|---|---|---|
+| param edit `wall` (all 6 features) | ~830 ms, 364–454 ms with the first speed work | 251–285 ms |
+| param edit `lid_split` (joint only) | 279–358 ms | 167–210 ms |
+| cold regen | 320–330 ms | 232–281 ms |
+| undo ×2 (cache) | 0.2 ms | 0.15 ms |
+| assembly variant, `wall` edit (master + in-context Base / Lid) | 500 ms | 296–330 ms |
+| re-tessellation of the edited bodies (Display) | — | 31–42 ms |
+
+Where the `wall` edit goes now: joint ~150 ms (split ∥ ring 20, rim 10, tongue
+and groove bands 20, then the halves ∥ ~100: the lower half's fuse ~60, each half's
+unify ~7 and check ~10), standoffs ~55 (join, base fillet, hole cut + unify), shell
+~16, top fillet ~6, teardrop stage ~7 (bodies in parallel). A `wall` edit
+recomputes every feature (all depend on it); `lid_split` only the joint.
+
+What changed for it:
+- The tongue's 45° lead-in is a ruled taper (`Shape::taper`: 2D offset of the
+  band, a ruled loft per loop, sewn with both caps), not `BRepOffsetAPI_DraftAngle`,
+  which hung on some sections (the joint fuzz's iteration 33 never finished). Its
+  straight part and taper go to the half's single fuse; no inner fuse.
+- 2D offsets drop zero-length arcs (`MakeOffset` leaves them where a line meets an
+  arc almost tangentially). They made the taper fail on `wall = 2.2` and fall back to
+  a 70 ms chamfer.
+- Each half is unified and checked once, in its worker thread (it was checked twice).
+- Dress-ups no longer re-check the shim's already-checked result; the standoffs'
+  boss join is not unified or checked before the hole cut, which does both.
+- The teardrop stage scans bodies on parallel threads.
+- Tried without gain: fusing the tongue onto the rim first, OCCT's glue mode for
+  the stacked tongue, holes drilled into the bosses before the join, a rim that does
+  not share the outer wall faces, and turning off boolean history.
 
 ## Robustness
 
@@ -774,6 +813,9 @@ verified on load.
   ("draft angle too large"); OCCT would otherwise build a degenerate cone.
 - `Shape::offset_solid` (hollowing by 3D offset) fails when the offset exceeds a
   convex radius. It errors and never crashes.
+- `BRepOffsetAPI_DraftAngle` (drafted extrusions, `Draft`) can loop forever on some
+  sections; it hung the joint fuzz on a tongue lead-in, which now uses
+  `Shape::taper` instead. User drafts still go through it.
 
 ## Changelog for GUI
 

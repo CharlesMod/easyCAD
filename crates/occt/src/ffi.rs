@@ -166,6 +166,7 @@ pub mod bridge {
         fn face_from_edges(frame: &Frame, edges: &[EdgeSpec]) -> Result<UniquePtr<Shape>>;
         fn extrude(s: &Shape, v: V3) -> Result<UniquePtr<Shape>>;
         fn extrude_draft(s: &Shape, v: V3, angle_rad: f64, neutral: &Frame) -> Result<UniquePtr<Shape>>;
+        fn taper_prism(s: &Shape, v: V3, inset: f64) -> Result<UniquePtr<Shape>>;
         fn revolve(s: &Shape, origin: V3, dir: V3, angle_rad: f64) -> Result<UniquePtr<Shape>>;
 
         /// op: 0 fuse, 1 cut, 2 common.
