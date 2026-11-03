@@ -17,6 +17,7 @@ pub mod ui_main;
 pub mod ui_parts;
 pub mod ui_process;
 pub mod ui_viewport;
+pub mod ui_welcome;
 pub mod units;
 pub mod viewcube;
 pub mod viewport;

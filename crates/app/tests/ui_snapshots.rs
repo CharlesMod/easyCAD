@@ -521,3 +521,40 @@ fn new_document_prompt() {
     h.state_mut().create_doc("bracket", "FDM 0.4 generic");
     assert_eq!(h.state().doc.data.active_profile, "FDM 0.4 generic");
 }
+
+#[test]
+fn welcome_and_pcb_wizard() {
+    let _serial = serial();
+    std::env::set_var(
+        "XDG_CONFIG_HOME",
+        std::env::temp_dir().join("casework-test-config"),
+    );
+    let mut h = harness(casework_model::document::Document::new("Untitled"));
+    save(&mut h, "welcome");
+    // the wizard on the sample board's DXF
+    let dir = std::env::temp_dir().join(format!("casework-wizard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dxf = dir.join("sensor-node.dxf");
+    std::fs::write(&dxf, casework_app::sample::board_dxf()).unwrap();
+    let mut w = casework_app::ui_welcome::WizardUi::new();
+    w.load(&dxf);
+    assert!(w.board.is_some(), "{:?}", w.error);
+    w.settings.profile = "FDM 0.4 generic".into();
+    h.state_mut().wizard = Some(w);
+    h.run_steps(3);
+    save(&mut h, "pcb_wizard");
+    // create: an ordinary, editable model with two halves
+    let (board, settings) = {
+        let w = h.state().wizard.as_ref().unwrap();
+        (w.board.clone().unwrap(), w.settings.clone())
+    };
+    let doc = casework_app::wizard::build(&board, &settings).unwrap();
+    h.state_mut().wizard = None;
+    h.state_mut().load(doc, None);
+    settle(&mut h);
+    let m = h.state().model.clone().expect("model");
+    assert!(m.result.errors().is_empty(), "{:?}", m.result.errors());
+    let img = save(&mut h, "pcb_wizard_result");
+    assert_viewport_rendered(&img, h.state().viewport_rect);
+    let _ = std::fs::remove_dir_all(&dir);
+}

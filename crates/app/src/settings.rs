@@ -16,6 +16,9 @@ pub struct Settings {
     /// Recently opened or saved documents, newest first.
     #[serde(default)]
     pub recent: Vec<std::path::PathBuf>,
+    /// Process profile for new documents (else the last one used).
+    #[serde(default)]
+    pub default_profile: Option<String>,
 }
 
 fn path() -> Option<std::path::PathBuf> {

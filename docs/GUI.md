@@ -7,6 +7,7 @@ cargo run -p casework --release              # empty document
 cargo run -p casework --release -- --sample  # the sensor-node enclosure
 cargo run -p casework --release -- path/to/Enclosure.cwk
 cargo run -p casework --release -- --smoke /tmp/cw-smoke   # file I/O smoke test, exit code 1 on failure
+cargo run -p casework --release -- --sample-board /tmp/b   # the sample PCB as STEP + DXF, for the wizard
 ```
 
 Display units: the `mm` chip in the title bar switches to inches (display only; the
@@ -34,6 +35,7 @@ mode a bare number means inches.
 | `units.rs` | mm / in display and input normalization. |
 | `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `CASEWORK_FILE_DIALOG=builtin` forces the prompt. |
 | `e2e_state.rs` | `CASEWORK_STATE_FILE`: JSON dump of what the user sees, for the E2E scripts. |
+| `ui_welcome.rs` / `wizard.rs` | Empty-document welcome (New enclosure from PCB… / Open / Sample / recent files) and the PCB wizard: reads an EasyEDA STEP or DXF (outline, mounting holes, board z) and builds ordinary features: offset profile → extrude → top-edge fillet → closed shell → board + standoffs → parting joint, all on named parameters. |
 | `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
 ## Keyboard
@@ -81,5 +83,6 @@ crates/app/e2e/run_all.sh          # or one scenario: bash crates/app/e2e/d_sket
 | f | parting joint replacing the sample's Split: drag the plane handle, O-ring, OK |
 | g | process FDM ↔ molded, teardrop toggle / style, undo |
 | h | drawing: add a dimension, Export PDF through the in-app path prompt |
+| i | first run: welcome card, New enclosure from PCB (DXF via Browse…), Lip, Create, edit `wall` |
 
 Coordinates assume the 1440×900 window the harness sets.

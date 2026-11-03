@@ -189,6 +189,14 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "toasts": app.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>(),
         "overlay": app.overlay_name(),
         "typing": app.typing,
+        "welcome": crate::ui_welcome::is_empty(app) && matches!(app.mode, Mode::Model),
+        "wizard": app.wizard.as_ref().map(|w| json!({
+            "path": w.path,
+            "board": w.board.as_ref().map(|b| json!({ "size": [b.size.x, b.size.y], "holes": b.holes.len(), "source": b.source_label() })),
+            "error": w.error,
+            "joint": w.settings.joint.label(),
+            "profile": w.settings.profile,
+        })),
         "path_prompt": app.path_prompt.as_ref().map(|(p, _)| json!({ "title": p.req.title, "text": p.text })),
     })
 }

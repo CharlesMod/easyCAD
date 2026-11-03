@@ -31,6 +31,7 @@ pub fn show(app: &mut CaseworkApp, ui: &mut Ui) {
         crate::ui_process::calibrate_window(app, ui);
     }
     new_doc_window(app, ui);
+    crate::ui_welcome::wizard_window(app, ui);
 }
 
 /// New document: name + process profile (defaults to the last one used).
@@ -204,7 +205,9 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                 }
                 let (state, col) = if app.regenerating() {
                     ("Regenerating…", theme::TEXT_MUTED)
-                } else if app.is_dirty() {
+                } else if app.is_dirty()
+                    || (app.path.is_none() && !crate::ui_welcome::is_empty(app))
+                {
                     (
                         if app.path.is_some() {
                             "Unsaved changes"
@@ -213,6 +216,8 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                         },
                         theme::TEXT_MUTED,
                     )
+                } else if app.path.is_none() {
+                    ("New document", theme::TEXT_MUTED)
                 } else {
                     ("Saved locally", theme::TEXT_MUTED)
                 };
@@ -282,6 +287,9 @@ fn file_menu(app: &mut CaseworkApp, ui: &mut Ui) {
         };
         if item(ui, "New", "Ctrl+N").clicked() {
             app.new_doc();
+        }
+        if item(ui, "New enclosure from PCB…", "").clicked() {
+            app.wizard = Some(crate::ui_welcome::WizardUi::new());
         }
         if item(ui, "Open…", "Ctrl+O").clicked() {
             app.open_dialog_file();

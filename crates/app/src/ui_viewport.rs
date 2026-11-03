@@ -313,6 +313,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
     }
     joint_plane_overlay(app, ui, rect);
     dialog_overlay(app, ui, rect);
+    crate::ui_welcome::welcome(app, ui, rect);
     if let Some(mut ex) = app.export.take() {
         let r = Rect::from_center_size(rect.center(), vec2(370.0, 240.0));
         let mut keep = true;

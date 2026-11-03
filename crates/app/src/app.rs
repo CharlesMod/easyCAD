@@ -120,6 +120,8 @@ pub struct CaseworkApp {
     pub sketch_body: Option<(Option<casework_model::feature::SketchId>, BodyId)>,
     /// In-app path prompt (no system file dialog) and what to do with the path.
     pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
+    /// "New enclosure from PCB" wizard.
+    pub wizard: Option<crate::ui_welcome::WizardUi>,
 }
 
 /// What a file chooser does with the chosen path.
@@ -191,6 +193,7 @@ impl CaseworkApp {
             typing: false,
             sketch_body: None,
             path_prompt: None,
+            wizard: None,
         }
     }
 
@@ -944,6 +947,10 @@ impl CaseworkApp {
             }
         }
         self.typing = typing;
+        // modal windows own the keyboard
+        if self.wizard.is_some() || self.path_prompt.is_some() {
+            return;
+        }
         let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         let pressed_m = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         // Chords are matched on each key event's own modifiers: a fast Ctrl+Z (or one
@@ -1070,6 +1077,8 @@ impl CaseworkApp {
             Some("export")
         } else if self.new_doc_prompt.is_some() {
             Some("new_doc")
+        } else if self.wizard.is_some() {
+            Some("wizard")
         } else if self.calibrate.is_some() {
             Some("calibrate")
         } else {

@@ -321,7 +321,15 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
     }
 
     // 1. profile: the board outline offset by clearance + wall
-    let profile = enclosure_profile(&doc, board)?;
+    let (profile, rounded) = enclosure_profile(&doc, board)?;
+    if rounded == 0 {
+        // the board's corners are already round: the offset follows them, so the
+        // corner radius would be an unused parameter
+        let _ = doc.edit("Remove corner_r", |d| {
+            d.params.list.retain(|p| p.name != "corner_r");
+            Ok::<_, ()>(())
+        });
+    }
     let sk = doc.add_sketch(profile);
     // 2. extrude
     let ext = doc.add_feature(
@@ -407,7 +415,7 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
                 od: "boss_od".into(),
                 hole_dia: "boss_hole".into(),
                 height: "standoff_h".into(),
-                base_fillet: "0.5".into(),
+                base_fillet: "0.3".into(),
                 draft_deg: if molded { "draft".into() } else { "0".into() },
             },
         );
@@ -432,7 +440,8 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
 
 /// The board outline (construction, fixed) and its offset by `clearance + wall`
 /// with the offset's sharp corners rounded by `corner_r`.
-fn enclosure_profile(doc: &Document, board: &Board) -> Result<Sketch, String> {
+/// Also returns how many sharp corners were rounded with `corner_r`.
+fn enclosure_profile(doc: &Document, board: &Board) -> Result<(Sketch, usize), String> {
     use casework_model::sketch::Constraint;
     let mut sess = SketchSession::new_on(Plane::XY, &doc.data);
     sess.sketch.name = "Enclosure profile".into();
@@ -510,6 +519,7 @@ fn enclosure_profile(doc: &Document, board: &Board) -> Result<Sketch, String> {
         c.sort_by_key(|p| p.0);
         c
     };
+    let rounded = corners.len();
     for p in corners {
         sess.fillet_corner(p, "corner_r")?;
     }
@@ -523,7 +533,7 @@ fn enclosure_profile(doc: &Document, board: &Board) -> Result<Sketch, String> {
     if sess.sketch.profiles().profiles.len() != 1 {
         return Err("the offset outline is not one closed profile".into());
     }
-    Ok(sess.sketch)
+    Ok((sess.sketch, rounded))
 }
 
 fn fmt(v: f64) -> String {

@@ -34,9 +34,18 @@ start_app() {
     WIN=$(xdotool search --sync --name Casework | head -1)
     # no window manager: put the window at the origin so screen = window coordinates
     xdotool windowmove "$WIN" 0 0 windowsize "$WIN" 1440 900 2>/dev/null
-    # no window manager either to hand out keyboard focus
-    xdotool windowfocus --sync "$WIN" 2>/dev/null
+    # no window manager either to hand out keyboard focus; a window that maps late
+    # (an empty document starts fast) can miss the first request, so insist
+    focus_win
     idle
+}
+
+focus_win() {
+    for _ in $(seq 50); do
+        xdotool windowfocus --sync "$WIN" 2>/dev/null
+        [ "$(xdotool getwindowfocus 2>/dev/null)" = "$WIN" ] && break
+        sleep 0.1
+    done
 }
 
 stop_app() {
@@ -59,8 +68,9 @@ restart_app() {
     wait_for '.revision != null' 120
     WIN=$(xdotool search --sync --name Casework | head -1)
     xdotool windowmove "$WIN" 0 0 windowsize "$WIN" 1440 900 2>/dev/null
-    # no window manager either to hand out keyboard focus
-    xdotool windowfocus --sync "$WIN" 2>/dev/null
+    # no window manager either to hand out keyboard focus; a window that maps late
+    # (an empty document starts fast) can miss the first request, so insist
+    focus_win
     idle
 }
 

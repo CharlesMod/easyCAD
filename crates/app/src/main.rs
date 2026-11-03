@@ -1,4 +1,4 @@
-//! `casework [path.cwk | --sample | --smoke <dir>]`
+//! `casework [path.cwk | --sample | --smoke <dir> | --sample-board <dir>]`
 
 use casework_app::{native_options, CaseworkApp};
 use casework_model::document::Document;
@@ -22,6 +22,21 @@ fn main() -> eframe::Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+    if arg.as_deref() == Some("--sample-board") {
+        // the sample's PCB as EasyEDA-style files, for trying the PCB wizard
+        let dir = std::path::PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| ".".into()));
+        let r = std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(dir.join("sensor-node.step"), casework_app::sample::pcb_step()))
+            .and_then(|_| std::fs::write(dir.join("sensor-node.dxf"), casework_app::sample::board_dxf()));
+        match r {
+            Ok(()) => println!("wrote {0}/sensor-node.step and {0}/sensor-node.dxf", dir.display()),
+            Err(e) => {
+                eprintln!("casework: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
     let (doc, path) = match arg.as_deref() {
         Some("--sample") => (Some(casework_app::sample::sensor_node()), None),
