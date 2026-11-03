@@ -263,6 +263,21 @@ pub struct Regenerator {
     parts: HashMap<String, Arc<PartInstance>>,
     stages: HashMap<u64, (Vec<Body>, ProcessReport)>,
     xcaf: HashMap<String, Arc<(Shape, Vec<occt::StepPart>)>>,
+    /// In-context bodies per source occurrence path, already in this component's
+    /// frame (set by the assembly regeneration before `regenerate`).
+    pub(crate) context: HashMap<Vec<crate::assembly::OccurrenceId>, Arc<Vec<ContextBody>>>,
+    /// Identity of each context entry (source result + relative placement).
+    pub(crate) context_keys: HashMap<Vec<crate::assembly::OccurrenceId>, u64>,
+    /// Why a context entry is unavailable (e.g. a dependency cycle).
+    pub(crate) context_errors: HashMap<Vec<crate::assembly::OccurrenceId>, String>,
+}
+
+/// A body of another occurrence seen from the component being regenerated.
+#[derive(Clone)]
+pub(crate) struct ContextBody {
+    pub name: String,
+    pub reference: bool,
+    pub shape: Shape,
 }
 
 impl Default for Regenerator {
@@ -276,6 +291,9 @@ impl Default for Regenerator {
             parts: HashMap::new(),
             stages: HashMap::new(),
             xcaf: HashMap::new(),
+            context: HashMap::new(),
+            context_keys: HashMap::new(),
+            context_errors: HashMap::new(),
         }
     }
 }
@@ -410,6 +428,10 @@ impl Regenerator {
             key.hash(&mut h);
             fingerprint(f, doc, &vals).hash(&mut h);
             param_err.hash(&mut h);
+            if let FeatureKind::ContextRef { source, .. } = &f.kind {
+                self.context_keys.get(source).hash(&mut h);
+                self.context_errors.get(source).hash(&mut h);
+            }
             key = h.finish();
             if let Some(hit) = self.cache.get(&key).cloned() {
                 state = Arc::new(hit.0.clone());
@@ -976,6 +998,27 @@ impl Ctx<'_> {
                     let Some(i) = ti else { return fail("auto-hole needs a target body") };
                     let tid = st.bodies[i].id;
                     self.apply_op(st, fid, name, BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
+                }
+            }
+            FeatureKind::ContextRef { source, body, op, target, offset, reference } => {
+                let Some(bodies) = self.regen.context.get(source).cloned() else {
+                    return fail(self.regen.context_errors.get(source).cloned().unwrap_or_else(|| {
+                        format!("in-context source {source:?} is not available (regenerate the assembly)")
+                    }));
+                };
+                let cb = match body {
+                    Some(n) => bodies.iter().find(|b| &b.name == n),
+                    None => bodies.iter().find(|b| !b.reference),
+                }
+                .ok_or_else(|| Fail::msg(format!("in-context source has no body {}", body.as_deref().unwrap_or("(solid)"))))?;
+                let d = self.ev(offset)?;
+                let shape = if d.abs() > 1e-9 { cb.shape.offset_solid(d)? } else { cb.shape.clone() };
+                let tool = self.tx(shape)?;
+                if *op == BoolOp::NewBody && *reference {
+                    let index = st.bodies.iter().filter(|b| b.id.feature == fid).count() as u32;
+                    st.bodies.push(Body { id: BodyId { feature: fid, index }, name: name.to_string(), reference: true, part: None, geom: BodyGeom::new(tool) });
+                } else {
+                    self.apply_op(st, fid, name, *op, *target, tool)?;
                 }
             }
         }

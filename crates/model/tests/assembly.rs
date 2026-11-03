@@ -87,3 +87,143 @@ fn tree_editing_and_nesting_cycles() {
     let t2 = Transform::from_rows(&t.to_rows());
     assert!((t.point(DVec3::ONE) - t2.point(DVec3::ONE)).length() < 1e-12);
 }
+
+fn screw_component(doc: &mut Document) -> ComponentId {
+    use casework_model::library::PartSource;
+    let shcs = casework_model::library::BuiltinSource.parts().into_iter().find(|p| p.id == "iso4762").unwrap();
+    doc.add_part_component(&shcs, "M3x10").unwrap()
+}
+
+/// Bracket (plate + 4 screws) placed twice: 2-level nesting, one screw component
+/// instanced 8 times.
+pub fn bracket_assembly() -> (Document, ComponentId, ComponentId, [OccurrenceId; 2]) {
+    let mut doc = Document::new("Rack");
+    let screw = screw_component(&mut doc);
+    let bracket = doc.add_component("Bracket");
+    block(&mut doc, bracket, "Plate", ("40", "30", "4"), DVec2::ZERO);
+    for (k, (x, y)) in [(-15.0, -10.0), (15.0, -10.0), (15.0, 10.0), (-15.0, 10.0)].into_iter().enumerate() {
+        doc.add_occurrence(bracket, screw, &format!("Screw:{}", k + 1), Transform::translation(DVec3::new(x, y, 4.0))).unwrap();
+    }
+    let a = doc.add_occurrence(ComponentId::ROOT, bracket, "Bracket:1", Transform::IDENTITY).unwrap();
+    let b = doc.add_occurrence(ComponentId::ROOT, bracket, "Bracket:2", Transform::new(DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2), DVec3::new(100.0, 0.0, 0.0))).unwrap();
+    (doc, bracket, screw, [a, b])
+}
+
+#[test]
+fn nested_components_with_instanced_screws() {
+    let (mut doc, bracket, screw, [_a, b]) = bracket_assembly();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    // one regeneration per component, shared by every occurrence
+    assert_eq!(r.component(screw).unwrap().regen.bodies.len(), 1);
+    let screws: Vec<_> = r.instances.iter().filter(|i| i.component == screw).collect();
+    assert_eq!(screws.len(), 8);
+    assert!(screws.iter().all(|i| i.path.len() == 2 && i.body.reference));
+    let g0 = &screws[0].body.geom;
+    assert!(screws.iter().all(|i| std::sync::Arc::ptr_eq(&i.body.geom, g0)), "instances share geometry");
+    assert_eq!(r.instances.iter().filter(|i| i.component == bracket).count(), 2);
+    // world placement: Bracket:2 is rotated 90° about Z and moved to x = 100
+    let s = r.instances.iter().find(|i| i.component == screw && i.path[0] == b && doc.data.occurrence(i.path[1]).unwrap().name == "Screw:2").unwrap();
+    let c = s.world_shape().unwrap().bbox().unwrap().center();
+    assert!((c.x - 110.0).abs() < 0.2 && (c.y - 15.0).abs() < 0.2, "{c:?}");
+    // all 8 screw positions are distinct
+    let mut cs: Vec<DVec3> = screws.iter().map(|i| i.transform.point(DVec3::ZERO)).collect();
+    cs.dedup_by(|p, q| (*p - *q).length() < 1e-6);
+    assert_eq!(cs.len(), 8);
+}
+
+/// Base (open box) and a lid whose plug is cut by the base in context: changing
+/// `wall` shrinks the plug; editing the lid does not regenerate the base or the board.
+fn base_lid_doc() -> (Document, [ComponentId; 3], [OccurrenceId; 3], FeatureId) {
+    let mut doc = Document::new("Box");
+    for (n, v) in [("w", "60"), ("d", "40"), ("h", "20"), ("wall", "2")] {
+        doc.set_param(n, v).unwrap();
+    }
+    let base = doc.add_component("Base");
+    let mut s = Sketch::new("Outer", Plane::XY);
+    s.rounded_rect(DVec2::ZERO, "w", "d", "1", (60.0, 40.0, 1.0));
+    let sk = doc.add_sketch_in(base, s).unwrap();
+    let body = BodyId::of(
+        doc.add_feature_in(base, "Body", FeatureKind::Extrude { sketch: sk, profiles: ProfileSel::All, distance: "h".into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None })
+            .unwrap(),
+    );
+    let mut s = Sketch::new("Cavity", Plane::XY.offset(2.0));
+    s.rounded_rect(DVec2::ZERO, "w - 2*wall", "d - 2*wall", "0.5", (56.0, 36.0, 0.5));
+    let sk = doc.add_sketch_in(base, s).unwrap();
+    doc.add_feature_in(base, "Cavity", FeatureKind::Extrude { sketch: sk, profiles: ProfileSel::All, distance: "h".into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::Cut, target: Some(body) })
+        .unwrap();
+
+    let lid = doc.add_component("Lid");
+    let mut s = Sketch::new("Plate", Plane::XY.offset(20.0));
+    s.rounded_rect(DVec2::ZERO, "w", "d", "1", (60.0, 40.0, 1.0));
+    let sk = doc.add_sketch_in(lid, s).unwrap();
+    let plate = BodyId::of(
+        doc.add_feature_in(lid, "Plate", FeatureKind::Extrude { sketch: sk, profiles: ProfileSel::All, distance: "2".into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None })
+            .unwrap(),
+    );
+    let mut s = Sketch::new("Plug", Plane::XY.offset(15.0));
+    s.rounded_rect(DVec2::ZERO, "w", "d", "1", (60.0, 40.0, 1.0));
+    let sk = doc.add_sketch_in(lid, s).unwrap();
+    doc.add_feature_in(lid, "Plug", FeatureKind::Extrude { sketch: sk, profiles: ProfileSel::All, distance: "5".into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::Join, target: Some(plate) })
+        .unwrap();
+
+    let board = doc.add_component("Board");
+    block(&mut doc, board, "PCB", ("30", "20", "1.6"), DVec2::ZERO);
+
+    let at = Transform::translation(DVec3::new(100.0, 0.0, 0.0));
+    let ob = doc.add_occurrence(ComponentId::ROOT, base, "Base:1", at).unwrap();
+    let ol = doc.add_occurrence(ComponentId::ROOT, lid, "Lid:1", at).unwrap();
+    let op = doc.add_occurrence(ComponentId::ROOT, board, "Board:1", Transform::translation(DVec3::new(100.0, 0.0, 5.0))).unwrap();
+    let ctx = doc
+        .add_feature_in(lid, "Fit to base", FeatureKind::ContextRef { source: vec![ob], body: None, op: BoolOp::Cut, target: Some(plate), offset: 0.0.into(), reference: false })
+        .unwrap();
+    (doc, [base, lid, board], [ob, ol, op], ctx)
+}
+
+#[test]
+fn lid_in_context_follows_the_base() {
+    let (mut doc, [base, lid, board], _, ctx) = base_lid_doc();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let lid_vol = |r: &AssemblyResult| r.component(lid).unwrap().regen.bodies[0].shape().volume().unwrap();
+    let v2 = lid_vol(&r);
+    let plate = 60.0 * 40.0 * 2.0;
+    assert!((v2 - plate - 56.0 * 36.0 * 5.0).abs() < 0.01 * v2, "{v2}");
+    // thicker walls: the plug shrinks with the cavity
+    doc.set_param("wall", "3").unwrap();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let v3 = lid_vol(&r);
+    assert!((v2 - v3 - 5.0 * (56.0 * 36.0 - 54.0 * 34.0)).abs() < 0.02 * (v2 - v3), "{v2} -> {v3}");
+    assert_eq!(r.component(board).unwrap().regen.recomputed, 0, "the board does not depend on wall");
+    // editing only the lid leaves the base and the board cached
+    doc.edit_component(lid, "rename", |c| c.features.iter_mut().find(|f| f.id == ctx).unwrap().name = "Fit".into()).unwrap();
+    let r = doc.regenerate_assembly().clone();
+    assert_eq!(r.component(base).unwrap().regen.recomputed, 0);
+    assert_eq!(r.component(board).unwrap().regen.recomputed, 0);
+    assert!(r.component(lid).unwrap().regen.recomputed >= 1);
+    // the lid instance sits on the base in world space
+    let li = r.instances.iter().find(|i| i.component == lid).unwrap();
+    let bb = li.world_shape().unwrap().bbox().unwrap();
+    assert!((bb.min.x - 70.0).abs() < 1e-6 && (bb.min.z - 15.0).abs() < 1e-6, "{bb:?}");
+}
+
+#[test]
+fn in_context_cycle_is_reported() {
+    let (mut doc, [base, _lid, _], [_, ol, _], _) = base_lid_doc();
+    let f = doc
+        .add_feature_in(base, "Back-ref", FeatureKind::ContextRef { source: vec![ol], body: None, op: BoolOp::NewBody, target: None, offset: 0.0.into(), reference: true })
+        .unwrap();
+    let r = doc.regenerate_assembly().clone();
+    let cyc: Vec<_> = r.issues.iter().filter(|i| i.message.contains("in-context dependency cycle")).collect();
+    assert_eq!(cyc.len(), 1, "{:?}", r.issues);
+    assert!(cyc[0].message.contains("Base") && cyc[0].message.contains("Lid"), "{}", cyc[0].message);
+    match &r.component(base).unwrap().regen.report(f).unwrap().status {
+        casework_model::regen::FeatureStatus::Error(e) => assert!(e.contains("cycle"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    // breaking the cycle (suppressing the back-reference) clears it
+    doc.edit_component(base, "suppress", |c| c.features.iter_mut().find(|x| x.id == f).unwrap().suppressed = true).unwrap();
+    let r = doc.regenerate_assembly();
+    assert!(r.issues.is_empty() && r.errors().is_empty(), "{:?}", r.errors());
+}

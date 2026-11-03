@@ -513,3 +513,344 @@ impl Document {
         self.edit_component(comp, &format!("Set {name}"), |c| c.params = local)
     }
 }
+
+// ---------------------------------------------------------------- regeneration
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::document::BlobStore;
+use crate::library::Library;
+use crate::regen::{Body, ContextBody, RegenResult, Regenerator};
+
+/// One component's regeneration.
+#[derive(Clone)]
+pub struct ComponentResult {
+    pub component: ComponentId,
+    pub name: String,
+    pub regen: RegenResult,
+}
+
+/// A body placed in the assembly: one per (occurrence path, body of its component).
+#[derive(Clone, Debug)]
+pub struct Instance {
+    /// Occurrence path (`[]` = the root component's own bodies).
+    pub path: OccPath,
+    pub component: ComponentId,
+    /// The body in its component's frame (shared by every occurrence).
+    pub body: Body,
+    /// Component frame → world.
+    pub transform: Transform,
+    /// `transform` with the explode offsets of the path applied (display only).
+    pub display: Transform,
+    /// Every occurrence on the path is visible.
+    pub visible: bool,
+    /// Every occurrence on the path is counted in the BOM.
+    pub in_bom: bool,
+}
+
+impl Instance {
+    /// The body's shape in world coordinates.
+    pub fn world_shape(&self) -> occt::Result<Shape> {
+        self.transform.apply(self.body.shape())
+    }
+    /// Instance name for reports: "Occ:1 / Sub:2 / Body".
+    pub fn label(&self, d: &DocData) -> String {
+        let mut parts: Vec<String> = self.path.iter().filter_map(|o| d.occurrence(*o).map(|o| o.name.clone())).collect();
+        parts.push(self.body.name.clone());
+        parts.join(" / ")
+    }
+}
+
+/// A problem with the assembly structure (not a feature failure).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AssemblyIssue {
+    pub component: Option<ComponentId>,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct AssemblyResult {
+    /// Per component (including `ROOT`), in regeneration order.
+    pub components: Vec<ComponentResult>,
+    pub instances: Vec<Instance>,
+    /// Dependency cycles, unknown components.
+    pub issues: Vec<AssemblyIssue>,
+}
+
+impl AssemblyResult {
+    pub fn component(&self, id: ComponentId) -> Option<&ComponentResult> {
+        self.components.iter().find(|c| c.component == id)
+    }
+    /// Instances of one occurrence path (its component's bodies, placed).
+    pub fn instances_of<'a>(&'a self, path: &'a [OccurrenceId]) -> impl Iterator<Item = &'a Instance> + 'a {
+        self.instances.iter().filter(move |i| i.path == path)
+    }
+    /// Every feature error of every component, plus structural issues.
+    pub fn errors(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.issues.iter().map(|i| i.message.clone()).collect();
+        for c in &self.components {
+            for (f, e) in c.regen.errors() {
+                v.push(format!("{} / feature {}: {e}", c.name, f.0));
+            }
+        }
+        v
+    }
+}
+
+/// Per-component regeneration caches (one `Regenerator` per component, so editing
+/// one component never invalidates another's cached states).
+#[derive(Default)]
+pub struct AssemblyCache {
+    regens: HashMap<ComponentId, Regenerator>,
+}
+
+impl AssemblyCache {
+    pub fn regenerator(&mut self, id: ComponentId) -> &mut Regenerator {
+        self.regens.entry(id).or_default()
+    }
+    pub fn clear(&mut self) {
+        self.regens.clear();
+    }
+}
+
+/// Components `c` references in context (by occurrence path).
+fn context_sources(d: &DocData, c: ComponentId) -> Vec<OccPath> {
+    let feats: &[Feature] = if c == ComponentId::ROOT { &d.features } else { d.component(c).map(|c| c.features.as_slice()).unwrap_or(&[]) };
+    let mut v: Vec<OccPath> = feats
+        .iter()
+        .filter(|f| !f.suppressed)
+        .filter_map(|f| match &f.kind {
+            FeatureKind::ContextRef { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Order components so in-context sources come first; components on a cycle are
+/// reported and appended at the end. Returns (order, cycles as name chains).
+fn regen_order(d: &DocData) -> (Vec<ComponentId>, Vec<(Vec<ComponentId>, String)>) {
+    let mut ids = vec![ComponentId::ROOT];
+    ids.extend(d.components.iter().map(|c| c.id));
+    let deps: BTreeMap<ComponentId, Vec<ComponentId>> =
+        ids.iter().map(|c| (*c, context_sources(d, *c).iter().filter_map(|p| d.component_at(p).ok()).collect())).collect();
+    #[derive(Clone, Copy, PartialEq)]
+    enum St {
+        Visiting,
+        Done,
+    }
+    fn visit(
+        c: ComponentId,
+        deps: &BTreeMap<ComponentId, Vec<ComponentId>>,
+        st: &mut BTreeMap<ComponentId, St>,
+        stack: &mut Vec<ComponentId>,
+        order: &mut Vec<ComponentId>,
+        cycles: &mut Vec<Vec<ComponentId>>,
+    ) {
+        match st.get(&c) {
+            Some(St::Done) => return,
+            Some(St::Visiting) => {
+                let i = stack.iter().position(|x| *x == c).unwrap_or(0);
+                let mut cyc = stack[i..].to_vec();
+                cyc.push(c);
+                cycles.push(cyc);
+                return;
+            }
+            None => {}
+        }
+        st.insert(c, St::Visiting);
+        stack.push(c);
+        for dep in deps.get(&c).into_iter().flatten() {
+            visit(*dep, deps, st, stack, order, cycles);
+        }
+        stack.pop();
+        st.insert(c, St::Done);
+        order.push(c);
+    }
+    let (mut st, mut stack, mut order, mut cycles) = (BTreeMap::new(), Vec::new(), Vec::new(), Vec::new());
+    for c in &ids {
+        visit(*c, &deps, &mut st, &mut stack, &mut order, &mut cycles);
+    }
+    let named = cycles
+        .into_iter()
+        .map(|cyc| {
+            let s = cyc.iter().map(|c| d.component_name(*c)).collect::<Vec<_>>().join(" -> ");
+            (cyc, format!("in-context dependency cycle: {s}"))
+        })
+        .collect();
+    (order, named)
+}
+
+/// First occurrence path of each component (its in-context editing frame).
+fn first_paths(d: &DocData) -> HashMap<ComponentId, (OccPath, Transform)> {
+    let mut m = HashMap::new();
+    m.insert(ComponentId::ROOT, (Vec::new(), Transform::IDENTITY));
+    for (p, o, w) in d.all_occurrences() {
+        m.entry(o.component).or_insert((p, w));
+    }
+    m
+}
+
+/// Regenerate every component (dependencies first) and place the instances.
+/// `root` is the document's own regenerator (shared with `Document::regenerate`).
+pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: &mut Regenerator, cache: &mut AssemblyCache) -> AssemblyResult {
+    let (order, cycles) = regen_order(d);
+    let mut issues: Vec<AssemblyIssue> = cycles.iter().map(|(c, m)| AssemblyIssue { component: c.first().copied(), message: m.clone() }).collect();
+    let on_cycle: BTreeMap<ComponentId, String> = cycles.iter().flat_map(|(c, m)| c.iter().map(move |x| (*x, m.clone()))).collect();
+    let frames = first_paths(d);
+    let mut results: Vec<ComponentResult> = Vec::new();
+    for c in order {
+        let Some(view) = d.component_view(c) else { continue };
+        // in-context inputs, placed into this component's frame
+        let host = frames.get(&c).map(|f| f.1).unwrap_or(Transform::IDENTITY);
+        let mut ctx = HashMap::new();
+        let mut keys = HashMap::new();
+        let mut errs = HashMap::new();
+        for src in context_sources(d, c) {
+            let sc = match d.component_at(&src) {
+                Ok(sc) => sc,
+                Err(e) => {
+                    errs.insert(src, format!("in-context source: {e}"));
+                    continue;
+                }
+            };
+            if let (Some(m), true) = (on_cycle.get(&c), on_cycle.contains_key(&sc)) {
+                errs.insert(src, m.clone());
+                continue;
+            }
+            let Some(sr) = results.iter().find(|r| r.component == sc) else {
+                errs.insert(src, format!("in-context source `{}` has not been regenerated", d.component_name(sc)));
+                continue;
+            };
+            let rel = match d.world_transform(&src) {
+                Ok(w) => host.inverse().mul(&w),
+                Err(e) => {
+                    errs.insert(src, e);
+                    continue;
+                }
+            };
+            let mut bodies = Vec::new();
+            let mut h = std::hash::DefaultHasher::new();
+            for b in &sr.regen.bodies {
+                match rel.apply(b.shape()) {
+                    Ok(s) => {
+                        use std::hash::Hash;
+                        b.name.hash(&mut h);
+                        (Arc::as_ptr(&b.geom) as usize).hash(&mut h);
+                        bodies.push(ContextBody { name: b.name.clone(), reference: b.reference, shape: s });
+                    }
+                    Err(e) => {
+                        errs.insert(src.clone(), e.to_string());
+                    }
+                }
+            }
+            {
+                use std::hash::{Hash, Hasher};
+                rel.to_rows().iter().for_each(|x| x.to_bits().hash(&mut h));
+                keys.insert(src.clone(), h.finish());
+            }
+            ctx.insert(src, Arc::new(bodies));
+        }
+        let regen = if c == ComponentId::ROOT { &mut *root } else { cache.regenerator(c) };
+        regen.context = ctx;
+        regen.context_keys = keys;
+        regen.context_errors = errs;
+        let r = match d.component(c).map(|c| &c.source) {
+            Some(ComponentSource::Step { blob, node }) => step_component(d, c, blob, *node, blobs, cache),
+            _ => regen.regenerate(&view, blobs, lib),
+        };
+        results.push(ComponentResult { component: c, name: d.component_name(c), regen: r });
+    }
+    for c in &d.components {
+        if !results.iter().any(|r| r.component == c.id) {
+            issues.push(AssemblyIssue { component: Some(c.id), message: format!("component `{}` was not regenerated", c.name) });
+        }
+    }
+    // instances
+    let mut instances = Vec::new();
+    if let Some(r) = results.iter().find(|r| r.component == ComponentId::ROOT) {
+        for b in &r.regen.bodies {
+            instances.push(Instance { path: Vec::new(), component: ComponentId::ROOT, body: b.clone(), transform: Transform::IDENTITY, display: Transform::IDENTITY, visible: true, in_bom: true });
+        }
+    }
+    let comps: BTreeMap<ComponentId, &Component> = d.components.iter().map(|c| (c.id, c)).collect();
+    type Frame<'a> = (OccPath, Transform, Transform, bool, bool, &'a [Occurrence]);
+    let mut stack: Vec<Frame> = vec![(Vec::new(), Transform::IDENTITY, Transform::IDENTITY, true, true, &d.occurrences)];
+    while let Some((prefix, world, disp, vis, bom, kids)) = stack.pop() {
+        if prefix.len() > 64 {
+            continue;
+        }
+        for o in kids.iter().rev() {
+            let mut p = prefix.clone();
+            p.push(o.id);
+            let w = world.mul(&o.transform);
+            let dt = disp.mul(&Transform::translation(o.explode)).mul(&o.transform);
+            let (v, ib) = (vis && o.visible, bom && o.in_bom);
+            match results.iter().find(|r| r.component == o.component) {
+                Some(r) => {
+                    for b in &r.regen.bodies {
+                        instances.push(Instance { path: p.clone(), component: o.component, body: b.clone(), transform: w, display: dt, visible: v, in_bom: ib });
+                    }
+                }
+                None => issues.push(AssemblyIssue { component: Some(o.component), message: format!("occurrence `{}` refers to a missing component", o.name) }),
+            }
+            if let Some(c) = comps.get(&o.component) {
+                stack.push((p, w, dt, v, ib, &c.children));
+            }
+        }
+    }
+    instances.sort_by(|a, b| a.path.cmp(&b.path));
+    AssemblyResult { components: results, instances, issues }
+}
+
+/// Placeholder for STEP reference components (filled in by the STEP assembly import).
+fn step_component(_d: &DocData, _c: ComponentId, _blob: &str, _node: u32, _blobs: &BlobStore, _cache: &mut AssemblyCache) -> RegenResult {
+    RegenResult { bodies: Vec::new(), reports: Vec::new(), recomputed: 0, reused: 0, process: Default::default() }
+}
+
+impl Document {
+    /// Regenerate the whole tree (cached per component). Cheap when nothing changed.
+    pub fn regenerate_assembly(&mut self) -> &AssemblyResult {
+        if self.asm_last.is_none() {
+            let r = regenerate_assembly(&self.data, &self.blobs, &self.library, &mut self.regen, &mut self.asm);
+            self.asm_last = Some(r);
+        }
+        self.asm_last.as_ref().unwrap()
+    }
+
+    /// Regeneration of one component in its local frame.
+    pub fn component_result(&mut self, id: ComponentId) -> Option<RegenResult> {
+        self.regenerate_assembly().component(id).map(|c| c.regen.clone())
+    }
+}
+
+impl Document {
+    /// A library part as a (locked, purchased) component: one reference body at the
+    /// component origin, axis +Z. Place it with `add_occurrence`.
+    pub fn add_part_component(&mut self, info: &crate::library::PartInfo, size: &str) -> Result<ComponentId, DocError> {
+        let part = self.part_ref(info, size)?;
+        let name = format!("{} {}", part.name, part.size);
+        self.edit(&format!("New component {name}"), |d| {
+            let id = ComponentId(d.alloc());
+            let fid = FeatureId(d.alloc());
+            let feature = Feature {
+                id: fid,
+                name: name.clone(),
+                suppressed: false,
+                kind: FeatureKind::InsertPart {
+                    part: part.clone(),
+                    placements: vec![crate::feature::PlacementRef::Explicit { origin: DVec3::ZERO, axis: DVec3::Z }],
+                    flip: false,
+                    offset: crate::params::Expr::new("0"),
+                    auto_hole: None,
+                    target: None,
+                },
+            };
+            d.components.push(Component { id, name: name.clone(), features: vec![feature], locked: true, purchased: Some(part), ..Default::default() });
+            Ok::<_, DocError>(id)
+        })
+    }
+}

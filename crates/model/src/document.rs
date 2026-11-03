@@ -341,9 +341,11 @@ pub struct Document {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     pub max_undo: usize,
-    regen: Regenerator,
+    pub(crate) regen: Regenerator,
     last: Option<RegenResult>,
     drawing_cache: crate::drawing::DrawingCache,
+    pub(crate) asm: crate::assembly::AssemblyCache,
+    pub(crate) asm_last: Option<crate::assembly::AssemblyResult>,
 }
 
 impl Document {
@@ -363,6 +365,8 @@ impl Document {
             regen: Regenerator::default(),
             last: None,
             drawing_cache: crate::drawing::DrawingCache::default(),
+            asm: Default::default(),
+            asm_last: None,
         }
     }
 
@@ -370,6 +374,7 @@ impl Document {
         self.data.revision += 1;
         self.data.modified_by_device = self.device_id.clone();
         self.last = None;
+        self.asm_last = None;
     }
 
     /// Apply an undoable change. If `f` fails, the document is left unchanged.
@@ -643,9 +648,18 @@ impl Document {
     // ---------------------------------------------------------------- regen
 
     /// Regenerate (cached per feature prefix). Cheap when nothing changed.
+    /// The root component's bodies only; placed components are in
+    /// [`Document::regenerate_assembly`]. A root with in-context references
+    /// regenerates through the assembly.
     pub fn regenerate(&mut self) -> &RegenResult {
         if self.last.is_none() {
-            self.last = Some(self.regen.regenerate(&self.data, &self.blobs, &self.library));
+            let in_context = self.data.features.iter().any(|f| matches!(f.kind, FeatureKind::ContextRef { .. }));
+            let r = if in_context {
+                self.regenerate_assembly().component(crate::assembly::ComponentId::ROOT).map(|c| c.regen.clone()).unwrap()
+            } else {
+                self.regen.regenerate(&self.data, &self.blobs, &self.library)
+            };
+            self.last = Some(r);
         }
         self.last.as_ref().unwrap()
     }

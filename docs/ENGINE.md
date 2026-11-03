@@ -461,6 +461,34 @@ Work in progress; see the BREAKING "Assemblies" entry in the changelog.
   `DocData::{component, occurrence, children_of, component_at(path),
   world_transform(path), all_occurrences, component_view(id)}`. Nesting a component
   inside itself is refused ("component nesting cycle").
+- **Regeneration.** `Document::regenerate_assembly() -> &AssemblyResult` regenerates
+  every component in its local frame with its own `Regenerator` (per-component
+  feature cache), in-context sources first. `AssemblyResult { components:
+  Vec<ComponentResult { component, name, regen: RegenResult }>, instances:
+  Vec<Instance>, issues }`. An `Instance { path, component, body, transform, display,
+  visible, in_bom }` is one body of one occurrence; `transform` is component →
+  world, `display` adds the explode offsets, `world_shape()` gives the placed shape.
+  Occurrences of one component share its `RegenResult` (same `Arc` geometry and
+  meshes). `ComponentResult.regen.recomputed == 0` means nothing in that component
+  was rebuilt. `Document::regenerate()` still returns the root component's own
+  bodies (unchanged for flat documents).
+- **Local params.** A component's `params` shadow the document's (same name);
+  expressions see both. `component_view(id)` is the `DocData` a component
+  regenerates from (its features + merged params + its `process` profile).
+- **Library parts as components.** `Document::add_part_component(&PartInfo, size)`
+  makes a locked component with `purchased = Some(PartRef)` and one reference body
+  at its origin (+Z axis). Place it any number of times with `add_occurrence`.
+- **In-context references.** `FeatureKind::ContextRef { source: OccPath, body:
+  Option<String>, op, target, offset, reference }` brings a body of another
+  occurrence into this component, resolved after the source component regenerates
+  and expressed in the frame of this component's *first* occurrence. With
+  `op = NewBody` it is a copy (`reference = true`: display only); with
+  `Join/Cut/Intersect` it is a tool on `target`; `offset` (mm) offsets it first
+  (clearance). Its cache key includes the source geometry and the relative
+  placement, so moving or editing the source re-runs it. Dependencies between
+  components form a graph; a cycle is reported in `AssemblyResult.issues`
+  ("in-context dependency cycle: Base -> Lid -> Base") and each `ContextRef` on it
+  fails with the same message. The rest of the assembly still regenerates.
 
 ## File format (`.cwk`), sync-friendly
 

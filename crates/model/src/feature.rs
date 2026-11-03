@@ -290,6 +290,26 @@ pub enum FeatureKind {
         #[serde(default)]
         target: Option<BodyId>,
     },
+    /// In-context reference: a body of another occurrence, resolved after that
+    /// component regenerates and placed into this component's frame (the frame of
+    /// this component's first occurrence). Used as a new body, a reference body, or
+    /// a tool for Join/Cut/Intersect on `target`.
+    ContextRef {
+        /// Occurrence path from the root (`[]` = the root component's own bodies).
+        source: Vec<crate::assembly::OccurrenceId>,
+        /// Body name in the source component (`None` = its first solid body).
+        #[serde(default)]
+        body: Option<String>,
+        op: BoolOp,
+        #[serde(default)]
+        target: Option<BodyId>,
+        /// 3D offset of the referenced body before use (e.g. a clearance; mm).
+        #[serde(default = "zero")]
+        offset: Expr,
+        /// With `NewBody`: add it as a reference body (shown, never printed).
+        #[serde(default)]
+        reference: bool,
+    },
 }
 
 fn zero() -> Expr {
@@ -330,6 +350,7 @@ impl FeatureKind {
             FeatureKind::PartingJoint { .. } => "Parting joint",
             FeatureKind::ImportStep { .. } => "Import STEP",
             FeatureKind::InsertPart { .. } => "Insert part",
+            FeatureKind::ContextRef { .. } => "In-context reference",
         }
     }
 }
