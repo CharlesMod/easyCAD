@@ -366,3 +366,75 @@ fn drag_a_tree_row_onto_another_to_reparent() {
     h.run_steps(3);
     assert_eq!(occ_path(h.state(), "Component2:1").len(), 1, "back at the top level");
 }
+
+/// Drag in the viewport with a button (and modifiers held), in small steps.
+fn drag_view(h: &mut Harness<'static, EasyCadApp>, button: egui::PointerButton, mods: egui::Modifiers, by: egui::Vec2) {
+    let a = h.state().viewport_rect.center() + egui::vec2(-150.0, 60.0);
+    h.event(egui::Event::ModifiersChanged(mods));
+    h.hover_at(a);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: a, button, pressed: true, modifiers: mods });
+    h.step();
+    for i in 1..=10 {
+        h.event(egui::Event::PointerMoved(a + by * (i as f32 / 10.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: a + by, button, pressed: false, modifiers: mods });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(2);
+}
+
+fn pick_preset(h: &mut Harness<'static, EasyCadApp>, from: &str, to: &str) {
+    h.state_mut().show_settings = true;
+    h.run_steps(2);
+    h.get_by_value(from).click();
+    h.run_steps(2);
+    h.get_by_label(to).click();
+    h.run_steps(2);
+    h.state_mut().show_settings = false;
+    h.run_steps(2);
+}
+
+#[test]
+fn alternate_navigation_presets_by_mouse() {
+    use easycad_app::settings::NavPreset;
+    let _serial = serial();
+    // the Settings window saves on change: keep it away from the user's settings
+    let cfg = std::env::temp_dir().join(format!("easycad-nav-{}", std::process::id()));
+    std::env::set_var("XDG_CONFIG_HOME", &cfg);
+    let mut h = harness(easycad_app::sample::sensor_node());
+    assert_eq!(h.state().settings.nav, NavPreset::easyCAD);
+    let pose = |h: &Harness<'static, EasyCadApp>| (h.state().camera.rot, h.state().camera.target);
+    let none = egui::Modifiers::NONE;
+    // Fusion: plain middle pans
+    let (r0, t0) = pose(&h);
+    drag_view(&mut h, egui::PointerButton::Middle, none, egui::vec2(120.0, 40.0));
+    let (r1, t1) = pose(&h);
+    assert!(r1.angle_between(r0) < 1e-4 && t1.distance(t0) > 1.0, "Fusion: MMB pans");
+
+    // SolidWorks, picked in Settings: middle orbits, Ctrl+middle pans
+    pick_preset(&mut h, "Fusion 360 / easyCAD", "SolidWorks");
+    assert_eq!(h.state().settings.nav, NavPreset::SolidWorks);
+    assert_eq!(easycad_app::settings::Settings::load().nav, NavPreset::SolidWorks, "saved");
+    h.get_by_label_contains("Orbit MMB");
+    let (r0, t0) = pose(&h);
+    drag_view(&mut h, egui::PointerButton::Middle, none, egui::vec2(120.0, 40.0));
+    let (r1, t1) = pose(&h);
+    assert!(r1.angle_between(r0) > 0.1 && t1.distance(t0) < 1e-3, "SolidWorks: MMB orbits");
+    drag_view(&mut h, egui::PointerButton::Middle, egui::Modifiers::CTRL, egui::vec2(-80.0, 30.0));
+    let (r2, t2) = pose(&h);
+    assert!(r2.angle_between(r1) < 1e-4 && t2.distance(t1) > 1.0, "SolidWorks: Ctrl+MMB pans");
+
+    // Onshape: right orbits, and a right drag opens no context menu
+    pick_preset(&mut h, "SolidWorks", "Onshape");
+    let (r0, _) = pose(&h);
+    drag_view(&mut h, egui::PointerButton::Secondary, none, egui::vec2(100.0, 0.0));
+    let (r1, _) = pose(&h);
+    assert!(r1.angle_between(r0) > 0.1, "Onshape: RMB orbits");
+    assert!(h.query_by_label("Fit all").is_none(), "no context menu after a right drag");
+    save(&mut h, "nav_onshape_orbit");
+    pick_preset(&mut h, "Onshape", "Fusion 360 / easyCAD");
+    assert_eq!(easycad_app::settings::Settings::load().nav, NavPreset::easyCAD);
+    let _ = std::fs::remove_dir_all(&cfg);
+}
