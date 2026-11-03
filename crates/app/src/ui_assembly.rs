@@ -134,7 +134,7 @@ impl CaseworkApp {
             self.close_dialog(false);
         }
         self.active = path;
-        self.rollback = None;
+        self.comp_rollback = None;
         self.selection.clear();
         self.stack.clear();
         self.asm.sel = None;

@@ -64,6 +64,14 @@ today (adapter or limitation) and what would replace it.
     common solid, so the GUI tints the whole pair red (translucent). *Want:*
     `Interference.common: Option<Shape>` (world frame) to draw the overlap itself.
 
+20. **Root rollback leaks into component views.** `DocData::component_view` copies
+    every root field (`..self.clone()`), including `rollback`, so with the root
+    rolled back to `n` each component regenerates only its first `n` features. The
+    GUI clears `rollback` on its worker copy after truncating the root
+    (`adapters::effective_in`); `Document::regenerate_assembly` and exports still see
+    it. *Want:* `component_view` to reset `rollback` (and a per-component marker if
+    rollback inside components should be saved).
+
 ## Sketch
 
 12. **Offset constraint.** The GUI's offset makes new geometry pinned by

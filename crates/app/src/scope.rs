@@ -96,4 +96,20 @@ mod tests {
         doc.undo();
         assert!(doc.data.component(c).unwrap().sketches.is_empty());
     }
+
+    #[test]
+    fn root_rollback_is_the_documents_and_component_views_ignore_it() {
+        let mut doc = crate::sample::sensor_node();
+        let n = doc.data.features.len();
+        doc.set_rollback(Some(2));
+        let c = doc.add_component("Part");
+        doc.add_occurrence(ComponentId::ROOT, c, "Part:1", Transform::IDENTITY)
+            .unwrap();
+        // the worker's copy: root cut at the marker, marker cleared for components
+        let eff = crate::adapters::effective_in(&doc.data, ComponentId::ROOT, None);
+        assert_eq!(eff.features.len(), 2);
+        assert_eq!(eff.rollback, None);
+        assert_eq!(eff.component_view(c).unwrap().rollback, None);
+        assert_eq!(doc.data.features.len(), n);
+    }
 }

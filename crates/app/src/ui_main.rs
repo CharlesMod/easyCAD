@@ -1196,7 +1196,7 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                 // sketches appear before the first feature that uses them
                 let mut shown_sketches = std::collections::HashSet::new();
                 let n = feats.len();
-                let marker = app.rollback.unwrap_or(n);
+                let marker = app.rollback().unwrap_or(n);
                 let mut click: Option<usize> = None;
                 let mut dbl: Option<FeatureId> = None;
                 let mut sketch_edit = None;
@@ -1259,7 +1259,7 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                                     col,
                                     label,
                                     i < marker,
-                                    i + 1 == marker && app.rollback.is_some(),
+                                    i + 1 == marker && app.rollback().is_some(),
                                     warn.as_ref().map(|w| w.0),
                                 );
                                 let tip = match &warn {
@@ -1311,8 +1311,7 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                         });
                     });
                 if let Some(i) = click {
-                    app.rollback = if i + 1 >= n { None } else { Some(i + 1) };
-                    app.request_model();
+                    app.set_rollback(if i + 1 >= n { None } else { Some(i + 1) });
                 }
                 if let Some(id) = dbl {
                     app.edit_feature(id);
@@ -1403,7 +1402,7 @@ fn history_chip(
 // ---------------------------------------------------------------- status
 
 pub fn status_text(app: &CaseworkApp) -> String {
-    if let Some(n) = app.rollback {
+    if let Some(n) = app.rollback() {
         if let Some(f) = app.view().features.get(n.saturating_sub(1)) {
             let l = app
                 .cache

@@ -83,7 +83,9 @@ pub struct CaseworkApp {
     pub stack_since: f64,
     pub hover_pos: Option<egui::Pos2>,
     pub hidden: HashSet<BodyId>,
-    pub rollback: Option<usize>,
+    /// Rollback marker while a component is being edited (the root's is
+    /// `DocData.rollback`, saved and undoable).
+    pub comp_rollback: Option<usize>,
     pub mode: Mode,
     pub dialog: Option<Dialog>,
     pub params: ParamsUi,
@@ -183,7 +185,7 @@ impl CaseworkApp {
             stack_since: 0.0,
             hover_pos: None,
             hidden: HashSet::new(),
-            rollback: None,
+            comp_rollback: None,
             mode: Mode::Model,
             dialog: None,
             params: ParamsUi::default(),
@@ -235,7 +237,26 @@ impl CaseworkApp {
                 return Some(i);
             }
         }
-        self.rollback
+        self.rollback()
+    }
+
+    /// The history rollback marker of the component being edited.
+    pub fn rollback(&self) -> Option<usize> {
+        if self.active.is_empty() {
+            self.doc.data.rollback
+        } else {
+            self.comp_rollback
+        }
+    }
+
+    /// Move the rollback marker (the root's is an undoable document edit).
+    pub fn set_rollback(&mut self, at: Option<usize>) {
+        if self.active.is_empty() {
+            self.doc.set_rollback(at);
+        } else {
+            self.comp_rollback = at;
+        }
+        self.request_model();
     }
 
     pub fn request_model(&mut self) {
@@ -598,9 +619,17 @@ impl CaseworkApp {
         feats: Vec<Feature>,
         replace: Option<FeatureId>,
     ) {
-        let at = self.rollback;
+        let at = self.rollback();
         let scope = self.scope();
+        let root = self.active.is_empty();
+        let added = feats.len() as isize - replace.is_some() as isize;
         let r = crate::scope::edit(&mut self.doc, scope, label, |d| {
+            if root {
+                // the marker moves with what was inserted before it
+                if let Some(r) = d.rollback {
+                    d.rollback = Some((r as isize + added).max(0) as usize);
+                }
+            }
             let pos = match replace {
                 Some(id) => d
                     .features
@@ -625,8 +654,10 @@ impl CaseworkApp {
         });
         match r {
             Ok(()) => {
-                if let Some(n) = self.rollback.as_mut() {
-                    *n += 1;
+                if !root {
+                    if let Some(n) = self.comp_rollback.as_mut() {
+                        *n = (*n as isize + added).max(0) as usize;
+                    }
                 }
                 self.request_model();
             }
@@ -847,7 +878,7 @@ impl CaseworkApp {
         self.path = path;
         self.selection.clear();
         self.hidden.clear();
-        self.rollback = None;
+        self.comp_rollback = None;
         self.dialog = None;
         self.mode = Mode::Model;
         self.model = None;

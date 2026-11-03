@@ -2,8 +2,8 @@
 //!
 //! * **Old plane bindings.** Files from before plane `offset` expressions are
 //!   migrated on open ([`migrate_bindings`]).
-//! * **Rollback marker.** Not part of `DocData` yet: the GUI keeps it and sends the
-//!   truncated feature list to the worker.
+//! * **Rollback inside a component.** `DocData.rollback` is the root's; while a
+//!   component is active the GUI keeps its marker and truncates its features.
 //! * **Movable in-context components.** A component made by `split_to_components`
 //!   is built in the frame of its context occurrence, so moving its only occurrence
 //!   re-expresses the master's half and it stays put. Each gets a hidden "design
@@ -70,6 +70,11 @@ pub fn effective_in(
     active: Option<usize>,
 ) -> DocData {
     let mut d = d.clone();
+    // the root's saved marker: truncate here and clear it, so component views
+    // (which copy the root's fields) are not cut at the root's index
+    if let Some(r) = d.rollback.take() {
+        d.features.truncate(r);
+    }
     if let (Some(n), Some(f)) = (active, crate::scope::features_mut(&mut d, scope)) {
         f.truncate(n);
     }

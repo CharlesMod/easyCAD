@@ -174,7 +174,7 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "dialog": dialog(app),
         "selection": labels(&app.selection),
         "stack": { "items": labels(&stack), "index": app.stack.index },
-        "rollback": app.rollback,
+        "rollback": app.rollback(),
         "camera": {
             "rot": cam.rot.to_array(),
             "forward": cam.forward().to_array(),

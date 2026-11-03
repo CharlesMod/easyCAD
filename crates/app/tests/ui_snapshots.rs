@@ -398,8 +398,7 @@ fn parts_joint_drawing_screens() {
             .iter()
             .position(|f| matches!(f.kind, casework_model::feature::FeatureKind::Split { .. }))
             .unwrap();
-        app.rollback = Some(split);
-        app.request_model();
+        app.set_rollback(Some(split));
     }
     settle(&mut h);
     h.state_mut().open_dialog(DialogKind::Joint);
