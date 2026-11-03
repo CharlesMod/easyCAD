@@ -152,7 +152,6 @@ pub fn spawn(
 ) -> Receiver<Result<String, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let _kernel = crate::worker::kernel_lock();
         let mut doc = Document::new(&data.name);
         doc.data = data;
         doc.blobs = blobs;

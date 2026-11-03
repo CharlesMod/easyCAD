@@ -23,9 +23,9 @@ today (adapter or limitation) and what would replace it.
    feature's *input* shape, so the GUI asks the worker for the bodies after each
    prefix and matches midpoints to map outcomes back to picks. *Want:* the request
    index of the selector that produced each outcome edge.
-5. **Shell with no open faces** returns only the inner offset surface (the body's
-   bbox becomes the cavity). The sample enclosure works around it with "shell open
-   bottom + floor plate". *Want:* a closed hollow solid (or an error).
+5. ~~Shell with no open faces~~ — done by the engine; the "New enclosure from PCB"
+   wizard uses a closed shell + parting joint. (The sample still has the old
+   "open bottom + floor plate" history so the E2E coordinates stay put.)
 6. **Default fits per field.** The GUI mirrors `regen.rs` (boss/standoff hole =
    Hole/Snug) to show the chip. *Want:* `FeatureKind::default_fit(field) -> Option<Fit>`.
 7. **Standoffs.** *Want:* a per-hole exclusion list on `StandoffsFromPcb` (the GUI
@@ -38,16 +38,20 @@ today (adapter or limitation) and what would replace it.
 9. **Section / slice.** The "Section view" button and the sketch option "Slice body
    at sketch plane" are disabled. *Want:* `Shape::section(plane)` exposed for display
    (it exists for joints) and a cap-face mesh.
-10. **Concurrency contract.** The GUI serializes all kernel work (regen worker,
-    background export) with one mutex after a SIGSEGV when several documents
-    regenerated on parallel threads in tests. *Want:* a statement of what is safe
-    to run concurrently, or an internal lock.
+10. ~~Concurrency contract~~ — done; the GUI's kernel mutex is gone.
 11. **BOM without a `Document`.** `Document::bom()` only reads `DocData`; the worker
     builds a throwaway `Document` to feed `drawing::compute`. *Want:* `DocData::bom()`.
 
-12a. **Fractional inches.** `1/8"` parses as `1 / (8 in)`. The GUI rewrites
-    `1/8"` → `(1/8*1in)` and `1 1/2"` → `((1+1/2)*1in)` before storing
-    (`units::normalize_input`). *Want:* the parser to bind `"` to a fraction.
+12a. ~~Fractional inches~~ — done by the engine. `units::normalize_input` still
+    rewrites them (same value, harmless); it can shrink to the inch-mode suffix.
+12b. **Profile edits reorder the list.** `Document::add_profile` removes and
+    re-appends, so editing a profile moved it to the bottom of the picker. The GUI
+    uses `adapters::update_profile` (replace in place, own undo label). *Want:*
+    `Document::update_profile(label, p)` or in-place replacement in `add_profile`.
+12c. **O-ring gland corner radius.** On the sample (outline corners filleted r 5.3,
+    cavity corners r 3.3) the O-ring report says "gland corner radius 0.00 mm is
+    below the 5.33 mm bend guidance" and the check "min corner radius 0.00". Looks
+    like the gland path's corner radius is measured as 0 on a filleted outline.
 
 ## Sketch
 

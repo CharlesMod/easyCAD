@@ -26,14 +26,6 @@ pub enum Purpose {
     Drawing,
 }
 
-/// Serializes kernel-heavy work between the regen worker and background export
-/// threads (a crash was seen with several kernels running concurrently in tests).
-pub static KERNEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub fn kernel_lock() -> std::sync::MutexGuard<'static, ()> {
-    KERNEL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 pub struct Request {
     pub id: u64,
     pub purpose: Purpose,
@@ -266,7 +258,7 @@ fn process(
     dcache: &mut casework_model::drawing::DrawingCache,
     r: Request,
 ) -> Output {
-    let _kernel = kernel_lock();
+    // no kernel mutex: the engine's concurrency contract allows parallel threads
     let t0 = Instant::now();
     let result = regen.regenerate(&r.data, &r.blobs, &r.library);
     let drawing = r.drawing.as_ref().map(|d| {
