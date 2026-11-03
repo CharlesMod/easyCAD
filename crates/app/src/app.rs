@@ -143,6 +143,8 @@ pub struct EasyCadApp {
     pub section: Option<SectionUi>,
     /// Bounds of the uncut model, for placing the section plane.
     pub section_bbox: Option<easycad_model::occt::BBox>,
+    /// Overhang heat map (view toolbar).
+    pub overhang: crate::ui_overhang::OverhangUi,
     /// Google Drive sync (inert unless the binary starts it).
     pub cloud: crate::cloud::Cloud,
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
@@ -243,6 +245,7 @@ impl EasyCadApp {
             asm_explode_rect: None,
             section: None,
             section_bbox: None,
+            overhang: Default::default(),
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             bench_start: None,
@@ -775,7 +778,18 @@ impl EasyCadApp {
             match d.build(&cx) {
                 Ok(feats) if !feats.is_empty() => {
                     let label = d.title_case();
+                    let before: HashSet<FeatureId> = crate::scope::features(&self.doc.data, self.scope()).iter().map(|f| f.id).collect();
                     self.commit_features(&label, feats, d.editing());
+                    if d.as_components == Some(true) {
+                        // the split just committed: a new one, or the Split a joint replaced
+                        let fid = crate::scope::features(&self.doc.data, self.scope())
+                            .iter()
+                            .find(|f| (!before.contains(&f.id) || d.editing() == Some(f.id)) && matches!(f.kind, easycad_model::feature::FeatureKind::Split { .. } | easycad_model::feature::FeatureKind::PartingJoint { .. }))
+                            .map(|f| f.id);
+                        if let Some(fid) = fid {
+                            self.output_as_components(fid);
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {

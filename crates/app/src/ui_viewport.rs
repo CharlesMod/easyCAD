@@ -389,6 +389,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     joint_plane_overlay(app, ui, rect);
     dialog_overlay(app, ui, rect);
     crate::ui_mates::glyphs(app, ui, rect);
+    crate::ui_mates::free_motion(app, ui, rect);
     crate::ui_mates::mate_card(app, ui, rect);
     crate::ui_interference::card(app, ui, rect);
     crate::ui_welcome::welcome(app, ui, rect);
@@ -554,14 +555,24 @@ fn build_frame(
     let cam = &app.camera;
     let mut bodies = Vec::new();
     let explode = explode_offset(app, shown);
+    // overhang heat map: the build direction in the view frame, the critical angle
+    let heat = app.overhang.on.then(|| {
+        app.overhang.begin_frame();
+        let to_view = shown.asm.as_ref().map(|a| a.frame.inverse().affine()).unwrap_or(glam::DAffine3::IDENTITY);
+        (to_view.transform_vector3(app.overhang.up.dir()), app.critical_overhang())
+    });
     for b in &shown.bodies {
         if !app.body_visible(b.body.id) {
             continue;
         }
         if let Some(m) = &b.mesh {
             let mut color = body_color(b.body.reference, b.body.part.is_some());
-            if b.colors.is_some() {
-                // imported appearance: vertex colours, keep the reference translucency
+            let mut colors = b.colors.clone();
+            if let Some((up, crit)) = heat.filter(|_| !b.body.reference) {
+                colors = Some(app.overhang.colors(m, up, crit));
+            }
+            if colors.is_some() {
+                // vertex colours (imported appearance, heat map); keep the reference translucency
                 color = [1.0, 1.0, 1.0, if b.body.reference { 0.6 } else { 1.0 }];
             }
             let offset = match explode {
@@ -572,7 +583,7 @@ fn build_frame(
                 mesh: m.clone(),
                 color,
                 translucent: b.body.reference,
-                colors: b.colors.clone(),
+                colors,
                 model: glam::Mat4::from_translation(offset),
             });
         }
@@ -609,7 +620,12 @@ fn build_frame(
         let Some(m) = &c.mb.mesh else { continue };
         let b = &c.mb.body;
         let mut color = body_color(b.reference, b.part.is_some());
-        if c.mb.colors.is_some() {
+        let mut colors = c.mb.colors.clone();
+        if let Some((up, crit)) = heat.filter(|_| !b.reference) {
+            // the build direction in this instance's mesh frame
+            colors = Some(app.overhang.colors(m, c.place.inverse().transform_vector3(up), crit));
+        }
+        if colors.is_some() {
             color = [1.0, 1.0, 1.0, if b.reference { 0.6 } else { 1.0 }];
         }
         if let Some(t) = crate::ui_assembly::body_tint(app, c) {
@@ -623,7 +639,7 @@ fn build_frame(
             mesh: m.clone(),
             color,
             translucent: b.reference || dim || tinted,
-            colors: c.mb.colors.clone(),
+            colors,
             model: to_mat4(crate::ui_assembly::display_xf(app, c)),
         });
     }
@@ -803,7 +819,7 @@ fn draw_edge(
     }
 }
 
-fn overlay_frame() -> Frame {
+pub fn overlay_frame() -> Frame {
     Frame::new()
         .fill(theme::CARD)
         .stroke(Stroke::new(1.0, theme::BORDER_INPUT))
@@ -885,8 +901,9 @@ fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
 
 fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     section_bar(app, ui, rect);
+    crate::ui_overhang::legend(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
-    let w = if asm { 560.0 } else { 380.0 };
+    let w = if asm { 640.0 } else { 460.0 };
     let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 54.0);
     egui::Area::new(egui::Id::unique("display"))
         .order(egui::Order::Middle)
@@ -905,6 +922,11 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                     }
                     if r.clicked() {
                         app.toggle_section();
+                    }
+                    let on = app.overhang.on;
+                    let r = widgets::seg(ui, "Overhang", on).on_hover_text("Overhang heat map: faces that lean out past the process's critical angle need support");
+                    if r.clicked() {
+                        app.overhang.toggle();
                     }
                     let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
                     ui.painter().vline(

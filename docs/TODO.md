@@ -30,17 +30,27 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[eng]** Fillet/chamfer fuzz: random edge sets × radii on realistic enclosures; histogram
       applied / reduced / skipped / bailed; fix the "bailed" and wrongly "skipped" (vertex blends,
       sliver faces, cross-feature fillets).
-- [ ] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
+- [x] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
+      `model::overhang` (per-triangle areas, so curved faces report a share; plate faces are ok;
+      critical angle from the process kind), view toolbar *Overhang* with legend and ±X/±Y/±Z picker.
 
 ## 4. App work still open
 - [x] **[ui]** Assemblies in drawings: scope picker (assembly / component / occurrence), BOM table, balloons.
       Done: "Shows" picker + Exploded per view, BOM table tool, the Balloon tool numbers
       assembly views by the flat BOM; an assembly whose root has no solids gets assembly
       views and a BOM table on its first sheet. On screen and in SVG / DXF / PDF.
-- [ ] **[ui]** "Output as components" on the Split and Parting-joint dialogs.
-- [ ] **[ui]** Click-test linked-file Update/Break, drag-to-reparent, and one alternate navigation preset.
-- [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
-- [ ] **[ui]** History strip hint when the active root has no features of its own.
+- [x] **[ui]** "Output as components" on the Split and Parting-joint dialogs. A checkbox on new
+      splits/joints; a plain part's root moves into a master component first. Root imports (a
+      reference PCB) go into the hidden master with it: re-insert the board as its own component.
+- [x] **[ui]** Click-test linked-file Update/Break, drag-to-reparent, and one alternate navigation preset.
+      `tests/ui_clicks.rs`. Found: a cached link status kept the old folder for 5 s after the
+      document moved, and the drag label was painted under the rows. The presets (SolidWorks,
+      Onshape, Blender) already existed; the test picks SolidWorks and Onshape in Settings and drags.
+- [x] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
+      Free motion: arrows / rings for the mate being edited or the Mates row clicked. The overlap
+      solid (wired in fef16bd) is verified by `ui_clicks::mate_free_motion_and_interference_overlap`.
+- [x] **[ui]** History strip hint when the active root has no features of its own (`ui_main::history_hint`;
+      also an empty part and an empty active component).
 - [x] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21): each offset
       joint gets two equations (tangent joints pinned on the source joint's normal); 0 DOF, no
       redundancy on the board outline, S-curves, sharp corners, circles. The GUI's own offset is gone.

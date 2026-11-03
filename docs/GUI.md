@@ -24,7 +24,7 @@ mode a bare number means inches.
 | `camera.rs` | Quaternion orbit camera: Shift+MMB orbit, MMB pan, wheel zoom to cursor, fit, 26 view-cube regions, 15° steps (world or screen axes), home view, 250 ms eased transitions. |
 | `viewcube.rs` | The cube: 6 faces × 3×3 hit zones with narrow bands, hover highlight, click, drag-orbit, context menu (home, projection, fit on change, step frame), step buttons. |
 | `pickstack.rs` | Filtered, de-duplicated candidates front to back; Tab / Shift+Tab / Alt+wheel cycle; index survives small moves. |
-| `ui_main.rs` | Title bar, toolbar, browser, Parameters panel, history strip, status bar, new-document prompt. |
+| `ui_main.rs` | Title bar, toolbar, browser, Parameters panel, history strip (with a hint when the level being edited has no features: an assembly's root points at a component to double-click), status bar, new-document prompt. |
 | `ui_process.rs` | PROCESS section: profile, fit allowances, build plate picker + preview, teardrops, calibration. |
 | `ui_viewport.rs` | Viewport input, pick popover, overlays, floating dialogs. |
 | `dialogs/` | Feature dialogs (fillet/chamfer with self-heal report, extrude, revolve, shell, draft, split, boss, rib, pattern, mirror, standoffs, parting joint, export). |
@@ -40,9 +40,10 @@ mode a bare number means inches.
 | `recovery.rs` | Autosave: a dirty document is copied every N minutes (off the UI thread) to `$XDG_DATA_HOME/easycad/recovery/<doc id>/` (a `.ecad` + `info.json` with the pid). Saving removes it; closing unsaved writes a last one. At start, copies whose process is gone are offered (Restore / Discard / Decide later; Enter restores the newest). `EASYCAD_AUTOSAVE_SECS` overrides the interval (E2E). |
 | `ui_assembly.rs` | Assemblies: the component tree in the browser (nested occurrences, expand/collapse, ×N instance badge, eye, ground pin, linked-file status with Update / Break link, lock on references, drag a row onto another to reparent, context menu: activate, isolate, move, ground, new / insert component, place another, make independent copy, remove), activation (double-click / Activate / breadcrumb; Esc goes up), the Mates folder (orange when unsolved or over-constrained). |
 | `scope.rs` | Editing inside the active component: dialogs, sketch mode, history strip and Parameters panel see `DocData::component_view`; `scope::edit` runs a change on that view in one undoable edit and writes the component back. |
-| `ui_mates.rs` | Mates dialog: type pills, snap glyphs under the cursor (face centre + normal, circle / cylinder axis, straight-edge axis, component origin), live solve (the draft rides along with every model request), jog slider for the free motion, OK = mate + solved placements in one undo step. |
+| `ui_mates.rs` | Mates dialog: type pills, snap glyphs under the cursor (face centre + normal, circle / cylinder axis, straight-edge axis, component origin), live solve (the draft rides along with every model request), jog slider for the free motion, OK = mate + solved placements in one undo step. The free motion left by the mate being edited, or by the row clicked in the Mates folder (`AsmUi::sel_mate`), is drawn in the viewport from `MateReport.free`: double arrows for translations (at the moving part's centre), rings with a dashed axis for rotations, three rings for a ball (GUI_NEEDS #18). |
 | `ui_gizmo.rs` | Move gizmo (G) on an unconstrained occurrence: translate arrows and rotation rings in the view frame, 1 mm / 15° snapping (Shift: free); live through a model-matrix override, one undo step on release. |
-| `ui_interference.rs` / `ui_bom.rs` | Interference (I): pairs with volumes off the UI thread, the pair tinted red, zoom-to. BOM window: indented / flat, made vs purchased, CSV. |
+| `ui_overhang.rs` | Overhang heat map (view toolbar *Overhang*): each shown body coloured per vertex by its overhang against a build direction (±X/±Y/±Z, default +Z, in the view frame) and the active process's critical angle: grey walls and up-facing, yellow→orange overhangs, red needs support, blue on the plate; a legend with the shown bodies' areas. Colours are cached per (mesh, direction, angle) as one `Arc`, so the image cache and GPU uploads stay hits; off, nothing is computed. The GPU mesh cache is keyed by (mesh, colours). |
+| `ui_interference.rs` / `ui_bom.rs` | Interference (I): pairs with volumes off the UI thread, the pair tinted red with its overlap solid drawn red inside (`Interference.common`, GUI_NEEDS #19), zoom-to. BOM window: indented / flat, made vs purchased, CSV. |
 | `cloud.rs` | Google Drive sync on `easycad-sync`: the Google client lookup, the keychain sign-in check at start, Sign in / Sign out (browser, off the UI thread), the background `SyncHandle` over the Documents, Parts Library and Settings roots, and the status-bar indicator / conflict notices it derives from the sync events. Inert unless `main.rs` starts it, so tests never touch the keychain or the network. |
 | `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
@@ -57,6 +58,16 @@ the camera keeps its world pose across activation. "New enclosure from PCB" make
 assembly by default (Enclosure master, hidden and out of the BOM → Base (grounded) +
 Lid in context; a STEP board as a locked, purchased reference). See GUI_NEEDS #17
 for the design-position anchors that let in-context components move.
+
+The Split and Parting-joint dialogs have **Output as components** (new features
+only, and a joint that takes a Split's place): on OK the two halves become
+components built in context from the source (`split_to_components`), placed where
+the split happened and free to move or mate; the source stays as the hidden design
+master. On a plain part the root's history first moves into a component named after
+the document (`move_root_into_component`); in an active component that component
+becomes the master. Halves are named after their bodies ("Base (in context)" loses
+its suffix; a name already used gets " (lower)" / " (upper)"). Root imports (the
+sample's reference PCB) move into the master and are hidden with it.
 
 ## Idle cost
 
@@ -146,6 +157,12 @@ Deleted files go to the Drive trash; files deleted locally by sync go to
 ```
 cargo test -p easycad                 # unit + snapshot + GPU tests
 ```
+
+`tests/ui_clicks.rs` drives the real app with clicks and drags (kittest): the
+overhang heat map, "Output as components", linked-file Update / Break (badge click,
+row context menu), dragging a tree row onto another to reparent (the tree records
+its row and link-badge rects in `AsmUi::{row_rects, link_rects}`), the navigation
+presets, mate free-motion glyphs and the interference overlap solid.
 
 Snapshots (written, not compared) land in `crates/app/tests/snapshots/`. They need
 a wgpu adapter; in a container install `mesa-vulkan-drivers` (lavapipe). The

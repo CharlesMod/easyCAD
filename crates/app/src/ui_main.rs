@@ -1201,6 +1201,9 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 let mut dbl: Option<FeatureId> = None;
                 let mut sketch_edit = None;
                 let mut accept: Option<FeatureId> = None;
+                if let Some(hint) = history_hint(app) {
+                    ui.label(RichText::new(hint).size(12.0).color(theme::TEXT_MUTED));
+                }
                 egui::ScrollArea::horizontal()
                     .max_width(ui.available_width() - 210.0)
                     .show(ui, |ui| {
@@ -1338,6 +1341,26 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 });
             });
         });
+}
+
+/// What the history strip says when the level being edited has no features of
+/// its own (an assembly's root: its history lives in the components).
+pub fn history_hint(app: &EasyCadApp) -> Option<String> {
+    if !app.view().features.is_empty() {
+        return None;
+    }
+    let d = &app.doc.data;
+    Some(if !app.active.is_empty() {
+        format!("{} has no features yet · Sketch (S) to start", d.component_name(app.scope()))
+    } else if crate::ui_assembly::is_assembly(d) {
+        let first = d.occurrences.iter().find(|o| d.component(o.component).is_some_and(|c| !c.locked && !c.features.is_empty()));
+        match first {
+            Some(o) => format!("The assembly has no features of its own · double-click a component (e.g. {}) to edit its history", o.name),
+            None => "The assembly has no features of its own · its components carry the history".into(),
+        }
+    } else {
+        "No features yet · start with a Sketch (S)".into()
+    })
 }
 
 fn history_chip(
