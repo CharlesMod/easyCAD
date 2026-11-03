@@ -43,8 +43,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
 - [ ] Drawings: GD&T frames, section views, hatching, collision-free dimension text, real PDF text widths.
-- [ ] Parts library rows marked TODO (imperial inserts/standoffs, thread-forming heads, some button-head
-      lengths, M2/M2.5 counterbores, inch loose-fit clearance): verify against ISO 4762/7380/10642/273 and ASME B18.3.
+- [x] Parts library rows marked TODO: verified against ISO 4762/7380-1/10642/273, ASME B18.3/B18.22.1/B18.2.8
+      and vendor tables (ruthex inserts, EJOT PT); #2-56 rows and the B18.2.8 inch close/normal/loose classes added.
+      Still marked: shortest ISO 7380-1 lengths, #6-32/#10-32 inch inserts, M2/M2.5 counterbore depths (no source).
 - [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).
 - [ ] Closed loops of mates are checked, not solved.
 - [ ] Pattern/mirror of whole-body features (fillet, shell) returns "cannot be patterned".
