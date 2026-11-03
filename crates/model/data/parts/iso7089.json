@@ -1,0 +1,19 @@
+{
+  "id": "iso7089",
+  "name": "Plain washer, normal series",
+  "standard": "ISO 7089",
+  "source": "ISO 7089:2000 Table 1: inner diameter d1 (nominal min), outer diameter d2 (nominal max), thickness h (nominal).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "washer",
+  "tags": ["washer", "flat washer", "plain washer"],
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "d1": 2.2, "d2": 5.0,  "h": 0.3},
+    {"size": "M2.5", "d": 2.5, "d1": 2.7, "d2": 6.0,  "h": 0.5},
+    {"size": "M3",   "d": 3.0, "d1": 3.2, "d2": 7.0,  "h": 0.5},
+    {"size": "M4",   "d": 4.0, "d1": 4.3, "d2": 9.0,  "h": 0.8},
+    {"size": "M5",   "d": 5.0, "d1": 5.3, "d2": 10.0, "h": 1.0},
+    {"size": "M6",   "d": 6.0, "d1": 6.4, "d2": 12.0, "h": 1.6},
+    {"size": "M8",   "d": 8.0, "d1": 8.4, "d2": 16.0, "h": 1.6}
+  ]
+}

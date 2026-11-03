@@ -1,0 +1,21 @@
+{
+  "id": "asme_shcs",
+  "name": "Socket head cap screw (inch)",
+  "standard": "ASME B18.3",
+  "source": "ASME B18.3 socket head cap screws (1960 series): head diameter A (max), head height H (max), hex key J (nominal). Lengths: standard fractional stock lengths.",
+  "units": "in",
+  "system": "imperial",
+  "generator": "screw",
+  "head": "socket",
+  "length": "under_head",
+  "tags": ["screw", "shcs", "cap screw", "socket head", "allen", "inch", "unc", "unf"],
+  "sizes": [
+    {"size": "#2-56",  "d": 0.086, "tpi": 56, "dk": 0.140, "k": 0.086, "s": 0.0781, "lengths": [0.125, 0.1875, 0.25, 0.3125, 0.375, 0.5, 0.625, 0.75]},
+    {"size": "#4-40",  "d": 0.112, "tpi": 40, "dk": 0.183, "k": 0.112, "s": 0.0938, "lengths": [0.1875, 0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#6-32",  "d": 0.138, "tpi": 32, "dk": 0.226, "k": 0.138, "s": 0.1094, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0, 1.25]},
+    {"size": "#8-32",  "d": 0.164, "tpi": 32, "dk": 0.270, "k": 0.164, "s": 0.1406, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0, 1.25, 1.5]},
+    {"size": "#10-24", "d": 0.190, "tpi": 24, "dk": 0.312, "k": 0.190, "s": 0.1562, "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0, 1.25, 1.5, 2.0]},
+    {"size": "#10-32", "d": 0.190, "tpi": 32, "dk": 0.312, "k": 0.190, "s": 0.1562, "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0, 1.25, 1.5, 2.0]},
+    {"size": "1/4-20", "d": 0.250, "tpi": 20, "dk": 0.375, "k": 0.250, "s": 0.1875, "lengths": [0.375, 0.5, 0.625, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5]}
+  ]
+}

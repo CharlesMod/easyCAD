@@ -1,0 +1,18 @@
+{
+  "id": "asme_split_lock",
+  "name": "Split lock washer, regular (inch)",
+  "standard": "ASME B18.21.1",
+  "source": "ASME B18.21.1 helical spring lock washers, regular: inside diameter (min), outside diameter (max), section thickness (mean). Modelled flat.",
+  "units": "in",
+  "system": "imperial",
+  "generator": "split_washer",
+  "tags": ["washer", "lock washer", "split washer", "inch"],
+  "sizes": [
+    {"size": "#2",  "thread": "#2-56",  "d": 0.086, "d1": 0.088, "d2": 0.172, "h": 0.020},
+    {"size": "#4",  "thread": "#4-40",  "d": 0.112, "d1": 0.115, "d2": 0.209, "h": 0.025},
+    {"size": "#6",  "thread": "#6-32",  "d": 0.138, "d1": 0.141, "d2": 0.250, "h": 0.031},
+    {"size": "#8",  "thread": "#8-32",  "d": 0.164, "d1": 0.168, "d2": 0.293, "h": 0.040},
+    {"size": "#10", "thread": "#10-24", "d": 0.190, "d1": 0.194, "d2": 0.334, "h": 0.047},
+    {"size": "1/4", "thread": "1/4-20", "d": 0.250, "d1": 0.255, "d2": 0.489, "h": 0.062}
+  ]
+}

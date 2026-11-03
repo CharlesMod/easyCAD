@@ -1,0 +1,22 @@
+{
+  "system": "imperial",
+  "units": "in",
+  "source": "Clearance: standard close-fit / free-fit drill sizes from the common machine-screw clearance chart (e.g. #4: #32 = 0.1160 close, #30 = 0.1285 free); 'normal' = free fit. Tap drill: 75 % thread drill sizes (e.g. #4-40: #43 = 0.0890). Counterbore for socket head cap screws: Machinery's Handbook counterbore table (diameter; depth = head height). Pilot hole for thread-forming screws in plastics: approx. 0.8 d (ABS guideline).",
+  "pilot_factor_plastic": 0.8,
+  "sizes": {
+    "#2-56":  {"close": 0.0890, "normal": 0.0960, "tap_drill": 0.0700, "close_drill": "#43", "free_drill": "#41", "tap_drill_name": "#50", "counterbore": {"socket": {"d": 0.1875, "depth": 0.086}}},
+    "#4-40":  {"close": 0.1160, "normal": 0.1285, "tap_drill": 0.0890, "close_drill": "#32", "free_drill": "#30", "tap_drill_name": "#43", "counterbore": {"socket": {"d": 0.2188, "depth": 0.112}}},
+    "#6-32":  {"close": 0.1440, "normal": 0.1495, "tap_drill": 0.1065, "close_drill": "#27", "free_drill": "#25", "tap_drill_name": "#36", "counterbore": {"socket": {"d": 0.2812, "depth": 0.138}}},
+    "#8-32":  {"close": 0.1695, "normal": 0.1770, "tap_drill": 0.1360, "close_drill": "#18", "free_drill": "#16", "tap_drill_name": "#29", "counterbore": {"socket": {"d": 0.3125, "depth": 0.164}}},
+    "#10-24": {"close": 0.1960, "normal": 0.2010, "tap_drill": 0.1495, "close_drill": "#9",  "free_drill": "#7",  "tap_drill_name": "#25", "counterbore": {"socket": {"d": 0.375, "depth": 0.190}}},
+    "#10-32": {"close": 0.1960, "normal": 0.2010, "tap_drill": 0.1590, "close_drill": "#9",  "free_drill": "#7",  "tap_drill_name": "#21", "counterbore": {"socket": {"d": 0.375, "depth": 0.190}}},
+    "1/4-20": {"close": 0.2570, "normal": 0.2660, "tap_drill": 0.2010, "close_drill": "F",   "free_drill": "H",   "tap_drill_name": "#7",  "counterbore": {"socket": {"d": 0.4375, "depth": 0.250}}}
+  },
+  "loose_todo": "TODO: no loose-fit class in the close/free chart; ASME B18.2.8 defines normal/close/loose clearance holes for inch fasteners and should be added here.",
+  "derived": {
+    "counterbore_dia_add": 0.03125,
+    "counterbore_depth_add": 0.01,
+    "countersink_dia_add": 0.01,
+    "note": "Heads without a tabulated counterbore/countersink get dk + 1/32 in x k + 0.01 in, or a countersink of A(theoretical) + 0.01 in at the head angle. Flagged derived=true."
+  }
+}

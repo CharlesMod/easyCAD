@@ -1,0 +1,20 @@
+{
+  "id": "standoff_in_mf",
+  "name": "Hex standoff, male-female (inch)",
+  "standard": "(no ASME standard; common commercial hex standoffs)",
+  "source": "Width across flats as for the female-female table.",
+  "units": "in",
+  "system": "imperial",
+  "generator": "standoff",
+  "variant": "mf",
+  "tags": ["standoff", "spacer", "hex standoff", "pcb", "male", "inch"],
+  "todo": "TODO: male stud lengths vary by vendor; values are typical. Verify against the stocked part.",
+  "sizes": [
+    {"size": "#2-56",  "d": 0.086, "s": 0.1875, "male_l": 0.125, "lengths": [0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0]},
+    {"size": "#4-40",  "d": 0.112, "s": 0.1875, "male_l": 0.1875, "lengths": [0.1875, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#6-32",  "d": 0.138, "s": 0.25,   "male_l": 0.25, "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#8-32",  "d": 0.164, "s": 0.3125, "male_l": 0.25, "lengths": [0.25, 0.375, 0.5, 0.75, 1.0]},
+    {"size": "#10-32", "d": 0.190, "s": 0.3125, "male_l": 0.3125, "lengths": [0.375, 0.5, 0.75, 1.0, 1.25]},
+    {"size": "1/4-20", "d": 0.250, "s": 0.4375, "male_l": 0.375, "lengths": [0.5, 0.75, 1.0, 1.5]}
+  ]
+}

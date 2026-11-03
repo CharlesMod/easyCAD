@@ -1,0 +1,19 @@
+{
+  "id": "iso4032",
+  "name": "Hex nut",
+  "standard": "ISO 4032",
+  "source": "ISO 4032:2012 Table 1: width across flats s (nominal = max), height m (max).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "hex_nut",
+  "tags": ["nut", "hex nut"],
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "s": 4.0,  "m": 1.6},
+    {"size": "M2.5", "d": 2.5, "s": 5.0,  "m": 2.0},
+    {"size": "M3",   "d": 3.0, "s": 5.5,  "m": 2.4},
+    {"size": "M4",   "d": 4.0, "s": 7.0,  "m": 3.2},
+    {"size": "M5",   "d": 5.0, "s": 8.0,  "m": 4.7},
+    {"size": "M6",   "d": 6.0, "s": 10.0, "m": 5.2},
+    {"size": "M8",   "d": 8.0, "s": 13.0, "m": 6.8}
+  ]
+}

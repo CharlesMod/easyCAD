@@ -1,0 +1,19 @@
+{
+  "id": "asme_hex_nut",
+  "name": "Hex nut (inch)",
+  "standard": "ASME B18.2.2 / B18.6.3",
+  "source": "#2-#10: ASME B18.6.3 hex machine screw nuts (width across flats F, thickness H). 1/4-20: ASME B18.2.2 hex nut (F 7/16, H 7/32).",
+  "units": "in",
+  "system": "imperial",
+  "generator": "hex_nut",
+  "tags": ["nut", "hex nut", "machine screw nut", "inch"],
+  "sizes": [
+    {"size": "#2-56",  "d": 0.086, "s": 0.1875, "m": 0.0625},
+    {"size": "#4-40",  "d": 0.112, "s": 0.25,   "m": 0.0938},
+    {"size": "#6-32",  "d": 0.138, "s": 0.3125, "m": 0.1094},
+    {"size": "#8-32",  "d": 0.164, "s": 0.3438, "m": 0.125},
+    {"size": "#10-24", "d": 0.190, "s": 0.375,  "m": 0.125},
+    {"size": "#10-32", "d": 0.190, "s": 0.375,  "m": 0.125},
+    {"size": "1/4-20", "d": 0.250, "s": 0.4375, "m": 0.2188}
+  ]
+}

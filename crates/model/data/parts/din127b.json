@@ -1,0 +1,19 @@
+{
+  "id": "din127b",
+  "name": "Split lock washer (spring washer), form B",
+  "standard": "DIN 127 B",
+  "source": "DIN 127:1987 form B: inner diameter d1 (min), outer diameter d2 (max), section thickness s. Modelled flat (free height ignored).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "split_washer",
+  "tags": ["washer", "lock washer", "split washer", "spring washer"],
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "d1": 2.1, "d2": 4.4,  "h": 0.5},
+    {"size": "M2.5", "d": 2.5, "d1": 2.6, "d2": 5.1,  "h": 0.6},
+    {"size": "M3",   "d": 3.0, "d1": 3.1, "d2": 6.2,  "h": 0.8},
+    {"size": "M4",   "d": 4.0, "d1": 4.1, "d2": 7.6,  "h": 0.9},
+    {"size": "M5",   "d": 5.0, "d1": 5.1, "d2": 9.2,  "h": 1.2},
+    {"size": "M6",   "d": 6.0, "d1": 6.1, "d2": 11.8, "h": 1.6},
+    {"size": "M8",   "d": 8.0, "d1": 8.1, "d2": 14.8, "h": 2.0}
+  ]
+}

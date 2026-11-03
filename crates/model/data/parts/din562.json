@@ -1,0 +1,19 @@
+{
+  "id": "din562",
+  "name": "Thin square nut",
+  "standard": "DIN 562",
+  "source": "DIN 562:1990: width across flats s, height m.",
+  "units": "mm",
+  "system": "metric",
+  "generator": "square_nut",
+  "tags": ["nut", "square nut", "thin", "captive nut"],
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "s": 4.0,  "m": 1.2},
+    {"size": "M2.5", "d": 2.5, "s": 5.0,  "m": 1.6},
+    {"size": "M3",   "d": 3.0, "s": 5.5,  "m": 1.8},
+    {"size": "M4",   "d": 4.0, "s": 7.0,  "m": 2.2},
+    {"size": "M5",   "d": 5.0, "s": 8.0,  "m": 2.7},
+    {"size": "M6",   "d": 6.0, "s": 10.0, "m": 3.2},
+    {"size": "M8",   "d": 8.0, "s": 13.0, "m": 4.0}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "iso10642",
+  "name": "Countersunk (flat) head socket screw",
+  "standard": "ISO 10642",
+  "source": "ISO 10642:2004 Table 1: dk = theoretical max head diameter (sharp edge, 2.24 d), k max (0.62 d), s nominal; 90 deg head. Length is overall (includes head). ISO 10642 starts at M3.",
+  "units": "mm",
+  "system": "metric",
+  "generator": "screw",
+  "head": "flat",
+  "head_angle": 90,
+  "length": "overall",
+  "tags": ["screw", "flat head", "countersunk", "fhcs", "socket"],
+  "sizes": [
+    {"size": "M3", "d": 3.0, "pitch": 0.5,  "dk": 6.72,  "k": 1.86, "s": 2.0, "lengths": [6, 8, 10, 12, 16, 20, 25, 30]},
+    {"size": "M4", "d": 4.0, "pitch": 0.7,  "dk": 8.96,  "k": 2.48, "s": 2.5, "lengths": [8, 10, 12, 16, 20, 25, 30, 35, 40]},
+    {"size": "M5", "d": 5.0, "pitch": 0.8,  "dk": 11.20, "k": 3.1,  "s": 3.0, "lengths": [8, 10, 12, 16, 20, 25, 30, 35, 40, 45, 50]},
+    {"size": "M6", "d": 6.0, "pitch": 1.0,  "dk": 13.44, "k": 3.72, "s": 4.0, "lengths": [10, 12, 16, 20, 25, 30, 35, 40, 45, 50, 55, 60]},
+    {"size": "M8", "d": 8.0, "pitch": 1.25, "dk": 17.92, "k": 4.96, "s": 5.0, "lengths": [12, 16, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80]}
+  ]
+}

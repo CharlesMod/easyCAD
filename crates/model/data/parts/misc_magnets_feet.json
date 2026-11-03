@@ -1,0 +1,18 @@
+{
+  "id": "magnet_disc",
+  "name": "Disc magnet (NdFeB)",
+  "standard": "(no standard; common stock sizes, diameter x thickness)",
+  "source": "Nominal stock sizes. Pocket = diameter + 0.2 mm, depth = thickness + 0.1 mm (press-fit guideline for FDM prints).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "magnet",
+  "tags": ["magnet", "neodymium", "disc"],
+  "sizes": [
+    {"size": "6x2",  "od": 6.0,  "l": 2.0},
+    {"size": "6x3",  "od": 6.0,  "l": 3.0},
+    {"size": "8x3",  "od": 8.0,  "l": 3.0},
+    {"size": "10x2", "od": 10.0, "l": 2.0},
+    {"size": "10x3", "od": 10.0, "l": 3.0},
+    {"size": "12x3", "od": 12.0, "l": 3.0}
+  ]
+}

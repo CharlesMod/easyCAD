@@ -1,0 +1,21 @@
+{
+  "id": "asme_flat",
+  "name": "Flat head socket screw, 82 deg (inch)",
+  "standard": "ASME B18.3",
+  "source": "ASME B18.3 flat countersunk head socket cap screws: theoretical sharp head diameter A (max), 82 deg head; hex key (nominal). Head height derived from A, d and the 82 deg angle. Length is overall. #2-56 omitted (TODO: add from B18.3 table).",
+  "units": "in",
+  "system": "imperial",
+  "generator": "screw",
+  "head": "flat",
+  "head_angle": 82,
+  "length": "overall",
+  "tags": ["screw", "flat head", "countersunk", "fhcs", "socket", "inch"],
+  "sizes": [
+    {"size": "#4-40",  "d": 0.112, "tpi": 40, "dk": 0.255, "s": 0.0625, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75]},
+    {"size": "#6-32",  "d": 0.138, "tpi": 32, "dk": 0.307, "s": 0.0781, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#8-32",  "d": 0.164, "tpi": 32, "dk": 0.359, "s": 0.0938, "lengths": [0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#10-24", "d": 0.190, "tpi": 24, "dk": 0.411, "s": 0.125,  "lengths": [0.375, 0.5, 0.625, 0.75, 1.0, 1.25]},
+    {"size": "#10-32", "d": 0.190, "tpi": 32, "dk": 0.411, "s": 0.125,  "lengths": [0.375, 0.5, 0.625, 0.75, 1.0, 1.25]},
+    {"size": "1/4-20", "d": 0.250, "tpi": 20, "dk": 0.531, "s": 0.1562, "lengths": [0.5, 0.625, 0.75, 1.0, 1.25, 1.5]}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "standoff_m_ff",
+  "name": "Hex standoff, female-female",
+  "standard": "(no ISO standard; common commercial hex spacers)",
+  "source": "Width across flats per common commercial practice for brass/steel hex spacers (M2.5: 5 mm, M3: 5.5 mm, M4: 7 mm, ...).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "standoff",
+  "variant": "ff",
+  "tags": ["standoff", "spacer", "hex standoff", "pcb", "female"],
+  "todo": "TODO: across-flats sizes differ between vendors (e.g. M3 is sold in 5, 5.5 and 6 mm); verify against the stocked part. M2 across-flats of 4 mm is a common but not universal choice.",
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "s": 4.0,  "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20]},
+    {"size": "M2.5", "d": 2.5, "s": 5.0,  "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20, 25]},
+    {"size": "M3",   "d": 3.0, "s": 5.5,  "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40]},
+    {"size": "M4",   "d": 4.0, "s": 7.0,  "lengths": [5, 6, 8, 10, 12, 15, 20, 25, 30, 40]},
+    {"size": "M5",   "d": 5.0, "s": 8.0,  "lengths": [8, 10, 12, 15, 20, 25, 30, 40]},
+    {"size": "M6",   "d": 6.0, "s": 10.0, "lengths": [10, 12, 15, 20, 25, 30, 40, 50]},
+    {"size": "M8",   "d": 8.0, "s": 13.0, "lengths": [15, 20, 25, 30, 40, 50]}
+  ]
+}

@@ -499,7 +499,7 @@ impl System {
         };
         for e in &self.eqs {
             match *e {
-                Eq::Coincident(a, b) | Eq::Fix(a, _) if matches!(e, Eq::Coincident(..)) => {
+                Eq::Coincident(a, b) => {
                     let d = p(x, b) - p(x, a);
                     r.push(d.x);
                     r.push(d.y);
@@ -509,7 +509,6 @@ impl System {
                     r.push(d.x);
                     r.push(d.y);
                 }
-                Eq::Coincident(..) => unreachable!(),
                 Eq::Horizontal(a, b) => r.push(p(x, b).y - p(x, a).y),
                 Eq::Vertical(a, b) => r.push(p(x, b).x - p(x, a).x),
                 Eq::Parallel([a, b, c, d]) => r.push(unit_cross(dir(a, b), dir(c, d))),
@@ -946,6 +945,7 @@ mod tests {
         let mut s = Sketch::new("a", Plane::XY);
         let l1 = s.line(v(0.0, 0.0), v(10.0, 0.0));
         let l2 = s.line(v(0.0, 0.0), v(7.0, 8.0));
+        s.constrain(Constraint::Fix(PointId(0), v(0.0, 0.0)));
         s.constrain(Constraint::Coincident(PointId(0), PointId(2)));
         s.constrain(Constraint::Horizontal(l1));
         s.constrain(Constraint::Angle(l1, l2, "30deg".into()));

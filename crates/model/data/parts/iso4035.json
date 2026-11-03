@@ -1,0 +1,19 @@
+{
+  "id": "iso4035",
+  "name": "Thin hex nut (jam nut)",
+  "standard": "ISO 4035",
+  "source": "ISO 4035:2012 Table 1: s (nominal), m (max).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "hex_nut",
+  "tags": ["nut", "thin nut", "jam nut", "hex"],
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "s": 4.0,  "m": 1.2},
+    {"size": "M2.5", "d": 2.5, "s": 5.0,  "m": 1.6},
+    {"size": "M3",   "d": 3.0, "s": 5.5,  "m": 1.8},
+    {"size": "M4",   "d": 4.0, "s": 7.0,  "m": 2.2},
+    {"size": "M5",   "d": 5.0, "s": 8.0,  "m": 2.7},
+    {"size": "M6",   "d": 6.0, "s": 10.0, "m": 3.2},
+    {"size": "M8",   "d": 8.0, "s": 13.0, "m": 4.0}
+  ]
+}

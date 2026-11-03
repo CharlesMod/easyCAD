@@ -1,0 +1,21 @@
+{
+  "id": "standoff_m_mf",
+  "name": "Hex standoff, male-female",
+  "standard": "(no ISO standard; common commercial hex spacers)",
+  "source": "Width across flats as for the female-female table; male stud length per common commercial practice.",
+  "units": "mm",
+  "system": "metric",
+  "generator": "standoff",
+  "variant": "mf",
+  "tags": ["standoff", "spacer", "hex standoff", "pcb", "male"],
+  "todo": "TODO: male stud lengths vary by vendor (M3 is commonly 5 or 6 mm); verify against the stocked part.",
+  "sizes": [
+    {"size": "M2",   "d": 2.0, "s": 4.0,  "male_l": 3.0, "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20]},
+    {"size": "M2.5", "d": 2.5, "s": 5.0,  "male_l": 5.0, "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20, 25]},
+    {"size": "M3",   "d": 3.0, "s": 5.5,  "male_l": 6.0, "lengths": [3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40]},
+    {"size": "M4",   "d": 4.0, "s": 7.0,  "male_l": 8.0, "lengths": [5, 6, 8, 10, 12, 15, 20, 25, 30, 40]},
+    {"size": "M5",   "d": 5.0, "s": 8.0,  "male_l": 8.0, "lengths": [8, 10, 12, 15, 20, 25, 30, 40]},
+    {"size": "M6",   "d": 6.0, "s": 10.0, "male_l": 10.0, "lengths": [10, 12, 15, 20, 25, 30, 40, 50]},
+    {"size": "M8",   "d": 8.0, "s": 13.0, "male_l": 10.0, "lengths": [15, 20, 25, 30, 40, 50]}
+  ]
+}

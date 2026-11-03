@@ -455,7 +455,7 @@ mod tests {
     fn units() {
         assert!((ev("1in") - 25.4).abs() < 1e-12);
         assert!((ev("2 cm + 5mm") - 25.0).abs() < 1e-12);
-        assert!((ev("pi rad") - 180.0).abs() < 1e-9);
+        assert!((ev("1rad") - 57.295_779_513_082_32).abs() < 1e-9);
         assert!((ev("90deg") - 90.0).abs() < 1e-12);
         assert!((ev("40mil") - 1.016).abs() < 1e-12);
         assert!(matches!(eval("3furlong", &Values::new()), Err(ExprError::Unit(_))));

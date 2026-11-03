@@ -1,0 +1,15 @@
+{
+  "id": "din557",
+  "name": "Square nut",
+  "standard": "DIN 557",
+  "source": "DIN 557:1994: width across flats s, height m. DIN 557 covers M5 and up; for smaller square nuts see DIN 562 (thin square nuts).",
+  "units": "mm",
+  "system": "metric",
+  "generator": "square_nut",
+  "tags": ["nut", "square nut"],
+  "sizes": [
+    {"size": "M5", "d": 5.0, "s": 8.0,  "m": 4.0},
+    {"size": "M6", "d": 6.0, "s": 10.0, "m": 5.0},
+    {"size": "M8", "d": 8.0, "s": 13.0, "m": 6.5}
+  ]
+}

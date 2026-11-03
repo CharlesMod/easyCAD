@@ -1,0 +1,14 @@
+{
+  "id": "uss_washer",
+  "name": "Flat washer, USS (wide)",
+  "standard": "ASME B18.22.1 Type A, wide (W / USS)",
+  "source": "ASME B18.22.1 Type A plain washers, wide series. USS washers start at 1/4 in; machine-screw sizes use the SAE table.",
+  "units": "in",
+  "system": "imperial",
+  "generator": "washer",
+  "tags": ["washer", "flat washer", "uss", "fender", "inch"],
+  "todo": "TODO: add 5/16 and larger if the size range is extended.",
+  "sizes": [
+    {"size": "1/4", "thread": "1/4-20", "d": 0.250, "d1": 0.312, "d2": 0.734, "h": 0.065}
+  ]
+}

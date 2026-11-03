@@ -1,0 +1,16 @@
+{
+  "id": "rubber_foot",
+  "name": "Rubber foot (cylindrical bumper)",
+  "standard": "(no standard; common self-adhesive bumper sizes, diameter x height)",
+  "source": "Nominal stock sizes of cylindrical self-adhesive bumpers. Optional locating recess = diameter + 0.5 mm, 0.5 mm deep.",
+  "units": "mm",
+  "system": "metric",
+  "generator": "foot",
+  "tags": ["foot", "rubber foot", "bumper", "bumpon"],
+  "sizes": [
+    {"size": "8x2.5",  "od": 8.0,  "l": 2.5},
+    {"size": "10x3",   "od": 10.0, "l": 3.0},
+    {"size": "12.7x3.5", "od": 12.7, "l": 3.5},
+    {"size": "20x6",   "od": 20.0, "l": 6.0}
+  ]
+}

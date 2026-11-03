@@ -1,0 +1,21 @@
+{
+  "system": "metric",
+  "units": "mm",
+  "source": "Clearance: ISO 273:1979 fine / medium / coarse series (close / normal / loose). Tap drill: ISO 2306 / DIN 336 coarse-thread tap drill sizes. Counterbore for ISO 4762 socket heads: common counterbore table (JIS B 1176 / Misumi style, e.g. M3 6.5 x 3.3). Pilot hole for thread-forming screws in plastics: approx. 0.8 d (ABS guideline; PC ~0.85 d, PA ~0.75 d).",
+  "pilot_factor_plastic": 0.8,
+  "sizes": {
+    "M2":   {"close": 2.2, "normal": 2.4, "loose": 2.6,  "tap_drill": 1.6,  "counterbore": {"socket": {"d": 4.4, "depth": 2.4, "note": "TODO: verify against counterbore table"}}},
+    "M2.5": {"close": 2.7, "normal": 2.9, "loose": 3.1,  "tap_drill": 2.05, "counterbore": {"socket": {"d": 5.5, "depth": 2.9, "note": "TODO: verify against counterbore table"}}},
+    "M3":   {"close": 3.2, "normal": 3.4, "loose": 3.6,  "tap_drill": 2.5,  "counterbore": {"socket": {"d": 6.5, "depth": 3.3}}},
+    "M4":   {"close": 4.3, "normal": 4.5, "loose": 4.8,  "tap_drill": 3.3,  "counterbore": {"socket": {"d": 8.0, "depth": 4.4}}},
+    "M5":   {"close": 5.3, "normal": 5.5, "loose": 5.8,  "tap_drill": 4.2,  "counterbore": {"socket": {"d": 9.5, "depth": 5.4}}},
+    "M6":   {"close": 6.4, "normal": 6.6, "loose": 7.0,  "tap_drill": 5.0,  "counterbore": {"socket": {"d": 11.0, "depth": 6.5}}},
+    "M8":   {"close": 8.4, "normal": 9.0, "loose": 10.0, "tap_drill": 6.8,  "counterbore": {"socket": {"d": 14.0, "depth": 8.6}}}
+  },
+  "derived": {
+    "counterbore_dia_add": 1.0,
+    "counterbore_depth_add": 0.3,
+    "countersink_dia_add": 0.2,
+    "note": "Heads without a tabulated counterbore/countersink (button, pan, flat) get dk + counterbore_dia_add x k + counterbore_depth_add, or a countersink of dk(theoretical) + countersink_dia_add at the head angle. These are flagged derived=true."
+  }
+}
