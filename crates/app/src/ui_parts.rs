@@ -366,6 +366,7 @@ fn banner(app: &mut CaseworkApp, ui: &mut Ui, rect: egui::Rect) {
         .unwrap_or_default();
     let mut go: Option<Vec<PickKey>> = None;
     let mut undo = false;
+    let mut as_component = false;
     egui::Area::new(egui::Id::unique("parts_banner"))
         .order(egui::Order::Middle)
         .fixed_pos(egui::pos2(rect.center().x - 260.0, rect.top() + 64.0))
@@ -389,6 +390,12 @@ fn banner(app: &mut CaseworkApp, ui: &mut Ui, rect: egui::Rect) {
                             );
                             if widgets::button(ui, "Place at origin").clicked() {
                                 go = Some(Vec::new());
+                            }
+                            if widgets::button(ui, "Insert as component")
+                                .on_hover_text("A locked, purchased component (one BOM line per placement); move it with G or mate it")
+                                .clicked()
+                            {
+                                as_component = true;
                             }
                         } else {
                             ui.label(RichText::new("Snapped to hole edge").size(12.0));
@@ -420,8 +427,37 @@ fn banner(app: &mut CaseworkApp, ui: &mut Ui, rect: egui::Rect) {
         });
     if undo {
         app.undo();
+    } else if as_component {
+        insert_component(app, &info, &size);
     } else if let Some(k) = go {
         place(app, &k);
+    }
+}
+
+/// The library part as a component placed in the component being edited (at its
+/// origin), selected with the move gizmo on.
+pub fn insert_component(app: &mut CaseworkApp, info: &casework_model::library::PartInfo, size: &str) {
+    let parent = app.scope();
+    let comp = match app.doc.add_part_component(info, size) {
+        Ok(c) => c,
+        Err(e) => {
+            app.warn(e.to_string());
+            return;
+        }
+    };
+    let name = app.doc.data.component_name(comp);
+    let n = crate::ui_assembly::instance_count(&app.doc.data, comp) + 1;
+    match app.doc.add_occurrence(parent, comp, &format!("{name}:{n}"), casework_model::assembly::Transform::IDENTITY) {
+        Ok(occ) => {
+            let mut path = app.active.clone();
+            path.push(occ);
+            app.mode = crate::app::Mode::Model;
+            app.asm.sel = Some(path);
+            app.asm.gizmo = true;
+            app.toast(format!("Inserted {name} · drag the gizmo or mate it (A)"));
+            app.request_model();
+        }
+        Err(e) => app.warn(e.to_string()),
     }
 }
 

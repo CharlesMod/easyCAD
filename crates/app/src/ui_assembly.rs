@@ -1002,3 +1002,78 @@ pub fn active_label(app: &CaseworkApp) -> Option<String> {
     let c = d.component_at(&app.active).ok()?;
     Some(format!("Editing {} in place · Esc goes up", d.component_name(c)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use casework_model::document::Document;
+    use glam::DVec3;
+
+    fn app(doc: Document) -> CaseworkApp {
+        CaseworkApp::with_parts(doc, crate::worker::Worker::spawn(|| {}), false)
+    }
+
+    fn occ(app: &CaseworkApp, name: &str) -> OccPath {
+        app.doc
+            .data
+            .all_occurrences()
+            .into_iter()
+            .find(|(_, o, _)| o.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .0
+    }
+
+    #[test]
+    fn reparent_keeps_the_world_placement_and_copies_split_off() {
+        let mut a = app(Document::new("asm"));
+        a.new_component(ComponentId::ROOT);
+        a.new_component(ComponentId::ROOT);
+        let (p1, p2) = (occ(&a, "Component1:1"), occ(&a, "Component2:1"));
+        a.occ_edit(p1[0], "Move", |o| o.transform = Transform::translation(DVec3::new(0.0, 5.0, 0.0)));
+        a.occ_edit(p2[0], "Move", |o| o.transform = Transform::translation(DVec3::new(10.0, 0.0, 0.0)));
+        a.reparent(&p2, &p1);
+        let p2 = occ(&a, "Component2:1");
+        assert_eq!(p2.len(), 2, "now inside Component1");
+        let w = a.doc.data.world_transform(&p2).unwrap();
+        assert!((w.translation - DVec3::new(10.0, 0.0, 0.0)).length() < 1e-9);
+        assert_eq!(a.doc.undo_label(), Some("Move Component2:1 into Component1:1"));
+        // a component cannot go inside itself
+        a.reparent(&p1, &p2);
+        assert_eq!(occ(&a, "Component1:1").len(), 1);
+        // two occurrences, then one gets its own definition
+        a.place_again(&occ(&a, "Component1:1"));
+        let c = a.doc.data.component_at(&occ(&a, "Component1:1")).unwrap();
+        assert_eq!(instance_count(&a.doc.data, c), 2);
+        let second = occ(&a, "Component1:2");
+        a.make_independent(second[0]);
+        assert_eq!(instance_count(&a.doc.data, c), 1);
+        assert!(a.doc.data.components.iter().any(|x| x.name == "Component1 (2)"));
+    }
+
+    #[test]
+    fn linked_component_status_update_and_break() {
+        let dir = std::env::temp_dir().join(format!("cw-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("bracket.cwk");
+        let mut b = Document::new("bracket");
+        b.set_param("t", "2").unwrap();
+        b.save_to_dir(&part).unwrap();
+        let mut a = app(Document::new("host"));
+        a.path = Some(dir.join("host.cwk"));
+        let c = a.doc.link_component(&part, &a.host_dir()).unwrap();
+        a.doc.add_occurrence(ComponentId::ROOT, c, "bracket:1", Transform::IDENTITY).unwrap();
+        assert_eq!(a.link_status(c), LinkStatus::UpToDate);
+        b.set_param("t", "3").unwrap();
+        b.save_to_dir(&part).unwrap();
+        a.asm.links.clear();
+        assert_eq!(a.link_status(c), LinkStatus::OutOfDate);
+        a.update_link(c);
+        assert_eq!(a.link_status(c), LinkStatus::UpToDate);
+        assert!(a.doc.data.component(c).unwrap().locked);
+        a.break_link(c);
+        assert!(!a.doc.data.component(c).unwrap().locked);
+        assert_eq!(a.link_status(c), LinkStatus::NotLinked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
