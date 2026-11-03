@@ -1076,4 +1076,44 @@ mod tests {
         assert_eq!(a.link_status(c), LinkStatus::NotLinked);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn features_go_into_the_active_component() {
+        use casework_model::feature::{Feature, FeatureId, FeatureKind};
+        let mut a = app(Document::new("asm"));
+        a.new_component(ComponentId::ROOT);
+        let p = occ(&a, "Component1:1");
+        a.activate(p.clone());
+        assert_eq!(a.active, p);
+        let c = a.scope();
+        let f = Feature {
+            id: FeatureId(0),
+            name: "Round".into(),
+            suppressed: false,
+            kind: FeatureKind::Fillet {
+                body: None,
+                edges: Vec::new(),
+                radius: "1".into(),
+                auto_reduce: false,
+                sets: Vec::new(),
+                skipped: Vec::new(),
+                setback: false,
+            },
+        };
+        a.commit_features("Fillet Round", vec![f], None);
+        assert!(a.doc.data.features.is_empty(), "nothing at the root");
+        assert_eq!(a.doc.data.component(c).unwrap().features.len(), 1);
+        a.refresh_scope();
+        assert_eq!(a.view().features.len(), 1);
+        // local params shadow the document's
+        a.doc.set_param("wall", "2").unwrap();
+        a.set_local_param("wall", "3").unwrap();
+        a.refresh_scope();
+        assert_eq!(a.view().params.get("wall").map(|p| p.expr.0.as_str()), Some("3"));
+        assert_eq!(a.doc.data.params.get("wall").map(|p| p.expr.0.as_str()), Some("2"));
+        // Esc-style: up one level
+        a.activate_parent();
+        assert!(a.active.is_empty());
+        assert_eq!(a.scope(), ComponentId::ROOT);
+    }
 }

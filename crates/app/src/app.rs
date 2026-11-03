@@ -1260,11 +1260,10 @@ impl CaseworkApp {
                 self.toggle_gizmo();
             }
             if pressed(Key::X) {
+                // X explodes to 60 % (the slider fine-tunes); X again puts it back
                 self.asm.explode_open = !self.asm.explode_open;
-                if !self.asm.explode_open && self.explode > 0.0 {
-                    self.explode = 0.0;
-                    self.request_model();
-                }
+                self.explode = if self.asm.explode_open { 0.6 } else { 0.0 };
+                self.request_model();
             }
             if pressed(Key::I) {
                 self.check_interference();

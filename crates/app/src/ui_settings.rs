@@ -167,7 +167,7 @@ pub fn shortcuts(app: &CaseworkApp) -> Vec<(&'static str, Vec<(String, &'static 
                 s("Double-click", "activate a component (browser)"),
                 s("Esc", "up one level"),
                 s("A", "new mate"),
-                s("X", "explode slider"),
+                s("X", "explode (slider fine-tunes)"),
                 s("I", "interference check"),
             ],
         ),

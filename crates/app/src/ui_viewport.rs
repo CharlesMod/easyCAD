@@ -805,10 +805,8 @@ fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                         let on = app.asm.explode_open || app.explode > 0.0;
                         if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
                             app.asm.explode_open = !on;
-                            if on {
-                                app.explode = 0.0;
-                                app.request_model();
-                            }
+                            app.explode = if on { 0.0 } else { 0.6 };
+                            app.request_model();
                         }
                         if on {
                             let mut v = app.explode;
