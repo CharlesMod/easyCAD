@@ -4,6 +4,10 @@
 //! suffix (`mm` default, `cm`, `m`, `in`/`"`, `mil`, `deg` default for angles,
 //! `rad`), parameter references, and functions `sqrt abs min max sin cos tan`
 //! (trig in degrees). Values are stored in mm / degrees.
+//!
+//! A fraction of two integer literals binds to a following unit, so `1/8"` and
+//! `3/4 in` are fractional inches, and `1 1/2"` is a mixed number (1.5 in). Without
+//! a unit (`10/4`) or with a non-literal (`w/2in` = w ÷ 2 in) it is plain division.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -438,6 +442,43 @@ impl Parser<'_> {
             _ => self.atom(),
         }
     }
+    /// An unsigned integer literal at `p` (no whitespace skipping): (value, end).
+    fn int_at(&self, p: usize) -> Option<(f64, usize)> {
+        let mut e = p;
+        while e < self.s.len() && self.s[e].is_ascii_digit() {
+            e += 1;
+        }
+        if e == p || self.s.get(e) == Some(&b'.') {
+            return None;
+        }
+        std::str::from_utf8(&self.s[p..e]).ok()?.parse().ok().map(|v| (v, e))
+    }
+    /// `/<int>` directly at `p`, then (spaces allowed) a unit: (denominator, unit
+    /// factor, end). Used for `1/8"` and the fraction of `1 1/2"`.
+    fn fraction_tail(&self, p: usize) -> Option<(f64, f64, usize)> {
+        if self.s.get(p) != Some(&b'/') {
+            return None;
+        }
+        let (den, mut e) = self.int_at(p + 1)?;
+        if den == 0.0 {
+            return None;
+        }
+        while e < self.s.len() && self.s[e] == b' ' {
+            e += 1;
+        }
+        if self.s.get(e) == Some(&b'"') {
+            return Some((den, 25.4, e + 1));
+        }
+        let st = e;
+        while e < self.s.len() && (self.s[e].is_ascii_alphanumeric() || self.s[e] == b'_') {
+            e += 1;
+        }
+        let u = std::str::from_utf8(&self.s[st..e]).ok()?;
+        if u.is_empty() || u.as_bytes()[0].is_ascii_digit() || self.s.get(e) == Some(&b'(') {
+            return None;
+        }
+        unit_factor(u).map(|f| (den, f, e))
+    }
     fn ident(&mut self) -> String {
         let st = self.pos;
         while self.pos < self.s.len() && (self.s[self.pos].is_ascii_alphanumeric() || self.s[self.pos] == b'_') {
@@ -478,6 +519,26 @@ impl Parser<'_> {
                 }
                 let txt = std::str::from_utf8(&self.s[st..self.pos]).unwrap();
                 let v: f64 = txt.parse().map_err(|_| ExprError::Syntax { pos: st, msg: format!("bad number `{txt}`") })?;
+                // Fractions of integer literals bind to a following unit: `1/8"`,
+                // `3/4 in`, and the mixed number `1 1/2"` (whole + fraction).
+                if txt.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Some((den, f, end)) = self.fraction_tail(self.pos) {
+                        self.pos = end;
+                        return Ok(Ast::Num(v / den * f));
+                    }
+                    let mut p = self.pos;
+                    while p < self.s.len() && self.s[p] == b' ' {
+                        p += 1;
+                    }
+                    if p > self.pos {
+                        if let Some((num, e)) = self.int_at(p) {
+                            if let Some((den, f, end)) = self.fraction_tail(e) {
+                                self.pos = end;
+                                return Ok(Ast::Num((v + num / den) * f));
+                            }
+                        }
+                    }
+                }
                 // unit suffix directly after the number (spaces allowed)
                 let save = self.pos;
                 self.ws();
@@ -550,6 +611,30 @@ mod tests {
         assert!((ev("90deg") - 90.0).abs() < 1e-12);
         assert!((ev("40mil") - 1.016).abs() < 1e-12);
         assert!(matches!(eval("3furlong", &Values::new()), Err(ExprError::Unit(_))));
+    }
+
+    #[test]
+    fn fractional_inches() {
+        let close = |s: &str, v: f64| assert!((ev(s) - v).abs() < 1e-9, "{s} = {} (want {v})", ev(s));
+        close("1/8\"", 3.175);
+        close("1/8 in", 3.175);
+        close("3/4in", 19.05);
+        close("1 1/2\"", 38.1);
+        close("1 1/2 in", 38.1);
+        close("0.125in", 3.175);
+        close("0.125\"", 3.175);
+        close("2 * 1/8\" + 1mm", 7.35);
+        close("10 3/4\" - 1/4\"", 266.7);
+        close("1/2cm", 5.0);
+        // unchanged: plain division, unit on a non-literal, decimal fractions
+        close("10/4", 2.5);
+        close("2 cm + 5mm", 25.0);
+        close("1 + 1/2", 1.5);
+        let mut v = Values::new();
+        v.insert("w".into(), 50.8);
+        assert!((eval("w/2in", &v).unwrap() - 1.0).abs() < 1e-12);
+        assert!(matches!(eval("1 1/2", &Values::new()), Err(ExprError::Syntax { .. })));
+        assert!(matches!(eval("1/0\"", &Values::new()), Err(ExprError::DivZero)));
     }
 
     #[test]

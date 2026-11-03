@@ -75,7 +75,10 @@ doc.bom(); doc.blob_refs();
 - `params`: `Params::set / evaluate` (cycle detection, unknown refs), `Expr` (a
   string, used for every dimension). Expressions support `+ - * /`, parentheses,
   unary minus, units `mm cm m in " mil deg rad`, `pi`, and the functions
-  `sqrt abs min max sin cos tan`.
+  `sqrt abs min max sin cos tan`. A fraction of integer literals binds to a
+  following unit: `1/8"` = 3.175, `3/4 in`, mixed `1 1/2"` = 38.1, and `0.125in`.
+  Without a unit (`10/4`), or with a non-literal (`w/2in` = w ÷ 2 in), `/` is plain
+  division.
 - `sketch`: `Sketch` (points, `Geom::{Line, Arc, Circle}` with a construction
   flag, `Constraint` enum covering every requested constraint, dimensions as
   `Expr`). Helpers are `rect`, `rounded_rect`, `line` and `circle`.
@@ -492,6 +495,10 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Fractional inches (GUI_NEEDS #12a).** The parser reads `1/8"`, `3/4 in` and
+  `1 1/2"` as fractional inches (previously `1/8"` was 1 ÷ 8 in).
+  `units::normalize_input`'s rewrite still evaluates the same, so it can be dropped.
 
 - **Shell with no open faces (GUI_NEEDS #5).** `FeatureKind::Shell { open_faces: [] }`
   now gives a closed hollow solid (one solid, two shells: skin + void). When the
