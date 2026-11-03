@@ -1,9 +1,10 @@
-//! Small per-user settings (last-used process profile), stored as JSON in the
-//! user's config directory. Local file only.
+//! Per-user settings (navigation, units, mesh quality, autosave, default and
+//! last-used process, recent files), stored as JSON in the user's config
+//! directory. Local file only.
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub last_profile: Option<String>,
@@ -19,6 +20,109 @@ pub struct Settings {
     /// Process profile for new documents (else the last one used).
     #[serde(default)]
     pub default_profile: Option<String>,
+    #[serde(default)]
+    pub nav: NavPreset,
+    #[serde(default)]
+    pub mesh: MeshPref,
+    /// Minutes between recovery copies; 0 = off.
+    #[serde(default = "two")]
+    pub autosave_min: u32,
+}
+
+fn two() -> u32 {
+    2
+}
+
+/// Mouse navigation presets (wheel zooms in all of them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NavPreset {
+    /// Shift+middle orbits, middle pans (Fusion 360 style).
+    #[default]
+    Casework,
+    /// Middle orbits, Ctrl+middle pans.
+    SolidWorks,
+    /// Right orbits, middle pans.
+    Onshape,
+    /// Middle orbits, Shift+middle pans.
+    Blender,
+}
+
+impl NavPreset {
+    pub const ALL: [NavPreset; 4] = [
+        NavPreset::Casework,
+        NavPreset::SolidWorks,
+        NavPreset::Onshape,
+        NavPreset::Blender,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            NavPreset::Casework => "Fusion 360 / Casework",
+            NavPreset::SolidWorks => "SolidWorks",
+            NavPreset::Onshape => "Onshape",
+            NavPreset::Blender => "Blender",
+        }
+    }
+    /// (orbit, pan) hints for the status bar and the cheat sheet.
+    pub fn hints(self) -> (&'static str, &'static str) {
+        match self {
+            NavPreset::Casework => ("Shift+MMB", "MMB"),
+            NavPreset::SolidWorks => ("MMB", "Ctrl+MMB"),
+            NavPreset::Onshape => ("RMB", "MMB"),
+            NavPreset::Blender => ("MMB", "Shift+MMB"),
+        }
+    }
+    /// What a drag with these buttons / modifiers does.
+    pub fn classify(self, middle: bool, right: bool, shift: bool, ctrl: bool) -> Option<Nav> {
+        match self {
+            NavPreset::Casework if middle => Some(if shift { Nav::Orbit } else { Nav::Pan }),
+            NavPreset::SolidWorks if middle => Some(if ctrl { Nav::Pan } else { Nav::Orbit }),
+            NavPreset::Onshape if right => Some(Nav::Orbit),
+            NavPreset::Onshape if middle => Some(Nav::Pan),
+            NavPreset::Blender if middle => Some(if shift { Nav::Pan } else { Nav::Orbit }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Orbit,
+    Pan,
+}
+
+/// Viewport tessellation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshPref {
+    Coarse,
+    #[default]
+    Normal,
+    Fine,
+}
+
+impl MeshPref {
+    pub const ALL: [MeshPref; 3] = [MeshPref::Coarse, MeshPref::Normal, MeshPref::Fine];
+    pub fn label(self) -> &'static str {
+        match self {
+            MeshPref::Coarse => "Coarse (fastest)",
+            MeshPref::Normal => "Normal",
+            MeshPref::Fine => "Fine (export quality)",
+        }
+    }
+    pub fn quality(self) -> casework_model::regen::MeshQuality {
+        use casework_model::regen::MeshQuality as Q;
+        match self {
+            MeshPref::Coarse => Q::Preview,
+            MeshPref::Normal => Q::Display,
+            MeshPref::Fine => Q::Final,
+        }
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        // every field defaults the way serde fills a missing one
+        serde_json::from_str("{}").expect("settings defaults")
+    }
 }
 
 fn path() -> Option<std::path::PathBuf> {

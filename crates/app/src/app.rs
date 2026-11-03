@@ -122,6 +122,14 @@ pub struct CaseworkApp {
     pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
     /// "New enclosure from PCB" wizard.
     pub wizard: Option<crate::ui_welcome::WizardUi>,
+    /// Per-user settings (loaded at start, saved on change).
+    pub settings: crate::settings::Settings,
+    pub show_settings: bool,
+    /// The `?` cheat sheet.
+    pub show_keys: bool,
+    pub autosave: crate::recovery::Autosaver,
+    /// Recovery copies left by a crashed session, offered at start.
+    pub recovery_offer: Vec<crate::recovery::Entry>,
 }
 
 /// What a file chooser does with the chosen path.
@@ -141,7 +149,9 @@ impl CaseworkApp {
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(move || ctx.request_repaint());
         let doc = doc.unwrap_or_else(|| Document::new("Untitled"));
-        Self::with_parts(doc, worker, gpu)
+        let mut app = Self::with_parts(doc, worker, gpu);
+        app.recovery_offer = crate::recovery::orphans();
+        app
     }
 
     pub fn with_parts(doc: Document, worker: Worker, gpu: bool) -> Self {
@@ -194,6 +204,11 @@ impl CaseworkApp {
             sketch_body: None,
             path_prompt: None,
             wizard: None,
+            settings: crate::settings::Settings::load(),
+            show_settings: false,
+            show_keys: false,
+            autosave: crate::recovery::Autosaver::default(),
+            recovery_offer: Vec::new(),
         }
     }
 
@@ -215,13 +230,17 @@ impl CaseworkApp {
 
     fn submit_model(&mut self) {
         let data = adapters::effective(&self.doc.data, self.active_count());
-        self.worker.submit(
-            Purpose::Model,
+        self.worker.submit_full(crate::worker::Request {
+            id: 0,
+            purpose: Purpose::Model,
             data,
-            self.doc.blobs.clone(),
-            self.doc.library.clone(),
-            Vec::new(),
-        );
+            blobs: self.doc.blobs.clone(),
+            library: self.doc.library.clone(),
+            prefixes: Vec::new(),
+            drawing: None,
+            quality: self.settings.mesh.quality(),
+            section: None,
+        });
         self.model_dirty = false;
     }
 
@@ -266,7 +285,7 @@ impl CaseworkApp {
                     quality: if self.dragging {
                         MeshQuality::Preview
                     } else {
-                        MeshQuality::Display
+                        self.settings.mesh.quality()
                     },
                     section,
                 });
@@ -729,8 +748,10 @@ impl CaseworkApp {
 
     /// Ask for a name and a process profile (defaults to the last one used).
     pub fn new_doc(&mut self) {
-        let last = crate::settings::Settings::load()
-            .last_profile
+        let st = crate::settings::Settings::load();
+        let last = st
+            .default_profile
+            .or(st.last_profile)
             .unwrap_or_else(|| Document::new("x").data.active_profile);
         self.new_doc_prompt = Some(("Untitled".into(), last));
     }
@@ -821,6 +842,8 @@ impl CaseworkApp {
         adapters::apply_bindings(&mut self.doc.data);
         self.doc.save_to_dir(&p).map_err(|e| e.to_string())?;
         self.saved_revision = self.doc.data.revision;
+        crate::recovery::remove(&self.doc.data.doc_id);
+        self.autosave.saved_rev = Some(self.doc.data.revision);
         self.path = Some(p.clone());
         crate::settings::Settings::push_recent(&p);
         Ok(p)
@@ -927,7 +950,9 @@ impl CaseworkApp {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
         self.refresh_cache();
+        self.autosave_tick(ui.ctx());
         crate::ui_main::show(self, ui);
+        crate::ui_settings::windows(self, ui);
         self.path_prompt_ui(ui.ctx());
         self.frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(mut d) = self.state_dump.take() {
@@ -947,12 +972,35 @@ impl CaseworkApp {
             }
         }
         self.typing = typing;
-        // modal windows own the keyboard
-        if self.wizard.is_some() || self.path_prompt.is_some() {
-            return;
-        }
         let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         let pressed_m = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        // modal windows own the keyboard
+        if self.wizard.is_some() || self.path_prompt.is_some() || !self.recovery_offer.is_empty() {
+            return;
+        }
+        if pressed_m(Modifiers::COMMAND, Key::Comma) {
+            self.show_settings = !self.show_settings;
+        }
+        if !typing {
+            // `?` is Shift+/ on most layouts: match the key and the text event
+            let q = ctx.input_mut(|i| {
+                let k = i.consume_key(Modifiers::SHIFT, Key::Questionmark)
+                    || i.consume_key(Modifiers::NONE, Key::Questionmark)
+                    || i.consume_key(Modifiers::SHIFT, Key::Slash);
+                let t = i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"));
+                i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == "?"));
+                k || t
+            });
+            if q {
+                self.show_keys = !self.show_keys;
+            }
+            if self.show_keys && pressed(Key::Escape) {
+                self.show_keys = false;
+            }
+            if self.show_settings && pressed(Key::Escape) {
+                self.show_settings = false;
+            }
+        }
         // Chords are matched on each key event's own modifiers: a fast Ctrl+Z (or one
         // typed during a slow frame) has Ctrl released again by the end of the frame.
         // In a text field Ctrl+Z / Ctrl+Shift+Z stay the field's own undo.
@@ -1071,9 +1119,45 @@ impl CaseworkApp {
         }
     }
 
+    /// Periodic recovery copy of unsaved work (off the UI thread).
+    fn autosave_tick(&mut self, ctx: &egui::Context) {
+        let interval = self.settings.autosave_min as f64 * 60.0;
+        let interval = std::env::var("CASEWORK_AUTOSAVE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(interval);
+        let dirty = self.is_dirty() || (self.path.is_none() && !crate::ui_welcome::is_empty(self));
+        if !dirty {
+            self.autosave.saved_rev = Some(self.doc.data.revision);
+        }
+        let path = self.path.clone();
+        self.autosave
+            .tick(self.now, interval, &self.doc, dirty, path.as_deref());
+        if interval > 0.0 && dirty {
+            ctx.request_repaint_after(Duration::from_secs_f64(interval.clamp(0.5, 60.0)));
+        }
+    }
+
+    /// Clean exit: unsaved work keeps a last recovery copy, saved work leaves none.
+    pub fn on_close(&mut self) {
+        self.autosave.flush();
+        let dirty = self.is_dirty() || (self.path.is_none() && !crate::ui_welcome::is_empty(self));
+        if dirty && self.settings.autosave_min > 0 {
+            let _ = crate::recovery::write(&self.doc, self.path.as_deref());
+        } else {
+            crate::recovery::remove(&self.doc.data.doc_id);
+        }
+    }
+
     /// The modal-ish window on top, if any (for the E2E state dump).
     pub fn overlay_name(&self) -> Option<&'static str> {
-        if self.export.is_some() {
+        if !self.recovery_offer.is_empty() {
+            Some("recovery")
+        } else if self.show_settings {
+            Some("settings")
+        } else if self.show_keys {
+            Some("keys")
+        } else if self.export.is_some() {
             Some("export")
         } else if self.new_doc_prompt.is_some() {
             Some("new_doc")
@@ -1151,5 +1235,9 @@ impl eframe::App for CaseworkApp {
         if self.quit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    fn on_exit(&mut self) {
+        self.on_close();
     }
 }

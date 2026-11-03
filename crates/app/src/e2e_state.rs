@@ -197,6 +197,9 @@ pub fn summary(app: &CaseworkApp) -> Value {
             "joint": w.settings.joint.label(),
             "profile": w.settings.profile,
         })),
+        "recovery": app.recovery_offer.iter().map(|e| json!({ "name": e.info.name, "revision": e.info.revision })).collect::<Vec<_>>(),
+        "autosave": app.autosave.last_path.as_ref().map(|p| p.display().to_string()),
+        "nav": format!("{:?}", app.settings.nav),
         "path_prompt": app.path_prompt.as_ref().map(|(p, _)| json!({ "title": p.req.title, "text": p.text })),
     })
 }

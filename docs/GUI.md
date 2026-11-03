@@ -36,6 +36,8 @@ mode a bare number means inches.
 | `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `CASEWORK_FILE_DIALOG=builtin` forces the prompt. |
 | `e2e_state.rs` | `CASEWORK_STATE_FILE`: JSON dump of what the user sees, for the E2E scripts. |
 | `ui_welcome.rs` / `wizard.rs` | Empty-document welcome (New enclosure from PCB… / Open / Sample / recent files) and the PCB wizard: reads an EasyEDA STEP or DXF (outline, mounting holes, board z) and builds ordinary features: offset profile → extrude → top-edge fillet → closed shell → board + standoffs → parting joint, all on named parameters. |
+| `settings.rs` / `ui_settings.rs` | Per-user settings (navigation preset: Fusion/Casework, SolidWorks, Onshape, Blender; default process for new documents; units; mesh quality; autosave interval) and their window (File ▸ Settings…, Ctrl+,), the `?` cheat sheet, the recovery offer. |
+| `recovery.rs` | Autosave: a dirty document is copied every N minutes (off the UI thread) to `$XDG_DATA_HOME/casework/recovery/<doc id>/` (a `.cwk` + `info.json` with the pid). Saving removes it; closing unsaved writes a last one. At start, copies whose process is gone are offered (Restore / Discard / Decide later; Enter restores the newest). `CASEWORK_AUTOSAVE_SECS` overrides the interval (E2E). |
 | `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
 ## Keyboard
@@ -51,6 +53,8 @@ mode a bare number means inches.
 | Alt+↑/↓, Alt+PgUp/PgDn, Alt+←/→ | 15° steps about X / Y / Z (world by default; cube menu switches to screen axes) |
 | 1 / 2 / 3 | shaded / shaded + edges / wireframe |
 | Enter / Esc | dialog OK / cancel |
+| ? | keyboard cheat sheet |
+| Ctrl+, | settings |
 | sketch: L R C A F O P T D | tools; type a number or `=expr` while drawing |
 
 ## Tests
@@ -84,5 +88,6 @@ crates/app/e2e/run_all.sh          # or one scenario: bash crates/app/e2e/d_sket
 | g | process FDM ↔ molded, teardrop toggle / style, undo |
 | h | drawing: add a dimension, Export PDF through the in-app path prompt |
 | i | first run: welcome card, New enclosure from PCB (DXF via Browse…), Lip, Create, edit `wall` |
+| k | `?` cheat sheet, Ctrl+, settings, edit `wall`, wait for the recovery copy, `kill -9`, relaunch, Enter restores the edit (dirty) |
 
 Coordinates assume the 1440×900 window the harness sets.

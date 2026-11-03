@@ -133,12 +133,14 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
 
     // ------------------------------------------------ navigation
     let mods = ui.input(|i| i.modifiers);
-    if resp.dragged_by(egui::PointerButton::Middle) {
+    let middle = resp.dragged_by(egui::PointerButton::Middle);
+    let right = resp.dragged_by(egui::PointerButton::Secondary);
+    if middle || right {
         let d = resp.drag_delta();
-        if mods.shift {
-            app.camera.orbit(Vec2::new(d.x, d.y));
-        } else {
-            app.camera.pan(Vec2::new(d.x, d.y), size.y);
+        match app.settings.nav.classify(middle, right, mods.shift, mods.ctrl) {
+            Some(crate::settings::Nav::Orbit) => app.camera.orbit(Vec2::new(d.x, d.y)),
+            Some(crate::settings::Nav::Pan) => app.camera.pan(Vec2::new(d.x, d.y), size.y),
+            None => {}
         }
     }
     let hover = resp.hover_pos();

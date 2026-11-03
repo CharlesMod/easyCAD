@@ -308,6 +308,13 @@ fn file_menu(app: &mut CaseworkApp, ui: &mut Ui) {
             app.export = Some(crate::dialogs::export::ExportDialog::new(&app.doc.data));
         }
         ui.separator();
+        if item(ui, "Settings…", "Ctrl+,").clicked() {
+            app.show_settings = true;
+        }
+        if item(ui, "Keyboard shortcuts", "?").clicked() {
+            app.show_keys = true;
+        }
+        ui.separator();
         if item(ui, "Open sample enclosure", "").clicked() {
             app.load(crate::sample::sensor_node(), None);
         }
@@ -1322,9 +1329,17 @@ fn status_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                     )));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (orbit, pan) = app.settings.nav.hints();
+                    if ui
+                        .add(egui::Label::new(small("? shortcuts")).sense(Sense::click()))
+                        .on_hover_text("Keyboard cheat sheet (?)")
+                        .clicked()
+                    {
+                        app.show_keys = true;
+                    }
                     ui.label(small("Zoom wheel"));
-                    ui.label(small("Pan MMB"));
-                    ui.label(small("Orbit Shift+MMB"));
+                    ui.label(small(&format!("Pan {pan}")));
+                    ui.label(small(&format!("Orbit {orbit}")));
                     if !app.gpu {
                         ui.label(
                             RichText::new("no GPU: viewport disabled")
