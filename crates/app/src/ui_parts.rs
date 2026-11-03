@@ -385,12 +385,6 @@ fn banner(app: &mut EasyCadApp, ui: &mut Ui, rect: egui::Rect) {
                 })
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if let crate::app::Mode::Parts(p) = &mut app.mode {
-                            ui.checkbox(&mut p.modeled_threads, RichText::new("Modeled threads").size(12.0)).on_hover_text(
-                                "Real helical threads (ISO 68-1 / UN) on the part and a tapped auto-hole, for printing large threads; \
-                                 slower to rebuild (about 1 s and 16 k triangles per M3×10). Off: cosmetic threads",
-                            );
-                        }
                         if sel.is_empty() {
                             ui.label(
                                 RichText::new(format!(
@@ -434,6 +428,12 @@ fn banner(app: &mut EasyCadApp, ui: &mut Ui, rect: egui::Rect) {
                             undo = true;
                         }
                     });
+                    if let crate::app::Mode::Parts(p) = &mut app.mode {
+                        ui.checkbox(&mut p.modeled_threads, RichText::new("Modeled threads").size(12.0)).on_hover_text(
+                            "Real helical threads (ISO 68-1 / UN) on the part and a tapped auto-hole, for printing large threads; \
+                             slower to rebuild (about 1 s and 16 k triangles per M3×10). Off: cosmetic threads",
+                        );
+                    }
                 });
         });
     if undo {
