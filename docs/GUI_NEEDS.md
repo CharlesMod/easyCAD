@@ -53,6 +53,12 @@ today (adapter or limitation) and what would replace it.
 
 20. ~~Root rollback leaks into component views~~ — done by the engine: components use
     their own `Component.rollback` (`Document::set_component_rollback`).
+22. **Show loop-solved drive values.** Closed loops of mates are solved now
+    (ENGINE.md, Mates): a mate whose drive the loop overrode has
+    `MateReport.actual: Some(value)` (degrees / mm) and a `MateSolve.notes` line.
+    The mate dialog / jog handle should show that value (and maybe offer "use as
+    drive"), and jogging a loop's follower joint does nothing until its drive is
+    the first one in mate order. Not wired yet.
 
 ## Sketch
 
@@ -61,7 +67,12 @@ today (adapter or limitation) and what would replace it.
 13. ~~Editing helpers~~ — done by the engine (`sketch_edit`): `trim`, `split_at`,
     `fillet_corner`, `remove_entities` → `Remap`.
 14. ~~Project~~ — done by the engine: `Sketch::project_edge(&EdgeInfo, samples, construction)`.
-21. **Offset of line–arc chains is under-determined.** On the sample board DXF
+21. ~~Offset of line–arc chains is under-determined~~ — done by the engine:
+    `Constraint::Offset` pins each joint with two equations (both offset carriers,
+    or one carrier and the source joint's normal at tangent joints); the board
+    outline offset is 0 DOF with rank = variables and no redundancy. The GUI uses
+    `offset_chain` for every chain; `chain_from` follows equal end points (no
+    `weld_ends`) and offsets are never construction. Original report: on the sample board DXF
     (`sample::board_dxf()`, layer BoardOutLine: 4 lines + 4 r3 corner arcs, fully
     constrained, 52 vars / rank 52), `Sketch::offset_chain(EntityId(0),
     "clearance + wall")` adds 16 variables and 16 equations but the rank grows by

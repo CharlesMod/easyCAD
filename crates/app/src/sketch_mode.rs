@@ -345,52 +345,6 @@ impl SketchSession {
         self.resolve();
     }
 
-    /// Entities whose ends lie on the same spot share that point (DXF imports have
-    /// separate, equal end points; the engine's chain walk follows shared points).
-    fn weld_ends(&mut self) {
-        let sk = &self.sketch;
-        let mut canon: HashMap<u32, PointId> = HashMap::new();
-        let mut seen: Vec<(DVec2, PointId)> = Vec::new();
-        for e in &sk.entities {
-            let ends = match e.geom {
-                Geom::Line { a, b } => vec![a, b],
-                Geom::Arc { start, end, .. } => vec![start, end],
-                Geom::Circle { .. } => vec![],
-            };
-            for p in ends {
-                let q = sk.point(p);
-                match seen.iter().find(|(x, _)| x.distance(q) < 1e-6) {
-                    Some((_, c)) if *c != p => {
-                        canon.insert(p.0, *c);
-                    }
-                    Some(_) => {}
-                    None => seen.push((q, p)),
-                }
-            }
-        }
-        if canon.is_empty() {
-            return;
-        }
-        let m = |p: &mut PointId| {
-            if let Some(c) = canon.get(&p.0) {
-                *p = *c;
-            }
-        };
-        for e in &mut self.sketch.entities {
-            match &mut e.geom {
-                Geom::Line { a, b } => {
-                    m(a);
-                    m(b);
-                }
-                Geom::Arc { start, end, .. } => {
-                    m(start);
-                    m(end);
-                }
-                Geom::Circle { .. } => {}
-            }
-        }
-    }
-
     /// Drop the snapshot of an edit that did not happen.
     fn pop_undo(&mut self) {
         self.undo.pop();
@@ -583,97 +537,15 @@ impl SketchSession {
         }
     }
 
-    /// Point-connected loop containing an entity, in walking order with direction.
-    pub fn loop_of(&self, start: EntityId) -> Option<Vec<(EntityId, bool)>> {
-        let s = &self.sketch;
-        if let Geom::Circle { .. } = s.entities.get(start.0 as usize)?.geom {
-            return Some(vec![(start, true)]);
-        }
-        // union coincident points
-        let mut root: Vec<u32> = (0..s.points.len() as u32).collect();
-        fn find(r: &mut [u32], i: u32) -> u32 {
-            let mut i = i;
-            while r[i as usize] != i {
-                r[i as usize] = r[r[i as usize] as usize];
-                i = r[i as usize];
-            }
-            i
-        }
-        for c in &s.constraints {
-            if let Constraint::Coincident(a, b) = c {
-                let (ra, rb) = (find(&mut root, a.0), find(&mut root, b.0));
-                root[ra as usize] = rb;
-            }
-        }
-        // also points at the same location
-        for i in 0..s.points.len() {
-            for j in i + 1..s.points.len() {
-                if s.points[i].distance(s.points[j]) < 1e-6 {
-                    let (ra, rb) = (find(&mut root, i as u32), find(&mut root, j as u32));
-                    root[ra as usize] = rb;
-                }
-            }
-        }
-        let ends = |e: EntityId, r: &mut Vec<u32>| -> Option<(u32, u32)> {
-            match s.entities[e.0 as usize].geom {
-                Geom::Line { a, b } => Some((find(r, a.0), find(r, b.0))),
-                Geom::Arc { start, end, .. } => Some((find(r, start.0), find(r, end.0))),
-                Geom::Circle { .. } => None,
-            }
-        };
-        let construction = s.entities[start.0 as usize].construction;
-        let (first, mut at) = ends(start, &mut root)?;
-        let mut out = vec![(start, true)];
-        let mut used: HashSet<u32> = HashSet::from([start.0]);
-        while at != first {
-            let mut next = None;
-            for (i, e) in s.entities.iter().enumerate() {
-                if used.contains(&(i as u32)) || e.construction != construction {
-                    continue;
-                }
-                if let Some((a, b)) = ends(EntityId(i as u32), &mut root) {
-                    if a == at {
-                        next = Some((EntityId(i as u32), true, b));
-                    } else if b == at {
-                        next = Some((EntityId(i as u32), false, a));
-                    }
-                }
-                if next.is_some() {
-                    break;
-                }
-            }
-            let (e, fwd, other) = next?;
-            used.insert(e.0);
-            out.push((e, fwd));
-            at = other;
-            if out.len() > 10_000 {
-                return None;
-            }
-        }
-        Some(out)
-    }
-
     /// Offset the chain through `start` by an expression distance (outward for a
     /// closed loop): the engine's `Sketch::offset_chain`, held by one native
-    /// `Constraint::Offset` (GUI_NEEDS #12).
+    /// `Constraint::Offset` (GUI_NEEDS #12, #21). It follows DXF loops with
+    /// separate, equal end points and makes profile geometry from a reference.
     pub fn offset_loop(&mut self, start: EntityId, dist: &str) -> Result<(), String> {
-        // chains with arcs: the native Offset leaves them under-determined (GUI_NEEDS #21)
-        if let Some(lp) = self.loop_of(start) {
-            if lp.len() > 1 && lp.iter().any(|(e, _)| matches!(self.sketch.entities[e.0 as usize].geom, Geom::Arc { .. })) {
-                return self.offset_loop_gui(start, dist);
-            }
-        }
         let d = Expr::new(crate::units::normalize_input(dist.trim()));
         self.push_undo();
-        self.weld_ends();
         match self.sketch.offset_chain(start, d, &self.values) {
-            Ok(new) => {
-                // offsetting a reference (a DXF outline) makes real geometry: the profile
-                for e in new {
-                    if let Some(x) = self.sketch.entities.get_mut(e.0 as usize) {
-                        x.construction = false;
-                    }
-                }
+            Ok(_) => {
                 self.entity_layer.resize(self.sketch.entities.len(), None);
                 self.resolve();
                 Ok(())
@@ -683,184 +555,6 @@ impl SketchSession {
                 Err(e)
             }
         }
-    }
-
-
-    /// The GUI's own offset of a closed loop (point-to-line distances, radial lines
-    /// at tangent joints), used for chains with arcs until GUI_NEEDS #21.
-    fn offset_loop_gui(&mut self, start: EntityId, dist: &str) -> Result<(), String> {
-        let d = crate::widgets::eval(dist, &self.values)?;
-        let lp = self
-            .loop_of(start)
-            .ok_or("pick an entity of a closed loop")?;
-        self.push_undo();
-        let s = self.sketch.clone();
-        let pt = |p: PointId| s.point(p);
-        if lp.len() == 1 {
-            if let Geom::Circle { center, radius } = s.entities[lp[0].0 .0 as usize].geom {
-                let e = self.add_entity(
-                    Geom::Circle {
-                        center,
-                        radius: radius + d,
-                    },
-                    false,
-                );
-                self.sketch.constrain(Constraint::Diameter(
-                    e,
-                    Expr::new(format!("{} + 2*({dist})", fmt(radius * 2.0))),
-                ));
-                self.resolve();
-                return Ok(());
-            }
-        }
-        // orientation: signed area via sampled points
-        let mut poly = Vec::new();
-        for (e, fwd) in &lp {
-            let (a, b) = match s.entities[e.0 as usize].geom {
-                Geom::Line { a, b } => (pt(a), pt(b)),
-                Geom::Arc { start, end, .. } => (pt(start), pt(end)),
-                _ => continue,
-            };
-            poly.push(if *fwd { a } else { b });
-        }
-        let area: f64 = (0..poly.len())
-            .map(|i| poly[i].perp_dot(poly[(i + 1) % poly.len()]))
-            .sum::<f64>()
-            / 2.0;
-        let sign = if area >= 0.0 { 1.0 } else { -1.0 }; // CCW: outward = right of travel
-                                                         // offset segments
-        struct Seg {
-            a: DVec2,
-            b: DVec2,
-            arc: Option<(PointId, bool)>,
-            src: EntityId,
-            r_expr: Option<String>,
-            /// Source point at the start of the segment (travel order).
-            sa: PointId,
-        }
-        let mut segs = Vec::new();
-        for (e, fwd) in &lp {
-            match s.entities[e.0 as usize].geom {
-                Geom::Line { a, b } => {
-                    let (p0, p1) = if *fwd { (pt(a), pt(b)) } else { (pt(b), pt(a)) };
-                    let t = (p1 - p0).normalize();
-                    let n = DVec2::new(t.y, -t.x) * sign;
-                    segs.push(Seg {
-                        a: p0 + n * d,
-                        b: p1 + n * d,
-                        arc: None,
-                        src: *e,
-                        r_expr: None,
-                        sa: if *fwd { a } else { b },
-                    });
-                }
-                Geom::Arc { center, start, end } => {
-                    let c = pt(center);
-                    let (p0, p1) = if *fwd {
-                        (pt(start), pt(end))
-                    } else {
-                        (pt(end), pt(start))
-                    };
-                    // arc is CCW start→end; travelling CCW around a CCW loop means the
-                    // centre is inside: radius grows outward
-                    let ccw_travel = *fwd;
-                    let grow = if (ccw_travel && sign > 0.0) || (!ccw_travel && sign < 0.0) {
-                        d
-                    } else {
-                        -d
-                    };
-                    let r0 = (p0 - c).length();
-                    let k = (r0 + grow) / r0;
-                    let r_expr = format!(
-                        "{} {} ({dist})",
-                        fmt(r0),
-                        if grow >= 0.0 { "+" } else { "-" }
-                    );
-                    segs.push(Seg {
-                        a: c + (p0 - c) * k,
-                        b: c + (p1 - c) * k,
-                        arc: Some((center, *fwd)),
-                        src: *e,
-                        r_expr: Some(r_expr),
-                        sa: if *fwd { start } else { end },
-                    });
-                }
-                _ => {}
-            }
-        }
-        // joints: intersect sharp line-line corners, else average
-        let n = segs.len();
-        let mut joints = Vec::with_capacity(n);
-        for i in 0..n {
-            let prev = &segs[(i + n - 1) % n];
-            let cur = &segs[i];
-            let j = if prev.b.distance(cur.a) < 1e-6 {
-                cur.a
-            } else if prev.arc.is_none() && cur.arc.is_none() {
-                line_intersect(prev.a, prev.b, cur.a, cur.b).unwrap_or((prev.b + cur.a) / 2.0)
-            } else {
-                (prev.b + cur.a) / 2.0
-            };
-            joints.push(self.sketch.add_point(j));
-        }
-        for i in 0..n {
-            let (a, b) = (joints[i], joints[(i + 1) % n]);
-            match segs[i].arc {
-                None => {
-                    self.add_entity(Geom::Line { a, b }, false);
-                }
-                Some((center, fwd)) => {
-                    let (st, en) = if fwd { (a, b) } else { (b, a) };
-                    let e = self.add_entity(
-                        Geom::Arc {
-                            center,
-                            start: st,
-                            end: en,
-                        },
-                        false,
-                    );
-                    if let Some(r) = &segs[i].r_expr {
-                        self.sketch
-                            .constrain(Constraint::Radius(e, Expr::new(r.clone())));
-                    }
-                }
-            }
-        }
-        // Pin each joint with two transversal equations (no redundancy, full rank):
-        // between two lines, the offset distance from both source lines; next to an
-        // arc, the radial line through the source joint (the arc radius gives the other).
-        for i in 0..n {
-            let prev = &segs[(i + n - 1) % n];
-            let cur = &segs[i];
-            let j = joints[i];
-            match (prev.arc, cur.arc) {
-                (None, None) => {
-                    self.sketch.constrain(Constraint::PointLineDistance(
-                        j,
-                        prev.src,
-                        Expr::new(dist),
-                    ));
-                    self.sketch.constrain(Constraint::PointLineDistance(
-                        j,
-                        cur.src,
-                        Expr::new(dist),
-                    ));
-                }
-                (p, c) => {
-                    let center = c.or(p).map(|x| x.0).unwrap();
-                    let radial = self.add_entity(
-                        Geom::Line {
-                            a: center,
-                            b: cur.sa,
-                        },
-                        true,
-                    );
-                    self.sketch.constrain(Constraint::PointOnLine(j, radial));
-                }
-            }
-        }
-        self.resolve();
-        Ok(())
     }
 
     /// Trim the piece of `e` around `at` between its nearest intersections (the
@@ -1207,17 +901,6 @@ pub fn constraint_entities(c: &Constraint) -> Vec<EntityId> {
         Offset { source, target, .. } => source.iter().chain(target).copied().collect(),
         _ => vec![],
     }
-}
-
-fn line_intersect(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<DVec2> {
-    let r = b - a;
-    let s = d - c;
-    let den = r.perp_dot(s);
-    if den.abs() < 1e-12 {
-        return None;
-    }
-    let t = (c - a).perp_dot(s) / den;
-    Some(a + r * t)
 }
 
 fn seg_dist(q: DVec2, a: DVec2, b: DVec2) -> f64 {
@@ -2541,6 +2224,35 @@ mod tests {
         assert_eq!(pr.profiles.len(), 1, "outer loop with the source as a hole");
         let area = easycad_model::sketch::loop_area(&pr.profiles[0].outer).abs();
         assert!((area - 24.0 * 14.0).abs() < 1e-3, "{area}");
+    }
+
+    #[test]
+    fn offset_of_the_sample_board_outline_is_fully_defined() {
+        // GUI_NEEDS #21: the DXF outline (4 lines + 4 tangent r3 arcs, separate
+        // equal end points, fixed reference) offset natively, by an expression
+        let mut d = DocData::new("t", "test");
+        d.params.set("clearance", "0.5").unwrap();
+        d.params.set("wall", "2").unwrap();
+        let drawing = DxfDrawing::parse(&crate::sample::board_dxf()).unwrap();
+        let mut s = SketchSession::from_dxf(ImportId(1), "board.dxf", drawing, &d);
+        let first = s
+            .entity_layer
+            .iter()
+            .position(|l| l.as_deref() == Some("BoardOutLine"))
+            .map(|i| EntityId(i as u32))
+            .unwrap();
+        let before = s.report.clone().unwrap();
+        let n = s.sketch.entities.len();
+        s.offset_loop(first, "clearance + wall").unwrap();
+        assert_eq!(s.sketch.entities.len(), n + 8);
+        assert!(s.sketch.entities[n..].iter().all(|e| !e.construction), "the offset is the profile");
+        let r = s.report.clone().unwrap();
+        assert!(r.converged, "{r:?}");
+        assert_eq!(r.variables, before.variables + 16, "8 new joints, the arcs share the source centres");
+        assert_eq!((r.dof, r.rank, r.equations), (0, r.variables, r.variables), "{r:?}");
+        assert_eq!(r.status, ConstraintStatus::FullyConstrained);
+        assert!(!s.sketch.constraints.iter().any(|c| matches!(c, Constraint::PointOnLine(..))), "no GUI radial helpers");
+        assert!(s.profile_count() >= 1);
     }
 
     #[test]

@@ -1053,6 +1053,9 @@ pub struct MateReport {
     pub free: Vec<FreeDof>,
     /// A drive value was clamped to the mate's limits.
     pub limited: bool,
+    /// Set when a closed loop of mates overrode the drive value: the angle
+    /// (degrees, Revolute) or distance (mm, Slider) the loop puts the mate at.
+    pub actual: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1101,6 +1104,155 @@ fn mismatch(a: &Transform, b: &Transform) -> (f64, f64) {
     ((a.translation - b.translation).length(), a.rotation.angle_between(b.rotation).to_degrees())
 }
 
+fn world_of(cur: &BTreeMap<OccurrenceId, Transform>, path: &[OccurrenceId]) -> Transform {
+    path.iter().fold(Transform::IDENTITY, |t, o| t.mul(&cur[o]))
+}
+
+/// The equations of one mate at the local transforms `cur`: the components its
+/// kind holds (hard rows: mm and radians), and its drive residual (Revolute angle
+/// in radians, Slider distance in mm) if it has one.
+fn mate_rows(m: &Mate, ang: f64, dist: f64, cur: &BTreeMap<OccurrenceId, Transform>) -> (Vec<f64>, Option<f64>) {
+    let fa = world_of(cur, &m.a.occurrence).mul(&m.a.frame());
+    let fb = world_of(cur, &m.b.occurrence).mul(&m.b.frame());
+    let base = if m.flip { fa.mul(&flip_x()) } else { fa };
+    let rel = base.inverse().mul(&fb);
+    let q = if rel.rotation.w < 0.0 { -rel.rotation } else { rel.rotation };
+    let (t, z, rv) = (rel.translation, q * DVec3::Z, q.to_scaled_axis());
+    let wrap = |a: f64| (a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    match m.kind {
+        MateKind::Rigid => (vec![t.x, t.y, t.z - dist, rv.x, rv.y, rv.z], None),
+        MateKind::Revolute => (vec![t.x, t.y, t.z - dist, z.x, z.y], Some(wrap(z_angle(&rel) - ang.to_radians()))),
+        MateKind::Slider => (vec![t.x, t.y, rv.x, rv.y, rv.z], Some(t.z - dist)),
+        MateKind::Cylindrical => (vec![t.x, t.y, z.x, z.y], None),
+        MateKind::Planar => (vec![t.z - dist, z.x, z.y], None),
+        MateKind::Ball => (vec![t.x, t.y, t.z], None),
+    }
+}
+
+/// A closed loop solved by [`solve_loop`].
+struct LoopFit {
+    cur: BTreeMap<OccurrenceId, Transform>,
+    /// Per equation: its drive was used (false for mates without a drive).
+    driven: Vec<bool>,
+    /// Equations the loop does not need (they agree with the others).
+    redundant: usize,
+}
+
+fn rank(j: &nalgebra::DMatrix<f64>) -> usize {
+    if j.nrows() == 0 || j.ncols() == 0 {
+        return 0;
+    }
+    let sv = j.clone().svd(false, false).singular_values;
+    let smax = sv.iter().cloned().fold(0.0, f64::max);
+    sv.iter().filter(|s| **s > 1e-8 * smax.max(1.0)).count()
+}
+
+/// Solve the occurrences `vars` of a closed loop of mates simultaneously: every
+/// mate's hard rows hold; drive values are used in mate order while they still
+/// remove a freedom (a four-bar's crank angle sets it, the other joints follow);
+/// what stays free moves as little as possible from `start` (minimum-norm
+/// Gauss-Newton). `Err(max residual)` when the loop cannot close.
+fn solve_loop(eqs: &[(&Mate, f64, f64)], vars: &[OccurrenceId], start: &BTreeMap<OccurrenceId, Transform>) -> Result<LoopFit, f64> {
+    use nalgebra::{DMatrix, DVector};
+    let n = 6 * vars.len();
+    let place = |x: &DVector<f64>| {
+        let mut cur = start.clone();
+        for (k, o) in vars.iter().enumerate() {
+            let t0 = start[o];
+            let w = DVec3::new(x[6 * k], x[6 * k + 1], x[6 * k + 2]);
+            let dt = DVec3::new(x[6 * k + 3], x[6 * k + 4], x[6 * k + 5]);
+            cur.insert(*o, Transform::new((DQuat::from_scaled_axis(w) * t0.rotation).normalize(), t0.translation + dt));
+        }
+        cur
+    };
+    let rows = |x: &DVector<f64>, driven: Option<&[bool]>| -> (Vec<f64>, Vec<Option<f64>>) {
+        let cur = place(x);
+        let (mut hard, mut drives) = (Vec::new(), Vec::new());
+        for (i, (m, a, dd)) in eqs.iter().enumerate() {
+            let (h, dr) = mate_rows(m, *a, *dd, &cur);
+            hard.extend(h);
+            drives.push(dr);
+            if let (Some(used), Some(v)) = (driven, dr) {
+                if used[i] {
+                    hard.push(v);
+                }
+            }
+        }
+        (hard, drives)
+    };
+    let jac = |x: &DVector<f64>, driven: Option<&[bool]>| -> (DMatrix<f64>, Vec<Option<Vec<f64>>>) {
+        let m = rows(x, driven).0.len();
+        let mut j = DMatrix::zeros(m, n);
+        let mut g: Vec<Option<Vec<f64>>> = eqs.iter().map(|_| None).collect();
+        let mut xp = x.clone();
+        for k in 0..n {
+            let h = 1e-6;
+            xp[k] = x[k] + h;
+            let (rp, dp) = rows(&xp, driven);
+            xp[k] = x[k] - h;
+            let (rm, dm) = rows(&xp, driven);
+            xp[k] = x[k];
+            for i in 0..m {
+                j[(i, k)] = (rp[i] - rm[i]) / (2.0 * h);
+            }
+            for (i, (p, q)) in dp.iter().zip(&dm).enumerate() {
+                if let (Some(p), Some(q)) = (p, q) {
+                    g[i].get_or_insert_with(|| vec![0.0; n])[k] = (p - q) / (2.0 * h);
+                }
+            }
+        }
+        (j, g)
+    };
+    // which drives still remove a freedom, in mate order
+    let x0 = DVector::zeros(n);
+    let (mut j, grads) = jac(&x0, None);
+    let mut r = rank(&j);
+    let mut driven = vec![false; eqs.len()];
+    for (i, g) in grads.iter().enumerate() {
+        let Some(g) = g else { continue };
+        let mut jt = j.clone().insert_row(j.nrows(), 0.0);
+        let last = jt.nrows() - 1;
+        for (k, v) in g.iter().enumerate() {
+            jt[(last, k)] = *v;
+        }
+        let rt = rank(&jt);
+        if rt > r {
+            (j, r, driven[i]) = (jt, rt, true);
+        }
+    }
+    let norm = |v: &[f64]| v.iter().map(|a| a * a).sum::<f64>();
+    let mut x = x0;
+    let mut f = rows(&x, Some(&driven)).0;
+    for _ in 0..100 {
+        if f.iter().all(|v| v.abs() < 1e-10) {
+            break;
+        }
+        let (j, _) = jac(&x, Some(&driven));
+        let svd = j.svd(true, true);
+        let smax = svd.singular_values.iter().cloned().fold(0.0, f64::max);
+        let Ok(dx) = svd.solve(&(-DVector::from_column_slice(&f)), 1e-10 * smax.max(1.0)) else { break };
+        let mut step = 1.0;
+        let mut better = None;
+        while step > 1e-4 {
+            let xn = &x + &dx * step;
+            let fn_ = rows(&xn, Some(&driven)).0;
+            if norm(&fn_) < norm(&f) {
+                better = Some((xn, fn_));
+                break;
+            }
+            step /= 2.0;
+        }
+        let Some((xn, fn_)) = better else { break };
+        (x, f) = (xn, fn_);
+    }
+    let worst = f.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if worst > 1e-7 {
+        return Err(worst);
+    }
+    let (j, _) = jac(&x, Some(&driven));
+    Ok(LoopFit { cur: place(&x), redundant: j.nrows() - rank(&j), driven })
+}
+
 impl Document {
     pub fn add_mate(&mut self, name: &str, kind: MateKind, a: MateConnector, b: MateConnector, flip: bool) -> MateId {
         self.edit(&format!("Mate {name}"), |d| {
@@ -1147,8 +1299,11 @@ impl Document {
 ///   placed sub-assembly moves inside it), keeping its current position in the
 ///   mate's free directions. The new transform is written in that occurrence's
 ///   parent frame.
-/// - A mate whose sides are both placed is checked (`Redundant` or
-///   `OverConstrained`); mates never reached are `Unsolved`.
+/// - A mate whose sides are both placed is checked: `Redundant` when it holds.
+///   When it does not, it closes a loop: the moved occurrences connected to it are
+///   solved together ([`solve_loop`]); a loop that cannot close leaves the
+///   propagated placement and reports its closing mates `OverConstrained`.
+/// - Mates never reached are `Unsolved`.
 pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
     let mut rep = MateSolve::default();
     let vals = d.values().unwrap_or_default();
@@ -1167,7 +1322,6 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
             }
         }
     }
-    let world_of = |cur: &BTreeMap<OccurrenceId, Transform>, path: &[OccurrenceId]| path.iter().fold(Transform::IDENTITY, |t, o| t.mul(&cur[o]));
     let mut status: BTreeMap<MateId, MateStatus> = BTreeMap::new();
     let mut limited: BTreeSet<MateId> = BTreeSet::new();
     let mut prepared = Vec::new();
@@ -1192,6 +1346,9 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
         }
     }
     let mut moved = BTreeSet::new();
+    // occurrences placed by a mate, and mates that close a loop but do not hold
+    let mut movers: BTreeSet<OccurrenceId> = BTreeSet::new();
+    let mut closing: Vec<(MateId, f64, f64)> = Vec::new();
     loop {
         let mut progress = false;
         for (m, ang, dist) in &prepared {
@@ -1212,6 +1369,7 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
                     let st = if dl < 1e-6 && da < 1e-6 {
                         MateStatus::Redundant
                     } else {
+                        closing.push((m.id, dl, da));
                         MateStatus::OverConstrained(format!("off by {dl:.3} mm / {da:.2}° (both sides are already fixed)"))
                     };
                     status.insert(m.id, st);
@@ -1242,6 +1400,7 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
                     }
                     cur.insert(mover, new_local);
                     placed.insert(mover);
+                    movers.insert(mover);
                     status.insert(m.id, MateStatus::Solved);
                     progress = true;
                 }
@@ -1249,6 +1408,19 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
         }
         if !progress {
             break;
+        }
+    }
+    let mut actual: BTreeMap<MateId, f64> = BTreeMap::new();
+    if !closing.is_empty() {
+        solve_loops(d, &prepared, &movers, &closing, &mut cur, &mut status, &mut actual, &mut rep.notes);
+        let orig: BTreeMap<OccurrenceId, Transform> = all.iter().map(|(_, o, _)| (o.id, o.transform)).collect();
+        for o in &movers {
+            let (dl, da) = mismatch(&cur[o], &orig[o]);
+            if dl > 1e-9 || da > 1e-9 {
+                moved.insert(*o);
+            } else {
+                moved.remove(o);
+            }
         }
     }
     for m in &d.mates {
@@ -1280,11 +1452,97 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
         } else {
             vec![]
         };
-        rep.mates.push(MateReport { mate: m.id, name: m.name.clone(), status: st, dof: m.kind.dof(), free, limited: limited.contains(&m.id) });
+        rep.mates.push(MateReport { mate: m.id, name: m.name.clone(), status: st, dof: m.kind.dof(), free, limited: limited.contains(&m.id), actual: actual.get(&m.id).copied() });
     }
     rep.moved = moved.iter().copied().collect();
     let tf = moved.into_iter().map(|id| (id, cur[&id])).collect();
     (tf, rep)
+}
+
+/// Solve each closed loop that propagation could not close: the movers connected
+/// (through mates) to a closing mate form one group, solved with every mate that
+/// touches it. Statuses, overridden drive values and notes go into the report.
+#[allow(clippy::too_many_arguments)]
+fn solve_loops(
+    d: &DocData,
+    prepared: &[(&Mate, f64, f64)],
+    movers: &BTreeSet<OccurrenceId>,
+    closing: &[(MateId, f64, f64)],
+    cur: &mut BTreeMap<OccurrenceId, Transform>,
+    status: &mut BTreeMap<MateId, MateStatus>,
+    actual: &mut BTreeMap<MateId, f64>,
+    notes: &mut Vec<String>,
+) {
+    let on = |m: &Mate| -> BTreeSet<OccurrenceId> { m.a.occurrence.iter().chain(&m.b.occurrence).filter(|o| movers.contains(o)).copied().collect() };
+    let name = |o: &OccurrenceId| d.occurrence(*o).map(|o| format!("`{}`", o.name)).unwrap_or_else(|| "?".into());
+    let mut done: BTreeSet<MateId> = BTreeSet::new();
+    for (id, _, _) in closing {
+        if done.contains(id) {
+            continue;
+        }
+        let Some(c) = prepared.iter().find(|p| p.0.id == *id) else { continue };
+        let mut group = on(c.0);
+        if group.is_empty() {
+            continue; // both sides grounded / unmated: nothing can move
+        }
+        loop {
+            let before = group.len();
+            for (m, ..) in prepared {
+                let o = on(m);
+                if !o.is_disjoint(&group) {
+                    group.extend(o);
+                }
+            }
+            if group.len() == before {
+                break;
+            }
+        }
+        let eqs: Vec<(&Mate, f64, f64)> = prepared.iter().filter(|(m, ..)| !on(m).is_disjoint(&group)).copied().collect();
+        let closers: Vec<&(MateId, f64, f64)> = closing.iter().filter(|(cid, ..)| eqs.iter().any(|e| e.0.id == *cid)).collect();
+        done.extend(closers.iter().map(|c| c.0));
+        let vars: Vec<OccurrenceId> = group.iter().copied().collect();
+        let names = vars.iter().map(name).collect::<Vec<_>>().join(", ");
+        // a loop that was closed in the document (a drive was edited since)
+        // starts from there, so it stays on its branch (a four-bar does not flip
+        // into its crossed form); otherwise from the propagated placement
+        let mut kept = cur.clone();
+        for v in &vars {
+            if let Some(o) = d.occurrence(*v) {
+                kept.insert(*v, o.transform);
+            }
+        }
+        let was_closed = eqs.iter().all(|(m, a, dd)| mate_rows(m, *a, *dd, &kept).0.iter().all(|r| r.abs() < 1e-6));
+        match solve_loop(&eqs, &vars, if was_closed { &kept } else { cur }) {
+            Ok(fit) => {
+                *cur = fit.cur;
+                for c in &closers {
+                    status.insert(c.0, MateStatus::Solved);
+                }
+                for (i, (m, ang, dist)) in eqs.iter().enumerate() {
+                    if fit.driven[i] {
+                        continue;
+                    }
+                    let Some(r) = mate_rows(m, *ang, *dist, cur).1 else { continue };
+                    let (v, want, unit) = match m.kind {
+                        MateKind::Revolute => (ang + r.to_degrees(), *ang, "°"),
+                        _ => (dist + r, *dist, " mm"),
+                    };
+                    if (v - want).abs() > 1e-6 {
+                        actual.insert(m.id, v);
+                        notes.push(format!("`{}`: the closed loop puts it at {v:.2}{unit} (its drive value {want:.2}{unit} is not used)", m.name));
+                    }
+                }
+                if fit.redundant > 0 {
+                    notes.push(format!("the loop through {names} has {} redundant constraint{} (they agree)", fit.redundant, if fit.redundant == 1 { "" } else { "s" }));
+                }
+            }
+            Err(_) => {
+                for (cid, dl, da) in &closers {
+                    status.insert(*cid, MateStatus::OverConstrained(format!("the loop through {names} cannot close: off by {dl:.3} mm / {da:.2}° here")));
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- interference

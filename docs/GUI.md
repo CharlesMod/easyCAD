@@ -28,7 +28,7 @@ mode a bare number means inches.
 | `ui_process.rs` | PROCESS section: profile, fit allowances, build plate picker + preview, teardrops, calibration. |
 | `ui_viewport.rs` | Viewport input, pick popover, overlays, floating dialogs. |
 | `dialogs/` | Feature dialogs (fillet/chamfer with self-heal report, extrude, revolve, shell, draft, split, boss, rib, pattern, mirror, standoffs, parting joint, export). |
-| `sketch_mode.rs` | 2D sketch editor with tools, constraints, live solver, DXF layers. |
+| `sketch_mode.rs` | 2D sketch editor with tools, constraints, live solver, DXF layers. Offset (O) is the engine's `offset_chain` for every chain (lines, arcs, circles, open or closed; DXF loops with separate end points too) and makes profile geometry. |
 | `ui_parts.rs` | Parts library, placement on hole edges, BOM. |
 | `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
