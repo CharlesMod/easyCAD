@@ -2409,7 +2409,14 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                 Constraint::Angle(_, e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "∠"),
                 _ => continue,
             };
-            let Some((m, _)) = anchor else { continue };
+            let Some((m, e)) = anchor else { continue };
+            // imported (DXF) geometry is fixed reference: no dimension clutter
+            if s.entity_layer
+                .get(e.0 as usize)
+                .is_some_and(|l| l.is_some())
+            {
+                continue;
+            }
             let v = expr.eval(&s.values).unwrap_or(f64::NAN);
             let is_expr = expr.0.trim().parse::<f64>().is_err();
             let txt = format!("{prefix}{v:.2}");

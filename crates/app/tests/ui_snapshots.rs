@@ -246,6 +246,14 @@ fn fillet_dialog_with_reduced_radius_report() {
     {
         let app = h.state_mut();
         let m = app.model.clone().unwrap();
+        let lid = m
+            .bodies
+            .iter()
+            .find(|b| b.body.name == "Lid")
+            .unwrap()
+            .body
+            .id;
+        app.hidden.insert(lid);
         let base = m.bodies.iter().find(|b| b.body.name == "Base").unwrap();
         let front = -(casework_app::sample::PCB_H / 2.0 + 2.3);
         // the USB-C slot's outer rim (3.5 mm tall slot)

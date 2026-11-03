@@ -690,7 +690,7 @@ impl FilletD {
                                             actions.push((si, *ei, if group.len() > 1 { Action::UseMaxGroup } else { Action::UseMax }));
                                         }
                                     }
-                                    if widgets::button(ui, "Skip edge").clicked() {
+                                    if widgets::button(ui, if group.len() > 1 { "Skip edges" } else { "Skip edge" }).clicked() {
                                         actions.push((si, *ei, if group.len() > 1 { Action::SkipGroup } else { Action::Skip }));
                                     }
                                     if widgets::button(ui, "Zoom to").clicked() {
