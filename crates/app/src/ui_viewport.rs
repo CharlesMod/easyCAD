@@ -323,7 +323,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
     crate::ui_interference::card(app, ui, rect);
     crate::ui_welcome::welcome(app, ui, rect);
     if let Some(mut ex) = app.export.take() {
-        let r = Rect::from_center_size(rect.center(), vec2(370.0, 240.0));
+        let r = Rect::from_center_size(rect.center(), vec2(370.0, if ex.assembly.is_some() { 360.0 } else { 240.0 }));
         let mut keep = true;
         egui::Area::new(egui::Id::unique("export"))
             .order(egui::Order::Foreground)
@@ -339,6 +339,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
                         profile: ex.profile.clone(),
                         orient: ex.orient,
                         include_reference: ex.include_reference,
+                        assembly: ex.assembly,
                     };
                     app.ask_path(req, move |app, path| {
                         app.export_job = Some(ex2.start(path, data, blobs, lib));
@@ -347,6 +348,13 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
                     keep = false;
                 }
                 crate::dialogs::export::ExportEvent::Cancel => keep = false,
+                crate::dialogs::export::ExportEvent::SetProcess(c, p) => {
+                    let label = format!("{} made by {}", app.doc.data.component_name(c), p.clone().unwrap_or_else(|| "the document's process".into()));
+                    if let Err(e) = app.doc.edit_component(c, &label, |c| c.process = p) {
+                        app.warn(e.to_string());
+                    }
+                    app.request_model();
+                }
                 crate::dialogs::export::ExportEvent::None => {}
             });
         if keep {

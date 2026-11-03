@@ -313,8 +313,6 @@ pub fn wizard_window(app: &mut CaseworkApp, ui: &mut Ui) {
                                     }
                                 }
                             });
-                            ui.checkbox(&mut s.components, "Base and Lid as components")
-                                .on_hover_text("An assembly: the enclosure is the design master, split into Base and Lid components that follow its edits; a STEP board becomes a locked reference component");
                             ui.label(RichText::new("Made by").color(theme::TEXT_DIM));
                             egui::ComboBox::from_id_salt("wiz_profile")
                                 .selected_text(&s.profile)
@@ -332,6 +330,8 @@ pub fn wizard_window(app: &mut CaseworkApp, ui: &mut Ui) {
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
+                        ui.checkbox(&mut w.settings.components, "Base and Lid as components")
+                            .on_hover_text("An assembly: the enclosure is the design master, split into Base and Lid components that follow its edits; a STEP board becomes a locked reference component");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let ok = ui.add_enabled(
                                 w.board.is_some(),

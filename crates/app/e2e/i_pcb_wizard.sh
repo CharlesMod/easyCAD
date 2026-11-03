@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # (i) First run: the welcome card on an empty document, "New enclosure from PCB"
 # with the sample board's DXF (picked through Browse… → in-app path prompt), Lip
-# joint, Create; then edit a generated parameter.
+# joint, Create (an assembly: Enclosure master -> Base + Lid); then edit a
+# generated parameter.
 . "$(dirname "$0")/lib.sh"
 "$BIN" --sample-board "$WORK/boards" >/dev/null
 start_app
@@ -21,9 +22,9 @@ shot 01_wizard
 
 click 969 669 # Create enclosure
 check "wizard closed" '.wizard == null'
-check "two halves" '.bodies == ["Base", "Lid"]' 120
-check "the history is ordinary features" '[.features[].kind] == ["Extrude", "Fillet", "Shell", "Standoffs from PCB", "Parting joint"]'
-check "all features regenerate" '[.features[].status] | all(. == "ok")' 120
+check "an assembly: master, Base, Lid" '[.assembly.occurrences[].name] == ["Enclosure:1", "Base:1", "Lid:1"]' 120
+check "the master is hidden, Base grounded" '.assembly.occurrences[0].visible == false and .assembly.occurrences[1].grounded'
+check "all features regenerate" '(.regenerating | not) and .assembly.errors == []' 120
 check "named parameters" '.params | has("clearance") and has("wall") and has("height") and has("standoff_h") and has("lid_split")'
 check "round board corners: no unused corner_r" '.params | has("corner_r") | not'
 idle
@@ -34,7 +35,7 @@ click 1330 541 # wall
 retype 2.5
 key Return
 check "wall is 2.5" '.params.wall == "2.5"'
-check "still regenerates without errors" '(.regenerating | not) and ([.features[].status] | all(test("Error|Unresolved") | not))' 120
+check "still regenerates without errors" '(.regenerating | not) and .assembly.errors == []' 120
 idle
 shot 03_wall_2_5
 finish

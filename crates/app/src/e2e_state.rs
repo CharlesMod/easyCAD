@@ -294,6 +294,7 @@ fn assembly(app: &CaseworkApp) -> Value {
         "explode_rect": rect_json(app.asm_explode_rect),
         "interference": interference,
         "bom": app.asm.bom.is_some(),
+        "errors": app.model.as_ref().and_then(|m| m.asm.as_ref()).map(|a| a.result.errors()),
         "issues": app.model.as_ref().and_then(|m| m.asm.as_ref()).map(|a| a.result.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>()),
     })
 }

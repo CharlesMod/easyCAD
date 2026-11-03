@@ -1,8 +1,12 @@
 //! Export dialog: format, "Export for: [process profile]", orient to plate, and
-//! reference bodies for STEP. Runs off the UI thread on a copy of the document.
+//! reference bodies for STEP. Assemblies add STEP assembly (product structure), 3MF
+//! (an object per component, an item per occurrence) and STL per component, with
+//! the process each component is made by. Runs off the UI thread on a copy of the
+//! document.
 
 use std::sync::mpsc::{channel, Receiver};
 
+use casework_model::assembly::{AssemblyExportOptions, AssemblyFormat, ComponentId};
 use casework_model::document::{BlobStore, DocData, Document, ExportFormat, ExportOptions};
 use casework_model::library::Library;
 use casework_model::process::ProcessKind;
@@ -16,12 +20,24 @@ pub struct ExportDialog {
     pub profile: String,
     pub orient: bool,
     pub include_reference: bool,
+    /// Assembly export (`None`: one file of bodies, as for a single part).
+    pub assembly: Option<AssemblyFormat>,
 }
 
 pub enum ExportEvent {
     None,
     Cancel,
     Export,
+    /// Per-component process (`None` = the document's).
+    SetProcess(ComponentId, Option<String>),
+}
+
+pub fn asm_label(f: AssemblyFormat) -> &'static str {
+    match f {
+        AssemblyFormat::Step => "STEP assembly",
+        AssemblyFormat::ThreeMf => "3MF multi-object",
+        AssemblyFormat::StlPerComponent => "STL per component",
+    }
 }
 
 pub fn ext(f: ExportFormat) -> &'static str {
@@ -39,6 +55,7 @@ impl ExportDialog {
             profile: d.active_profile.clone(),
             orient: true,
             include_reference: false,
+            assembly: crate::ui_assembly::is_assembly(d).then_some(AssemblyFormat::Step),
         }
     }
 
@@ -63,14 +80,72 @@ impl ExportDialog {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(widgets::muted("Enter ✓ · Esc ✕")));
             });
             ui.add_space(6.0);
+            let asm_doc = crate::ui_assembly::is_assembly(d);
+            if asm_doc {
+                ui.label(RichText::new("Assembly").color(theme::TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    for f in [AssemblyFormat::Step, AssemblyFormat::ThreeMf, AssemblyFormat::StlPerComponent] {
+                        if widgets::pill(ui, asm_label(f), self.assembly == Some(f)).clicked() {
+                            self.assembly = Some(f);
+                        }
+                    }
+                });
+                ui.label(RichText::new("Or every body in one file").color(theme::TEXT_DIM));
+            }
             ui.horizontal(|ui| {
                 for (f, n) in [(ExportFormat::ThreeMf, "3MF"), (ExportFormat::Stl, "STL"), (ExportFormat::Step, "STEP")] {
-                    if widgets::pill(ui, n, self.format == f).clicked() {
+                    if widgets::pill(ui, n, self.assembly.is_none() && self.format == f).clicked() {
                         self.format = f;
+                        self.assembly = None;
                         self.suggest(d);
                     }
                 }
             });
+            if let Some(f) = self.assembly {
+                ui.add_space(4.0);
+                ui.label(widgets::muted(match f {
+                    AssemblyFormat::Step => "One STEP with the product structure: components, instances, names and colours.",
+                    AssemblyFormat::ThreeMf => "One 3MF: an object per component, an item per placed occurrence.",
+                    AssemblyFormat::StlPerComponent => "A folder with one STL per component, each in its own frame (ready to slice).",
+                }));
+                ui.label(RichText::new("Made by (per component)").color(theme::TEXT_DIM));
+                egui::Grid::new("export_procs").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                    for c in d.components.iter().filter(|c| c.purchased.is_none() && !c.locked && !c.features.is_empty()) {
+                        let used = d.all_occurrences().iter().any(|(_, o, _)| o.component == c.id && o.in_bom);
+                        if !used {
+                            continue;
+                        }
+                        ui.label(&c.name);
+                        let cur = c.process.clone().unwrap_or_else(|| format!("{} (document)", d.active_profile));
+                        egui::ComboBox::from_id_salt(("export_proc", c.id.0)).selected_text(cur).width(190.0).show_ui(ui, |ui| {
+                            if ui.selectable_label(c.process.is_none(), format!("{} (document)", d.active_profile)).clicked() {
+                                ev = ExportEvent::SetProcess(c.id, None);
+                            }
+                            for p in &d.processes {
+                                if ui.selectable_label(c.process.as_deref() == Some(p.name.as_str()), &p.name).clicked() {
+                                    ev = ExportEvent::SetProcess(c.id, Some(p.name.clone()));
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+                if f == AssemblyFormat::Step {
+                    ui.checkbox(&mut self.include_reference, "Include reference components (PCB, parts)");
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::primary(ui, &format!("Export {}…", asm_label(f))).clicked() {
+                            ev = ExportEvent::Export;
+                        }
+                        if widgets::button(ui, "Cancel").clicked() {
+                            ev = ExportEvent::Cancel;
+                        }
+                    });
+                });
+                return;
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Export for").color(theme::TEXT_DIM));
@@ -110,6 +185,18 @@ impl ExportDialog {
 
     /// The file chooser request for this export.
     pub fn request(&self, doc_name: &str) -> crate::files::Request {
+        match self.assembly {
+            Some(AssemblyFormat::StlPerComponent) => {
+                return crate::files::Request::folder("Folder for one STL per component");
+            }
+            Some(AssemblyFormat::Step) => {
+                return crate::files::Request::save("Export STEP assembly", "STEP", "step", &format!("{doc_name}.step"));
+            }
+            Some(AssemblyFormat::ThreeMf) => {
+                return crate::files::Request::save("Export 3MF", "3MF", "3mf", &format!("{doc_name}.3mf"));
+            }
+            None => {}
+        }
         let e = ext(self.format);
         crate::files::Request::save(
             &format!("Export {}", e.to_uppercase()),
@@ -127,6 +214,25 @@ impl ExportDialog {
         blobs: BlobStore,
         library: Library,
     ) -> Receiver<Result<String, String>> {
+        if let Some(f) = self.assembly {
+            let opts = AssemblyExportOptions { include_reference: self.include_reference, include_hidden: false };
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let mut doc = Document::new(&data.name);
+                doc.data = data;
+                doc.blobs = blobs;
+                doc.library = library;
+                let r = doc
+                    .export_assembly(f, &path, &opts)
+                    .map(|files| match files.as_slice() {
+                        [one] => format!("Exported {}", one.display()),
+                        many => format!("Exported {} files to {}", many.len(), path.display()),
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(r);
+            });
+            return rx;
+        }
         spawn(
             self.format,
             path,

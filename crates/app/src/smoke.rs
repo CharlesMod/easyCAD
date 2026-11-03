@@ -159,5 +159,47 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
         return Err("drawing lost on save/reopen".into());
     }
     log.push("ok  drawing saved and reopened".into());
+
+    // assembly: the wizard's Base + Lid + board, saved, reopened, exported three ways
+    let step = dir.join("board.step");
+    std::fs::write(&step, crate::sample::pcb_step()).map_err(|e| e.to_string())?;
+    let board = crate::wizard::Board::read(&step)?;
+    let doc = crate::wizard::build(&board, &crate::wizard::Settings::new("FDM 0.4 generic"))?;
+    app.load(doc, None);
+    settle(&mut app, "assembly")?;
+    let p = app.save_to(dir.join("assembly.cwk"))?;
+    app.open_path(&p)?;
+    settle(&mut app, "assembly reopened")?;
+    let placed = app.model.as_ref().map(|m| m.ctx.len()).unwrap_or(0);
+    if placed < 3 {
+        return Err(format!("assembly reopened with {placed} placed bodies"));
+    }
+    log.push(format!("ok  assembly saved and reopened ({placed} placed bodies)"));
+    for f in [
+        casework_model::assembly::AssemblyFormat::Step,
+        casework_model::assembly::AssemblyFormat::ThreeMf,
+        casework_model::assembly::AssemblyFormat::StlPerComponent,
+    ] {
+        let mut ex = crate::dialogs::export::ExportDialog::new(&app.doc.data);
+        ex.assembly = Some(f);
+        ex.include_reference = true;
+        let out = match f {
+            casework_model::assembly::AssemblyFormat::Step => dir.join("assembly.step"),
+            casework_model::assembly::AssemblyFormat::ThreeMf => dir.join("assembly.3mf"),
+            casework_model::assembly::AssemblyFormat::StlPerComponent => dir.join("stl"),
+        };
+        let rx = ex.start(out.clone(), app.doc.data.clone(), app.doc.blobs.clone(), app.doc.library.clone());
+        let msg = rx
+            .recv_timeout(Duration::from_secs(600))
+            .map_err(|e| format!("{}: {e}", crate::dialogs::export::asm_label(f)))??;
+        if out.is_dir() {
+            for name in ["Base.stl", "Lid.stl"] {
+                check_file(&out.join(name), 1000, &mut log)?;
+            }
+        } else {
+            check_file(&out, 1000, &mut log)?;
+        }
+        log.push(format!("ok  {} ({msg})", crate::dialogs::export::asm_label(f)));
+    }
     Ok(log)
 }
