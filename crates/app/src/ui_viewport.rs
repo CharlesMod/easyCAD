@@ -762,8 +762,14 @@ fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> O
     let mut pos = p + vec2(18.0, 18.0);
     let n = app.stack.len().min(8);
     let h = 52.0 + n as f32 * 34.0;
-    if pos.x + 270.0 > rect.right() {
-        pos.x = p.x - 288.0;
+    // stay clear of the floating dialog card on the right
+    let right = if app.dialog.is_some() {
+        rect.right() - 16.0 - app.dialog_card_w.max(300.0) - 8.0
+    } else {
+        rect.right()
+    };
+    if pos.x + 270.0 > right {
+        pos.x = (p.x - 288.0).max(rect.left() + 4.0);
     }
     if pos.y + h > rect.bottom() {
         pos.y = p.y - h - 12.0;

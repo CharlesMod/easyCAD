@@ -484,13 +484,17 @@ impl Dialog {
             DialogKind::Standoffs => Body::Standoffs(standoffs::StandoffsD::new(d, model)?),
             DialogKind::Joint => Body::Joint(joint::JointD::new(d, model)),
         };
-        Ok(Dialog {
+        let mut dlg = Dialog {
             kind,
             editing: None,
             name: kind.title().into(),
             body,
             error: None,
-        })
+        };
+        if let Body::Joint(j) = &mut dlg.body {
+            dlg.editing = j.adopt_split(d);
+        }
+        Ok(dlg)
     }
 
     /// Open an existing feature for editing.
@@ -715,6 +719,12 @@ impl Dialog {
     }
 
     pub fn title_case(&self) -> String {
+        if let Body::Joint(joint::JointD {
+            replaces: Some(r), ..
+        }) = &self.body
+        {
+            return format!("Parting joint (replaces {r})");
+        }
         match self.editing {
             Some(_) => format!("Edit {}", self.name),
             None => self.kind.title().into(),
@@ -773,6 +783,9 @@ impl Dialog {
             (Body::Draft(s), Some(id)) => vec![(id, b(&s.neutral_z))],
             (Body::Boss(s), Some(id)) => vec![(id, b(&s.plane_z))],
             (Body::Standoffs(s), Some(id)) => s.bindings(id),
+            // the joint's offset is a native expression: drop the plane binding
+            // of a Split it replaced
+            (Body::Joint(_), Some(id)) => vec![(id, String::new())],
             _ => Vec::new(),
         }
     }
@@ -1005,7 +1018,7 @@ impl Dialog {
                                 .strong()
                                 .size(12.0),
                         );
-                        if self.editing.is_some() {
+                        if self.editing.is_some() && self.name != self.kind.title() {
                             ui.label(widgets::muted(format!("· {}", self.name)));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1015,15 +1028,25 @@ impl Dialog {
                 });
             rules.push(ui.cursor().top());
             ui.add_space(1.0);
-            let changed = egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(14, 12))
+            // a long dialog (joint checks, fillet report) scrolls instead of
+            // pushing OK / Cancel below the window
+            let max_h = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 120.0).max(160.0);
+            let changed = egui::ScrollArea::vertical()
+                .id_salt(id.with("scroll"))
+                .max_height(max_h)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    let (c, e) = self.body_ui(ui, id, cx);
-                    if let Some(e) = e {
-                        ev = e;
-                    }
-                    c
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(14, 12))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            let (c, e) = self.body_ui(ui, id, cx);
+                            if let Some(e) = e {
+                                ev = e;
+                            }
+                            c
+                        })
+                        .inner
                 })
                 .inner;
             if changed {

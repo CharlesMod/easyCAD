@@ -78,6 +78,10 @@ pub struct JointD {
     /// The z slider is being dragged (coarse previews).
     pub dragging: bool,
     pub status: Option<FeatureStatus>,
+    /// Name of the upper half.
+    pub upper_name: String,
+    /// The plain Split this joint takes the place of (its name), see `adopt_split`.
+    pub replaces: Option<String>,
 }
 
 fn f(s: &str) -> Field {
@@ -93,9 +97,18 @@ impl JointD {
         let has = |n: &str| d.params.get(n).is_some();
         let wall = if has("wall") { "wall" } else { "2" };
         let solid = model.and_then(|m| m.bodies.iter().find(|b| !b.body.reference));
-        let (z_min, z_max) = solid
-            .and_then(|b| b.body.shape().bbox().ok())
-            .map(|b| (b.min.z, b.max.z))
+        // the slider spans every solid (a model already split into halves too)
+        let (z_min, z_max) = model
+            .into_iter()
+            .flat_map(|m| m.bodies.iter())
+            .filter(|b| !b.body.reference)
+            .filter_map(|b| b.body.shape().bbox().ok())
+            .fold(None, |acc: Option<(f64, f64)>, b| {
+                Some(match acc {
+                    None => (b.min.z, b.max.z),
+                    Some((lo, hi)) => (lo.min(b.min.z), hi.max(b.max.z)),
+                })
+            })
             .unwrap_or((0.0, 40.0));
         JointD {
             body: solid.map(|b| b.body.id),
@@ -134,7 +147,43 @@ impl JointD {
             report: None,
             dragging: false,
             status: None,
+            upper_name: "Lid".into(),
+            replaces: None,
         }
+    }
+
+    /// A new joint on a model that is already cut in two by a plain horizontal
+    /// Split takes that Split's place: same feature id (so the upper half keeps its
+    /// body id and later features keep their references), same body, plane
+    /// expression and upper-half name. Returns the Split's id to edit in place.
+    pub fn adopt_split(&mut self, d: &DocData) -> Option<FeatureId> {
+        if d
+            .features
+            .iter()
+            .any(|f| !f.suppressed && matches!(f.kind, FeatureKind::PartingJoint { .. }))
+        {
+            return None;
+        }
+        let (f, body, plane, upper) = d.features.iter().rev().find_map(|f| match &f.kind {
+            FeatureKind::Split {
+                body,
+                plane,
+                new_name,
+            } if !f.suppressed && plane.normal.z.abs() > 0.999 => {
+                Some((f, *body, *plane, new_name.clone()))
+            }
+            _ => None,
+        })?;
+        self.body = body.or(self.body);
+        self.z = Field::new(
+            d.meta
+                .get(&crate::adapters::bind_key(f.id))
+                .cloned()
+                .unwrap_or_else(|| super::fmt(plane.origin.z * plane.normal.z.signum())),
+        );
+        self.upper_name = upper;
+        self.replaces = Some(f.name.clone());
+        Some(f.id)
     }
 
     pub fn from_feature(feat: &Feature, d: &DocData) -> Option<Self> {
@@ -151,6 +200,9 @@ impl JointD {
         };
         let mut j = JointD::new(d, None);
         j.body = *body;
+        if let FeatureKind::PartingJoint { upper_name, .. } = &feat.kind {
+            j.upper_name = upper_name.clone();
+        }
         j.z = Field::from_expr(offset, None);
         j.class = *class;
         j.rim_on = rim.is_some();
@@ -344,7 +396,7 @@ impl JointD {
                     width: self.rim_w.expr(None),
                     height: self.rim_h.expr(None),
                 }),
-                upper_name: "Lid".into(),
+                upper_name: self.upper_name.clone(),
                 class: self.class,
                 closing_radius: None,
             },
@@ -378,6 +430,15 @@ impl JointD {
                 ui.label(n);
             });
         });
+        if let Some(r) = &self.replaces {
+            ui.label(
+                RichText::new(format!(
+                    "Replaces “{r}”: same halves, later features keep their references."
+                ))
+                .size(11.0)
+                .color(theme::ACCENT_LINK),
+            );
+        }
         ch |= self.z.row(ui, id.with("z"), "Split plane z", env);
         let mut zv = crate::widgets::eval(&self.z.text, env.values).unwrap_or(self.z_min);
         ui.spacing_mut().slider_width = ui.available_width();
@@ -583,6 +644,12 @@ impl JointD {
             line(ui, c > 0.0, format!("Clearance {c:.3} per side after fits"));
         }
         for c in &r.checks {
+            // a failing check the engine also explains in a warning shows once,
+            // as the (more actionable) warning
+            let lim = format!("{:.2}", c.limit);
+            if !c.ok && r.warnings.iter().any(|w| w.contains(&lim)) {
+                continue;
+            }
             line(
                 ui,
                 c.ok,

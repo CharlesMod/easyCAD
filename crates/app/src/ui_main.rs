@@ -982,6 +982,7 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::PartingJoint { .. } => ("JT", theme::GREEN),
         FeatureKind::ImportStep { .. } => ("IM", theme::GREEN),
         FeatureKind::InsertPart { .. } => ("PR", theme::GREEN),
+        FeatureKind::ContextRef { .. } => ("CX", theme::GREEN),
     }
 }
 
@@ -1280,9 +1281,11 @@ pub fn status_text(app: &CaseworkApp) -> String {
     };
     let solids = m.bodies.iter().filter(|b| !b.body.reference).count();
     let errs = m.result.errors().len();
+    let n = app.doc.data.features.len();
     let mut s = format!(
-        "Ready · {solids} bodies · {} features",
-        app.doc.data.features.len()
+        "Ready · {solids} bod{} · {n} feature{}",
+        if solids == 1 { "y" } else { "ies" },
+        if n == 1 { "" } else { "s" }
     );
     if errs > 0 {
         s += &format!(" · {errs} with errors");

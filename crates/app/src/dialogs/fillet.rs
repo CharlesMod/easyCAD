@@ -451,7 +451,7 @@ impl FilletD {
                 ch = true;
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .small_button("+ New edge set")
                 .on_hover_text("Following picks go into a set with its own radius")
