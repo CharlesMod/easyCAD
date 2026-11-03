@@ -1171,6 +1171,29 @@ mod tests {
     }
 
     #[test]
+    fn history_hint_when_the_level_has_no_features() {
+        let mut a = app(Document::new("asm"));
+        assert_eq!(crate::ui_main::history_hint(&a).as_deref(), Some("No features yet · start with a Sketch (S)"));
+        a.new_component(ComponentId::ROOT);
+        let p = occ(&a, "Component1:1");
+        assert_eq!(crate::ui_main::history_hint(&a).as_deref(), Some("The assembly has no features of its own · its components carry the history"));
+        a.activate(p.clone());
+        assert_eq!(crate::ui_main::history_hint(&a).as_deref(), Some("Component1 has no features yet · Sketch (S) to start"));
+        // a component with history: the root's hint points at it; inside it, no hint
+        let f = easycad_model::feature::Feature {
+            id: easycad_model::feature::FeatureId(0),
+            name: "Round".into(),
+            suppressed: false,
+            kind: easycad_model::feature::FeatureKind::Fillet { body: None, edges: Vec::new(), radius: "1".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
+        };
+        a.commit_features("Fillet Round", vec![f], None);
+        a.refresh_scope();
+        assert_eq!(crate::ui_main::history_hint(&a), None);
+        a.activate_parent();
+        assert!(crate::ui_main::history_hint(&a).unwrap().contains("double-click a component (e.g. Component1:1)"));
+    }
+
+    #[test]
     fn features_go_into_the_active_component() {
         use easycad_model::feature::{Feature, FeatureId, FeatureKind};
         let mut a = app(Document::new("asm"));

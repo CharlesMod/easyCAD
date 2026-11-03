@@ -46,7 +46,8 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [x] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
       Free motion: arrows / rings for the mate being edited or the Mates row clicked. The overlap
       solid (wired in fef16bd) is verified by `ui_clicks::mate_free_motion_and_interference_overlap`.
-- [ ] **[ui]** History strip hint when the active root has no features of its own.
+- [x] **[ui]** History strip hint when the active root has no features of its own (`ui_main::history_hint`;
+      also an empty part and an empty active component).
 - [ ] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21).
 
 ## 5. Known gaps (fix, or consciously drop)

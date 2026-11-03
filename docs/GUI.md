@@ -24,7 +24,7 @@ mode a bare number means inches.
 | `camera.rs` | Quaternion orbit camera: Shift+MMB orbit, MMB pan, wheel zoom to cursor, fit, 26 view-cube regions, 15° steps (world or screen axes), home view, 250 ms eased transitions. |
 | `viewcube.rs` | The cube: 6 faces × 3×3 hit zones with narrow bands, hover highlight, click, drag-orbit, context menu (home, projection, fit on change, step frame), step buttons. |
 | `pickstack.rs` | Filtered, de-duplicated candidates front to back; Tab / Shift+Tab / Alt+wheel cycle; index survives small moves. |
-| `ui_main.rs` | Title bar, toolbar, browser, Parameters panel, history strip, status bar, new-document prompt. |
+| `ui_main.rs` | Title bar, toolbar, browser, Parameters panel, history strip (with a hint when the level being edited has no features: an assembly's root points at a component to double-click), status bar, new-document prompt. |
 | `ui_process.rs` | PROCESS section: profile, fit allowances, build plate picker + preview, teardrops, calibration. |
 | `ui_viewport.rs` | Viewport input, pick popover, overlays, floating dialogs. |
 | `dialogs/` | Feature dialogs (fillet/chamfer with self-heal report, extrude, revolve, shell, draft, split, boss, rib, pattern, mirror, standoffs, parting joint, export). |
