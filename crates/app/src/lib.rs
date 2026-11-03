@@ -21,6 +21,7 @@ pub mod units;
 pub mod viewcube;
 pub mod viewport;
 pub mod widgets;
+pub mod wizard;
 pub mod worker;
 
 pub use app::CaseworkApp;

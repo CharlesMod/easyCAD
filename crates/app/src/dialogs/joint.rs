@@ -387,20 +387,25 @@ impl JointD {
                 name.to_string()
             },
             suppressed: false,
-            kind: FeatureKind::PartingJoint {
-                body: self.body,
-                plane: Plane::XY,
-                offset: self.z.expr(None),
-                kind: self.engine_kind(),
-                rim: self.rim_on.then(|| Rim {
-                    width: self.rim_w.expr(None),
-                    height: self.rim_h.expr(None),
-                }),
-                upper_name: self.upper_name.clone(),
-                class: self.class,
-                closing_radius: None,
-            },
+            kind: self.feature_kind(),
         }])
+    }
+
+    /// The engine feature for the current settings.
+    pub fn feature_kind(&self) -> FeatureKind {
+        FeatureKind::PartingJoint {
+            body: self.body,
+            plane: Plane::XY,
+            offset: self.z.expr(None),
+            kind: self.engine_kind(),
+            rim: self.rim_on.then(|| Rim {
+                width: self.rim_w.expr(None),
+                height: self.rim_h.expr(None),
+            }),
+            upper_name: self.upper_name.clone(),
+            class: self.class,
+            closing_radius: None,
+        }
     }
 
     pub fn on_preview(&mut self, out: &Output) {

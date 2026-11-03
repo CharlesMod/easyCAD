@@ -52,6 +52,17 @@ today (adapter or limitation) and what would replace it.
     cavity corners r 3.3) the O-ring report says "gland corner radius 0.00 mm is
     below the 5.33 mm bend guidance" and the check "min corner radius 0.00". Looks
     like the gland path's corner radius is measured as 0 on a filleted outline.
+12d. **Snap fits on wizard boxes.** `wizard::build` on the sample DXF board
+    (91 × 55 outline, height 30, closed shell, lid_split 20, 4 standoffs) with
+    `JointKind::SnapFit` (GUI defaults, `Count(4)`) fails "no snap-fit position could
+    be placed: blocked by a boss, rib, the lid/floor or another feature" ×4. Nothing
+    obvious blocks z 12–20 on the walls.
+12e. **Fragile joint/shell at one corner radius.** Same box from the sample STEP
+    board (rectangle outline, offset 2.5, sketch corners `corner_r`), edge_r 3,
+    tongue & groove: corner_r 5 → "groove depth 1.65 needs 2.05 of material but only
+    0.00 is available"; corner_r 3, 5.3, 6, 8 are fine. With edge_r 1 (< wall) the
+    closed shell fails as documented. Reproduce by setting `corner_r` to 5 in
+    `wizard::tests::builds_a_clean_enclosure_from_dxf_and_step`.
 
 ## Sketch
 
