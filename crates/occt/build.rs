@@ -27,6 +27,7 @@ fn main() {
 
     cxx_build::bridge("src/ffi.rs")
         .file("cpp/shim.cpp")
+        .file("cpp/thread.cpp")
         .include(&inc_dir)
         .include("cpp")
         .std("c++17")
@@ -47,4 +48,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=cpp/shim.cpp");
     println!("cargo:rerun-if-changed=cpp/shim.h");
+    println!("cargo:rerun-if-changed=cpp/thread.cpp");
 }

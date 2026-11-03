@@ -256,6 +256,7 @@ fn title_block_notes_balloons_parting_line_and_exports() {
             offset: 0.0.into(),
             auto_hole: None,
             target: Some(b),
+            threads: Default::default(),
         },
     );
     let split = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY.offset(12.0), new_name: "Lid".into(), offset: 0.0.into() });

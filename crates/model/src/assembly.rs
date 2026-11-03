@@ -1018,6 +1018,7 @@ impl Document {
                     offset: crate::params::Expr::new("0"),
                     auto_hole: None,
                     target: None,
+                    threads: Default::default(),
                 },
             };
             d.components.push(Component { id, name: name.clone(), features: vec![feature], locked: true, purchased: Some(part), ..Default::default() });

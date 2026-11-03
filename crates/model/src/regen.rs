@@ -15,7 +15,7 @@ use crate::document::{BlobStore, DocData};
 use crate::dxf::DxfDrawing;
 use crate::feature::*;
 use crate::geom::{Plane, Profile, Segment2};
-use crate::library::{local_mate, place, Library, PartInfo, PartInstance};
+use crate::library::{local_mate, place, HoleChoice, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
 use crate::process::{Fit, FitClass, ProcessProfile, TeardropStyle};
 use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
@@ -1181,8 +1181,13 @@ impl Ctx<'_> {
                     }
                 }
             }
-            FeatureKind::InsertPart { part, placements, flip, offset, auto_hole, target } => {
-                let inst = self.part(part)?;
+            FeatureKind::InsertPart { part, placements, flip, offset, auto_hole, target, threads } => {
+                let modeled = *threads == Threads::Modeled;
+                let inst = self.part(part, modeled)?;
+                let thread = if modeled { inst.modeled_thread() } else { None };
+                if modeled && thread.is_none() {
+                    self.warning = Some(format!("{} has no ISO or UN thread to model; its thread stays cosmetic", part.name));
+                }
                 let off = self.ev(offset)?;
                 let ti = self.target(st, *target).ok();
                 let mut holes = Vec::new();
@@ -1200,7 +1205,13 @@ impl Ctx<'_> {
                         if let Some((d, a)) = spec.countersink {
                             spec.countersink = Some((self.profile.resolve(d, fit), a));
                         }
-                        Some(spec)
+                        // a modelled tapped hole: the thread itself, opened up by the
+                        // fit's clearance at the minor diameter
+                        let tap = match (thread, ah.choice) {
+                            (Some(t), HoleChoice::Tap) => Some((t, (self.profile.resolve(t.minor(), fit) - t.minor()) / 2.0)),
+                            _ => None,
+                        };
+                        Some((spec, tap))
                     }
                     None => None,
                 };
@@ -1220,12 +1231,17 @@ impl Ctx<'_> {
                         part: Some(PartUse { feature: fid, part: part.clone() }),
                         geom: BodyGeom::new(placed),
                     });
-                    if let Some(spec) = &hole_spec {
+                    if let Some((spec, tap)) = &hole_spec {
                         let through = match ti {
                             Some(i) => st.bodies[i].shape().bbox()?.size().length() * 2.0 + 10.0,
                             None => 1000.0,
                         };
-                        holes.push(place(&spec.tool(through)?, origin, axis, 0.0)?);
+                        let tool = match tap {
+                            // threads only as deep as the body is big
+                            Some((t, clearance)) => crate::library::tap_tool(t, spec.depth.unwrap_or(through / 2.0), *clearance)?,
+                            None => spec.tool(through)?,
+                        };
+                        holes.push(place(&tool, origin, axis, 0.0)?);
                     }
                 }
                 if !holes.is_empty() {
@@ -1290,8 +1306,8 @@ impl Ctx<'_> {
         Ok(d)
     }
 
-    fn part(&mut self, r: &PartRef) -> R<Arc<PartInstance>> {
-        let key = format!("{}\u{1}{}\u{1}{}\u{1}{}", r.source, r.id, r.size, r.blob.clone().unwrap_or_default());
+    fn part(&mut self, r: &PartRef, modeled: bool) -> R<Arc<PartInstance>> {
+        let key = format!("{}\u{1}{}\u{1}{}\u{1}{}\u{1}{modeled}", r.source, r.id, r.size, r.blob.clone().unwrap_or_default());
         if let Some(p) = self.regen.parts.get(&key) {
             return Ok(p.clone());
         }
@@ -1328,6 +1344,8 @@ impl Ctx<'_> {
                 shape,
                 mate: local_mate(&entry),
             }
+        } else if modeled {
+            self.lib.build_threaded(&r.source, &r.id, &r.size)?
         } else {
             self.lib.build(&r.source, &r.id, &r.size)?
         };

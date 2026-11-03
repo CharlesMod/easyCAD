@@ -8,12 +8,14 @@
 
 mod ffi;
 pub mod dressup;
+pub mod thread;
 
 use cxx::UniquePtr;
 use ffi::bridge as raw;
 pub use glam::DVec3;
 
 pub use dressup::{DressUpKind, DressUpReport, EdgeOutcome, EdgeStatus, Strategy};
+pub use thread::Thread;
 
 /// A kernel error (wraps the C++ exception message).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -705,7 +707,7 @@ impl Shape {
         Ok(StyledStep {
             shape,
             parts: parts.into_iter().map(|p| StepPart { name: p.name, color: p.has_color.then_some([p.r, p.g, p.b]) }).collect(),
-            face_colors: rgba.chunks_exact(4).map(|c| (c[3] > 0.0).then_some([c[0], c[1], c[2]])).collect(),
+            face_colors: rgba.as_chunks::<4>().0.iter().map(|c| (c[3] > 0.0).then_some([c[0], c[1], c[2]])).collect(),
         })
     }
     /// Write the direct children of this compound as named, coloured STEP parts.

@@ -255,6 +255,11 @@ pub mod bridge {
         fn write_step_file(s: &Shape, path: &str) -> Result<()>;
         fn write_step_str(s: &Shape) -> Result<String>;
         fn write_stl_file(s: &Shape, path: &str, lin_defl: f64, ascii: bool) -> Result<()>;
+
+        /// Threaded rod along +Z from z = 0 to `length`: a core of radius `r_root`
+        /// plus a helical ridge out to `r_crest`, `w_root` wide at the root and
+        /// `w_crest` at the crest (cpp/thread.cpp).
+        fn thread_solid(r_root: f64, r_crest: f64, pitch: f64, length: f64, w_root: f64, w_crest: f64) -> Result<UniquePtr<Shape>>;
     }
 }
 

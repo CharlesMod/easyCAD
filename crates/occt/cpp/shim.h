@@ -147,4 +147,8 @@ void write_step_file(const Shape &s, rust::Str path);
 rust::String write_step_str(const Shape &s);
 void write_stl_file(const Shape &s, rust::Str path, double lin_defl, bool ascii);
 
+// thread.cpp
+std::unique_ptr<Shape> thread_solid(double r_root, double r_crest, double pitch, double length, double w_root,
+                                    double w_crest);
+
 } // namespace cw

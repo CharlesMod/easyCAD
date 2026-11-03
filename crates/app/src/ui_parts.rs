@@ -281,6 +281,7 @@ fn place(app: &mut EasyCadApp, keys: &[PickKey]) {
             offset: "0".into(),
             auto_hole,
             target,
+            threads: Default::default(),
         },
     };
     app.commit_features(&format!("Insert {size} ×{n}"), vec![feat], None);

@@ -39,6 +39,7 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
 - [ ] **[ui]** History strip hint when the active root has no features of its own.
 - [ ] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21).
+- [ ] **[ui]** "Modeled threads" toggle when placing a part (`FeatureKind::InsertPart.threads`).
 
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
@@ -51,7 +52,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] Closed loops of mates are checked, not solved.
 - [x] Pattern/mirror of whole-body features: fillets, chamfers and drafts follow the copies (selectors moved
       onto each instance); whole-body selectors, shell, split and joints get a precise "why not" error.
-- [ ] Threads are cosmetic only.
+- [x] Threads are cosmetic only: `InsertPart.threads = Modeled` gives ISO 68-1 / UN helical threads on screws,
+      nuts, inserts, standoffs and tapped auto-holes (cosmetic stays the default; ~1 s and ~16 k triangles per M3×10).
+      Not done: PT-screw thread form, thread runout, a Parts-screen toggle (see 4).
 
 ## 6. After the MVP
 - [x] Google Drive sync (`crates/sync`; in the app: File ▸ Settings ▸ Google Drive, status bar, conflict notices).

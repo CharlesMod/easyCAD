@@ -68,6 +68,7 @@ fn mirrored_parts_are_copied_and_counted() {
             offset: 0.0.into(),
             auto_hole: Some(AutoHole { choice: HoleChoice::Insert, depth: None, fit: None }),
             target: Some(p),
+            threads: Default::default(),
         },
     );
     let before = vol(&mut doc, p);

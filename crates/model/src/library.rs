@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use glam::DVec3;
-use occt::{Edge, Frame, Shape};
+use occt::{Edge, Frame, Shape, Thread};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -185,6 +185,14 @@ pub struct PartInstance {
 }
 
 impl PartInstance {
+    /// The standard (ISO / UN) thread a modelled-thread placement draws, if any.
+    pub fn modeled_thread(&self) -> Option<Thread> {
+        if self.info.tags.iter().any(|g| g == THREAD_FORMING) {
+            return None;
+        }
+        Thread::parse(self.mate.thread.as_deref()?)
+    }
+
     /// The hole this part needs in the mounting body.
     pub fn hole(&self, choice: HoleChoice) -> Result<HoleSpec, LibraryError> {
         if choice == HoleChoice::Pocket {
@@ -212,6 +220,11 @@ pub trait PartSource: Send + Sync {
     fn parts(&self) -> Vec<PartInfo>;
     fn sizes(&self, part_id: &str) -> Vec<String>;
     fn build(&self, part_id: &str, size: &str) -> Result<PartInstance, LibraryError>;
+    /// As [`PartSource::build`] with modelled (helical) threads where the part has a
+    /// standard thread. Sources whose geometry is fixed (STEP files) build as usual.
+    fn build_threaded(&self, part_id: &str, size: &str) -> Result<PartInstance, LibraryError> {
+        self.build(part_id, size)
+    }
     /// Original STEP file for a part, if it comes from one (documents embed it as a blob).
     fn step_file(&self, _part_id: &str) -> Option<PathBuf> {
         None
@@ -271,6 +284,9 @@ impl Library {
     }
     pub fn build(&self, source: &str, part: &str, size: &str) -> Result<PartInstance, LibraryError> {
         self.source(source).ok_or_else(|| LibraryError::UnknownPart(format!("{source}:{part}")))?.build(part, size)
+    }
+    pub fn build_threaded(&self, source: &str, part: &str, size: &str) -> Result<PartInstance, LibraryError> {
+        self.source(source).ok_or_else(|| LibraryError::UnknownPart(format!("{source}:{part}")))?.build_threaded(part, size)
     }
 }
 
@@ -771,9 +787,43 @@ fn dome(dk: f64, k: f64) -> Result<Shape, occt::Error> {
     f.revolve(DVec3::ZERO, DVec3::Z, 360.0)
 }
 
-fn build_shape(t: &Table, row: &Row, len: Option<f64>) -> Result<(Shape, Mate), LibraryError> {
+/// The thread to model for a row, if it has a standard (ISO / UN) one. Thread-forming
+/// screws for plastics have their own thread form and stay cosmetic.
+fn modeled_thread(t: &Table, row: &Row) -> Option<Thread> {
+    if t.tags.iter().any(|g| g == THREAD_FORMING) {
+        return None;
+    }
+    match t.generator {
+        Generator::Screw | Generator::HexNut | Generator::SquareNut | Generator::Standoff | Generator::Insert => Thread::parse(row.thread()),
+        _ => None,
+    }
+}
+
+const THREAD_FORMING: &str = "thread forming";
+
+/// A threaded rod (basic profile) along +Z from `z0` to `z0 + len`.
+fn rod(t: &Thread, z0: f64, len: f64) -> Result<Shape, occt::Error> {
+    Shape::thread_rod(t, len, 0.0)?.translated(DVec3::new(0.0, 0.0, z0))
+}
+
+/// The tool for a modelled tapped hole: surface at z = 0, `depth` deep along -Z,
+/// extended 1 mm above the surface like [`HoleSpec::tool`]. `offset` grows the
+/// thread radially (print clearance).
+pub fn tap_tool(t: &Thread, depth: f64, offset: f64) -> Result<Shape, occt::Error> {
+    Shape::thread_rod(t, depth + 1.0, offset)?.translated(DVec3::new(0.0, 0.0, -depth))
+}
+
+/// `modeled`: helical threads on shanks, studs and threaded bores (see [`modeled_thread`]).
+fn build_shape(t: &Table, row: &Row, len: Option<f64>, modeled: bool) -> Result<(Shape, Mate), LibraryError> {
     let u = |v: Option<f64>, what: &str| -> Result<f64, LibraryError> {
         v.map(|x| t.units.to_mm(x)).ok_or_else(|| LibraryError::Data(format!("{} {}: missing `{what}`", t.id, row.size)))
+    };
+    let th = if modeled { modeled_thread(t, row) } else { None };
+    // a threaded (or plain) shank of radius r from z0 up to z1; cut away, it leaves
+    // the matching threaded bore
+    let shank = |r: f64, z0: f64, z1: f64| match &th {
+        Some(t) => rod(t, z0, z1 - z0),
+        None => cyl(r, z0, z1),
     };
     let thread = Some(row.thread().to_string());
     let mut mate = Mate { thread, head: t.head, depth_below: 0.0, pocket: None };
@@ -794,7 +844,7 @@ fn build_shape(t: &Table, row: &Row, len: Option<f64>) -> Result<(Shape, Mate), 
                         h = h.cut(&socket(t.units.to_mm(s), k, 0.6 * k)?)?;
                     }
                     mate.depth_below = l;
-                    h.fuse(&cyl(d / 2.0, -l, 0.0)?)?.unify()?
+                    h.fuse(&shank(d / 2.0, -l, 0.0)?)?.unify()?
                 }
                 Head::Flat => {
                     let dk = u(row.dk, "dk")?;
@@ -805,22 +855,22 @@ fn build_shape(t: &Table, row: &Row, len: Option<f64>) -> Result<(Shape, Mate), 
                         h = h.cut(&socket(t.units.to_mm(s), 0.0, 0.7 * hk)?)?;
                     }
                     mate.depth_below = l;
-                    h.fuse(&cyl(d / 2.0, -l, -hk)?)?.unify()?
+                    h.fuse(&shank(d / 2.0, -l, -hk)?)?.unify()?
                 }
                 Head::None => {
                     let s = u(row.s, "s")?;
                     mate.depth_below = l;
-                    cyl(d / 2.0, -l, 0.0)?.cut(&socket(s, 0.0, (0.5 * l).min(d))?)?
+                    shank(d / 2.0, -l, 0.0)?.cut(&socket(s, 0.0, (0.5 * l).min(d))?)?
                 }
             }
         }
         Generator::HexNut => {
             let (d, s, m) = (u(row.d, "d")?, u(row.s, "s")?, u(row.m, "m")?);
-            hex_prism(s, 0.0, m)?.cut(&cyl(d / 2.0, -1.0, m + 1.0)?)?
+            hex_prism(s, 0.0, m)?.cut(&shank(d / 2.0, -1.0, m + 1.0)?)?
         }
         Generator::SquareNut => {
             let (d, s, m) = (u(row.d, "d")?, u(row.s, "s")?, u(row.m, "m")?);
-            Shape::make_box(DVec3::new(-s / 2.0, -s / 2.0, 0.0), DVec3::new(s, s, m))?.cut(&cyl(d / 2.0, -1.0, m + 1.0)?)?
+            Shape::make_box(DVec3::new(-s / 2.0, -s / 2.0, 0.0), DVec3::new(s, s, m))?.cut(&shank(d / 2.0, -1.0, m + 1.0)?)?
         }
         Generator::Washer | Generator::SplitWasher => {
             let (d1, d2, h) = (u(row.d1, "d1")?, u(row.d2, "d2")?, u(row.h, "h")?);
@@ -836,21 +886,25 @@ fn build_shape(t: &Table, row: &Row, len: Option<f64>) -> Result<(Shape, Mate), 
             let l = u(len, "length")?;
             // cosmetic thread: holes at ~tap-drill size
             let minor = d * 0.82;
+            let bore = |z0: f64, z1: f64| match &th {
+                Some(t) => rod(t, z0, z1 - z0),
+                None => cyl(minor / 2.0, z0, z1),
+            };
             let mut so = hex_prism(s, 0.0, l)?;
             if t.variant.as_deref() == Some("mf") {
                 let ml = u(row.male_l, "male_l")?;
-                so = so.cut(&cyl(minor / 2.0, (l - 1.5 * d).max(l * 0.4), l + 1.0)?)?;
-                so = so.fuse(&cyl(d / 2.0, -ml, 0.0)?)?.unify()?;
+                so = so.cut(&bore((l - 1.5 * d).max(l * 0.4), l + 1.0)?)?;
+                so = so.fuse(&shank(d / 2.0, -ml, 0.0)?)?.unify()?;
                 mate.depth_below = ml;
             } else {
-                so = so.cut(&cyl(minor / 2.0, -1.0, l + 1.0)?)?;
+                so = so.cut(&bore(-1.0, l + 1.0)?)?;
             }
             so
         }
         Generator::Insert => {
             let (d, od, l) = (u(row.d, "d")?, u(row.od, "od")?, u(row.l, "l")?);
             mate.depth_below = l;
-            cyl(od / 2.0, -l, 0.0)?.cut(&cyl(d / 2.0, -l - 1.0, 1.0)?)?
+            cyl(od / 2.0, -l, 0.0)?.cut(&shank(d / 2.0, -l - 1.0, 1.0)?)?
         }
         Generator::Magnet => {
             let (od, l) = (u(row.od, "od")?, u(row.l, "l")?);
@@ -901,7 +955,13 @@ impl PartSource for BuiltinSource {
     fn build(&self, part_id: &str, size: &str) -> Result<PartInstance, LibraryError> {
         let t = self.table(part_id)?;
         let (row, len) = t.row(size).ok_or_else(|| LibraryError::UnknownSize { part: part_id.into(), size: size.into() })?;
-        let (shape, mate) = build_shape(t, row, len)?;
+        let (shape, mate) = build_shape(t, row, len, false)?;
+        Ok(PartInstance { info: t.info(), size: size.into(), shape, mate })
+    }
+    fn build_threaded(&self, part_id: &str, size: &str) -> Result<PartInstance, LibraryError> {
+        let t = self.table(part_id)?;
+        let (row, len) = t.row(size).ok_or_else(|| LibraryError::UnknownSize { part: part_id.into(), size: size.into() })?;
+        let (shape, mate) = build_shape(t, row, len, true)?;
         Ok(PartInstance { info: t.info(), size: size.into(), shape, mate })
     }
 }
