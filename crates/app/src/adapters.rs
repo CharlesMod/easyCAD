@@ -179,6 +179,23 @@ pub fn values(d: &DocData) -> Values {
     d.values().unwrap_or_default()
 }
 
+/// Replace a process profile in place (or append a new one) under an undo label
+/// that says what changed. `Document::add_profile` moves the profile to the end
+/// of the list, which reorders the profile picker on every edit.
+pub fn update_profile(
+    doc: &mut Document,
+    label: &str,
+    p: casework_model::process::ProcessProfile,
+) {
+    let _ = doc.edit(label, |d| {
+        match d.processes.iter_mut().find(|q| q.name == p.name) {
+            Some(q) => *q = p,
+            None => d.processes.push(p),
+        }
+        Ok::<_, casework_model::document::DocError>(())
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

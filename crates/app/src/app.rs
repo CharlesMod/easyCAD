@@ -868,7 +868,8 @@ impl CaseworkApp {
         if let Some((p, t)) = self.pending_profile.clone() {
             if self.now >= t {
                 self.pending_profile = None;
-                self.doc.add_profile(p);
+                let label = format!("Fit allowances ({})", p.name);
+                adapters::update_profile(&mut self.doc, &label, p);
                 self.after_edit();
             } else {
                 ui.ctx()

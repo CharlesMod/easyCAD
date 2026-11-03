@@ -60,8 +60,8 @@ fn kind_name(k: ProcessKind) -> &'static str {
     }
 }
 
-fn commit_profile(app: &mut CaseworkApp, p: ProcessProfile) {
-    app.doc.add_profile(p);
+fn commit_profile(app: &mut CaseworkApp, label: &str, p: ProcessProfile) {
+    crate::adapters::update_profile(&mut app.doc, label, p);
     app.after_edit();
 }
 
@@ -159,13 +159,27 @@ pub fn process_section(app: &mut CaseworkApp, ui: &mut Ui) {
                     let r = &m.result.process;
                     let n = r.teardropped.len();
                     let s = r.skipped.len();
-                    ui.label(widgets::muted(format!("{n} hole{} teardropped{}", if n == 1 { "" } else { "s" }, if s > 0 { format!(" · {s} skipped") } else { String::new() })));
+                    let l = ui.label(widgets::muted(format!("{n} hole{} teardropped{}", if n == 1 { "" } else { "s" }, if s > 0 { format!(" · {s} skipped") } else { String::new() })));
+                    if s > 0 {
+                        // why, grouped: "8 × not horizontal"
+                        let mut why: std::collections::BTreeMap<&str, usize> = Default::default();
+                        for (_, reason) in &r.skipped {
+                            *why.entry(reason.as_str()).or_default() += 1;
+                        }
+                        let tip = why.iter().map(|(w, k)| format!("{k} × {w}")).collect::<Vec<_>>().join("\n");
+                        l.on_hover_text(format!("Skipped holes:\n{tip}"));
+                    }
                 }
             }
             if ch {
+                let label = if td.enabled != active.teardrop.enabled {
+                    if td.enabled { "Teardrops on" } else { "Teardrops off" }
+                } else {
+                    "Teardrop style"
+                };
                 let mut p = active.clone();
                 p.teardrop = td;
-                commit_profile(app, p);
+                commit_profile(app, label, p);
             }
         }
     });

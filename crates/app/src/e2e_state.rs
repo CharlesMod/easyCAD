@@ -154,6 +154,8 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "redo": app.doc.redo_label(),
         "profile": app.doc.data.active_profile,
         "teardrops": app.doc.data.profile().teardrop.enabled,
+        "teardrop_style": format!("{:?}", app.doc.data.profile().teardrop.style),
+        "profiles": app.doc.data.processes.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
         "params": app.doc.data.params.list.iter().map(|p| (p.name.clone(), Value::String(p.expr.0.clone()))).collect::<serde_json::Map<_, _>>(),
         "features": app.doc.data.features.iter().map(|f| {
             let st = app.feature_status(f.id).map(|s| match s {
