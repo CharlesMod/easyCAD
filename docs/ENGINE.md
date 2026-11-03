@@ -512,6 +512,22 @@ Work in progress; see the BREAKING "Assemblies" entry in the changelog.
   `assembly::solve_mates(&DocData)` is the dry run.
 - **Explode.** `Occurrence.explode` (parent frame, mm) only changes
   `Instance.display`; mates, interference, BOM and export use `transform`.
+- **Interference.** `Document::interference(&InterferenceOptions { include_reference
+  (true), include_hidden (false), min_volume (1e-3 mm³) }) -> InterferenceReport
+  { pairs: Vec<Interference { a, b: InstanceRef { path, body, label }, volume }>,
+  tested, culled, failed }`. Every pair of instances on different occurrence paths
+  is culled by world bounding boxes, then intersected exactly (kernel `common`,
+  on parallel threads). Touching faces are not interference.
+- **BOM.** `Document::bom_tree() -> AssemblyBom { indented, flat }` of
+  `AsmBomRow { level, component, name, qty (per parent), total (rolled up), kind }`
+  with `BomKind::{Made { process }, Purchased { source, part, size, vendor,
+  part_number }, Assembly}`. Purchased = a component with `purchased` (library part
+  components, STEP references) or a library part inserted by an `InsertPart`
+  feature inside a component; purchased components are not expanded. Made rows carry
+  the component's `process` or the document's active profile. Occurrences with
+  `in_bom = false` (and everything under them) are left out. The flat BOM sums
+  totals per component / part, made first. The old `Document::bom()` (root bodies
+  only) is unchanged.
 
 ## File format (`.cwk`), sync-friendly
 

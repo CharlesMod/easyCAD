@@ -353,3 +353,56 @@ fn over_constrained_unsolved_planar_snap_and_explode() {
     assert_eq!(i.transform, before);
     assert!((i.display.translation - before.translation - DVec3::Z * 30.0).length() < 1e-9);
 }
+
+#[test]
+fn interference_detected_then_cleared() {
+    let (mut doc, [ob, ol, os], [hinge, _]) = hinge_doc();
+    assert!(doc.solve_mates().ok());
+    // closed, the lid sits on the slider block: found
+    let rep = doc.interference(&InterferenceOptions::default());
+    assert_eq!(rep.pairs.len(), 1);
+    assert!(rep.pairs[0].a.path == vec![ol] || rep.pairs[0].b.path == vec![ol]);
+    doc.edit_mate(hinge, "open", |m| m.angle = (-90.0).into()).unwrap();
+    assert!(doc.solve_mates().ok());
+    let rep = doc.interference(&InterferenceOptions::default());
+    assert!(rep.pairs.is_empty(), "touching is not interfering: {:?}", rep.pairs);
+    assert!(rep.culled > 0);
+    // sink the slider block 2 mm into the base top
+    doc.edit_occurrence(os, "sink", |o| o.transform.translation.z -= 2.0).unwrap();
+    let rep = doc.interference(&InterferenceOptions::default());
+    assert_eq!(rep.pairs.len(), 1, "{:?}", rep.pairs);
+    let p = &rep.pairs[0];
+    assert!((p.volume - 10.0 * 10.0 * 2.0).abs() < 1.0, "{}", p.volume);
+    let paths = [p.a.path.clone(), p.b.path.clone()];
+    assert!(paths.contains(&vec![ob]) && paths.contains(&vec![os]));
+    assert!(p.a.label.contains(':') && p.b.label.contains(':'), "{} / {}", p.a.label, p.b.label);
+    // the mates put it back: cleared
+    assert!(doc.solve_mates().ok());
+    assert!(doc.interference(&InterferenceOptions::default()).pairs.is_empty());
+    // hidden occurrences are skipped
+    doc.edit_occurrence(os, "sink", |o| o.transform.translation.z -= 2.0).unwrap();
+    doc.edit_occurrence(os, "hide", |o| o.visible = false).unwrap();
+    assert!(doc.interference(&InterferenceOptions::default()).pairs.is_empty());
+}
+
+#[test]
+fn bom_rolls_up_quantities() {
+    let (mut doc, bracket, screw, _) = bracket_assembly();
+    doc.edit_component(bracket, "process", |c| c.process = Some("FDM 0.4 generic".into())).unwrap();
+    let bom = doc.bom_tree();
+    let ind: Vec<(usize, &str, usize, usize)> = bom.indented.iter().map(|r| (r.level, r.name.as_str(), r.qty, r.total)).collect();
+    assert_eq!(ind[0], (0, "Bracket", 2, 2), "{ind:?}");
+    assert_eq!(ind[1].0, 1);
+    assert_eq!((ind[1].2, ind[1].3), (4, 8), "{ind:?}");
+    assert_eq!(bom.indented[1].component, Some(screw));
+    assert_eq!(bom.indented[0].kind, BomKind::Made { process: "FDM 0.4 generic".into() });
+    assert!(matches!(&bom.indented[1].kind, BomKind::Purchased { part, size, .. } if part == "iso4762" && size == "M3x10"));
+    assert_eq!(bom.flat.len(), 2);
+    assert_eq!((bom.flat[0].name.as_str(), bom.flat[0].total), ("Bracket", 2));
+    assert_eq!(bom.flat[1].total, 8);
+    // an occurrence excluded from the BOM drops out with its children
+    let first = doc.data.occurrences[0].id;
+    doc.edit_occurrence(first, "exclude", |o| o.in_bom = false).unwrap();
+    let bom = doc.bom_tree();
+    assert_eq!(bom.flat.iter().map(|r| r.total).collect::<Vec<_>>(), vec![1, 4]);
+}

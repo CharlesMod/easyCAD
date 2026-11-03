@@ -1097,3 +1097,228 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
     let tf = moved.into_iter().map(|id| (id, cur[&id])).collect();
     (tf, rep)
 }
+
+// ---------------------------------------------------------------- interference
+
+/// One placed body named for reports.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct InstanceRef {
+    pub path: OccPath,
+    pub body: crate::feature::BodyId,
+    /// "Base:1 / Body".
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Interference {
+    pub a: InstanceRef,
+    pub b: InstanceRef,
+    /// Volume of the common solid (mm³).
+    pub volume: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct InterferenceReport {
+    pub pairs: Vec<Interference>,
+    /// Pairs whose bounding boxes overlapped and were intersected exactly.
+    pub tested: usize,
+    /// Pairs rejected by the bounding-box test.
+    pub culled: usize,
+    /// Pairs the kernel could not intersect (with the reason).
+    pub failed: Vec<(InstanceRef, InstanceRef, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InterferenceOptions {
+    /// Include reference bodies (PCBs, library parts). Default true.
+    pub include_reference: bool,
+    /// Include hidden occurrences. Default false.
+    pub include_hidden: bool,
+    /// Smallest common volume reported (mm³). Default 1e-3.
+    pub min_volume: f64,
+}
+
+impl Default for InterferenceOptions {
+    fn default() -> Self {
+        InterferenceOptions { include_reference: true, include_hidden: false, min_volume: 1e-3 }
+    }
+}
+
+/// Interference between instances of different occurrences: bounding-box cull, then
+/// the exact common volume (pairs run on parallel threads).
+pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions) -> InterferenceReport {
+    let inst: Vec<&Instance> = r.instances.iter().filter(|i| (opts.include_hidden || i.visible) && (opts.include_reference || !i.body.reference)).collect();
+    let mut placed = Vec::new();
+    let mut rep = InterferenceReport::default();
+    for i in &inst {
+        let rf = InstanceRef { path: i.path.clone(), body: i.body.id, label: i.label(d) };
+        match i.world_shape().and_then(|s| s.bbox().map(|b| (s, b))) {
+            Ok((s, b)) => placed.push((rf, s, b)),
+            Err(e) => rep.failed.push((rf.clone(), rf, e.to_string())),
+        }
+    }
+    let mut todo = Vec::new();
+    for x in 0..placed.len() {
+        for y in x + 1..placed.len() {
+            if placed[x].0.path == placed[y].0.path {
+                continue;
+            }
+            let (a, b) = (&placed[x].2, &placed[y].2);
+            let overlap = (0..3).all(|k| a.min[k] < b.max[k] - 1e-6 && b.min[k] < a.max[k] - 1e-6);
+            if overlap {
+                todo.push((x, y));
+            } else {
+                rep.culled += 1;
+            }
+        }
+    }
+    rep.tested = todo.len();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 8);
+    let chunk = todo.len().div_ceil(threads).max(1);
+    let placed = &placed;
+    let results: Vec<(usize, usize, Result<f64, String>)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = todo
+            .chunks(chunk)
+            .map(|ch| {
+                sc.spawn(move || {
+                    ch.iter()
+                        .map(|&(x, y)| {
+                            let v = placed[x].1.common(&placed[y].1).and_then(|c| if c.count(occt::ShapeKind::Solid) == 0 { Ok(0.0) } else { c.volume() });
+                            (x, y, v.map_err(|e| e.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    for (x, y, v) in results {
+        match v {
+            Ok(v) if v > opts.min_volume => rep.pairs.push(Interference { a: placed[x].0.clone(), b: placed[y].0.clone(), volume: v }),
+            Ok(_) => {}
+            Err(e) => rep.failed.push((placed[x].0.clone(), placed[y].0.clone(), e)),
+        }
+    }
+    rep
+}
+
+impl Document {
+    /// Interference between the occurrences of the regenerated assembly.
+    pub fn interference(&mut self, opts: &InterferenceOptions) -> InterferenceReport {
+        let r = self.regenerate_assembly().clone();
+        interference(&self.data, &r, opts)
+    }
+}
+
+// ---------------------------------------------------------------- BOM
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum BomKind {
+    /// Made in house with this process profile.
+    Made { process: String },
+    /// Bought (library part, PCB, other STEP reference).
+    Purchased { source: String, part: String, size: String, vendor: Option<String>, part_number: Option<String> },
+    /// A sub-assembly with no bodies of its own.
+    Assembly,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AsmBomRow {
+    /// Depth in the indented BOM (0 = directly in the root); 0 in the flat BOM.
+    pub level: usize,
+    /// The component (None for library parts inserted by an `InsertPart` feature).
+    pub component: Option<ComponentId>,
+    pub name: String,
+    /// Quantity per parent (indented) or 0 (flat).
+    pub qty: usize,
+    /// Rolled-up quantity in the whole assembly.
+    pub total: usize,
+    pub kind: BomKind,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct AssemblyBom {
+    pub indented: Vec<AsmBomRow>,
+    /// One row per distinct component / part, sorted made-first then by name.
+    pub flat: Vec<AsmBomRow>,
+}
+
+fn part_kind(p: &PartRef) -> BomKind {
+    BomKind::Purchased { source: p.source.clone(), part: p.id.clone(), size: p.size.clone(), vendor: p.vendor.clone(), part_number: p.part_number.clone() }
+}
+
+/// BOM of the occurrence tree (occurrences with `in_bom`), quantities rolled up.
+pub fn bom(d: &DocData, r: &AssemblyResult) -> AssemblyBom {
+    let mut out = AssemblyBom::default();
+    fn rec(d: &DocData, r: &AssemblyResult, comp: ComponentId, level: usize, mult: usize, out: &mut AssemblyBom) {
+        if level > 64 {
+            return;
+        }
+        // library parts placed by features inside this component
+        if d.component(comp).is_none_or(|c| c.purchased.is_none()) {
+            let mut parts: Vec<(PartRef, usize)> = Vec::new();
+            if let Some(cr) = r.component(comp) {
+                for b in &cr.regen.bodies {
+                    if let Some(pu) = &b.part {
+                        match parts.iter_mut().find(|(p, _)| p.source == pu.part.source && p.id == pu.part.id && p.size == pu.part.size) {
+                            Some(e) => e.1 += 1,
+                            None => parts.push((pu.part.clone(), 1)),
+                        }
+                    }
+                }
+            }
+            for (p, n) in parts {
+                out.indented.push(AsmBomRow { level, component: None, name: format!("{} {}", p.name, p.size), qty: n, total: n * mult, kind: part_kind(&p) });
+            }
+        }
+        let Some(kids) = d.children_of(comp) else { return };
+        let mut groups: Vec<(ComponentId, usize)> = Vec::new();
+        for o in kids.iter().filter(|o| o.in_bom) {
+            match groups.iter_mut().find(|g| g.0 == o.component) {
+                Some(g) => g.1 += 1,
+                None => groups.push((o.component, 1)),
+            }
+        }
+        for (cid, n) in groups {
+            let Some(c) = d.component(cid) else { continue };
+            let has_solid = r.component(cid).is_some_and(|cr| cr.regen.bodies.iter().any(|b| !b.reference));
+            let kind = match &c.purchased {
+                Some(p) => part_kind(p),
+                None if !has_solid && !c.children.is_empty() => BomKind::Assembly,
+                None => BomKind::Made { process: c.process.clone().unwrap_or_else(|| d.active_profile.clone()) },
+            };
+            let purchased = c.purchased.is_some();
+            out.indented.push(AsmBomRow { level, component: Some(cid), name: c.name.clone(), qty: n, total: n * mult, kind });
+            if !purchased {
+                rec(d, r, cid, level + 1, n * mult, out);
+            }
+        }
+    }
+    rec(d, r, ComponentId::ROOT, 0, 1, &mut out);
+    for row in &out.indented {
+        let same = |f: &AsmBomRow| match (&row.component, &f.component) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => row.kind == f.kind,
+            _ => false,
+        };
+        match out.flat.iter_mut().find(|f| same(f)) {
+            Some(f) => f.total += row.total,
+            None => out.flat.push(AsmBomRow { level: 0, qty: 0, ..row.clone() }),
+        }
+    }
+    let rank = |k: &BomKind| match k {
+        BomKind::Made { .. } => 0,
+        BomKind::Assembly => 1,
+        BomKind::Purchased { .. } => 2,
+    };
+    out.flat.sort_by(|a, b| (rank(&a.kind), &a.name).cmp(&(rank(&b.kind), &b.name)));
+    out
+}
+
+impl Document {
+    /// Indented and flat BOM of the assembly (see [`bom`]).
+    pub fn bom_tree(&mut self) -> AssemblyBom {
+        let r = self.regenerate_assembly().clone();
+        bom(&self.data, &r)
+    }
+}
