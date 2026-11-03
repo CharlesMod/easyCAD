@@ -12,7 +12,8 @@ use glam::{DQuat, DVec2, DVec3};
 
 fn block(doc: &mut Document, comp: ComponentId, name: &str, size: (&str, &str, &str), at: DVec2) -> FeatureId {
     let mut s = Sketch::new(name, Plane::XY);
-    s.rounded_rect(at, size.0, size.1, "0.5", (10.0, 10.0, 0.5));
+    let g = |e: &str| e.parse::<f64>().unwrap_or(10.0);
+    s.rounded_rect(at, size.0, size.1, "0.5", (g(size.0), g(size.1), 0.5));
     let sk = doc.add_sketch_in(comp, s).unwrap();
     doc.add_feature_in(
         comp,
@@ -226,4 +227,129 @@ fn in_context_cycle_is_reported() {
     doc.edit_component(base, "suppress", |c| c.features.iter_mut().find(|x| x.id == f).unwrap().suppressed = true).unwrap();
     let r = doc.regenerate_assembly();
     assert!(r.issues.is_empty() && r.errors().is_empty(), "{:?}", r.errors());
+}
+
+/// Base box (grounded), a hinged lid (revolute) and a slider block on top.
+fn hinge_doc() -> (Document, [OccurrenceId; 3], [MateId; 2]) {
+    let mut doc = Document::new("Hinge");
+    let base = doc.add_component("Base");
+    block(&mut doc, base, "Box", ("60", "40", "20"), DVec2::ZERO);
+    let lid = doc.add_component("Lid");
+    block(&mut doc, lid, "Plate", ("60", "40", "2"), DVec2::ZERO);
+    let slide = doc.add_component("Slide");
+    block(&mut doc, slide, "Block", ("10", "10", "5"), DVec2::ZERO);
+    let ob = doc.add_occurrence(ComponentId::ROOT, base, "Base:1", Transform::IDENTITY).unwrap();
+    doc.edit_occurrence(ob, "ground", |o| o.grounded = true).unwrap();
+    // start somewhere arbitrary: the solver puts them in place
+    let ol = doc.add_occurrence(ComponentId::ROOT, lid, "Lid:1", Transform::new(DQuat::from_rotation_y(0.4), DVec3::new(7.0, -30.0, 80.0))).unwrap();
+    let os = doc.add_occurrence(ComponentId::ROOT, slide, "Slide:1", Transform::translation(DVec3::new(-50.0, 50.0, 3.0))).unwrap();
+    // hinge axis: the base's top back edge (y = 20, z = 20) and the lid's bottom back edge
+    let hinge = doc.add_mate(
+        "Hinge",
+        MateKind::Revolute,
+        MateConnector::new(vec![ob], DVec3::new(0.0, 20.0, 20.0), DVec3::X),
+        MateConnector::new(vec![ol], DVec3::new(0.0, 20.0, 0.0), DVec3::X),
+        false,
+    );
+    // slider along X on the base top
+    let slider = doc.add_mate(
+        "Rail",
+        MateKind::Slider,
+        MateConnector::new(vec![ob], DVec3::new(-20.0, 0.0, 20.0), DVec3::X),
+        MateConnector::point(vec![os], DVec3::ZERO).clone_with_z(DVec3::X),
+        false,
+    );
+    (doc, [ob, ol, os], [hinge, slider])
+}
+
+trait WithZ {
+    fn clone_with_z(&self, z: DVec3) -> Self;
+}
+impl WithZ for MateConnector {
+    fn clone_with_z(&self, z: DVec3) -> Self {
+        MateConnector::new(self.occurrence.clone(), self.origin, z)
+    }
+}
+
+fn world_bbox(doc: &mut Document, occ: OccurrenceId) -> casework_model::occt::BBox {
+    let r = doc.regenerate_assembly();
+    assert!(r.errors().is_empty(), "{:?} {:?}", r.errors(), r.instances.iter().map(|i| i.path.clone()).collect::<Vec<_>>());
+    r.instances_of(&[occ]).next().unwrap().world_shape().unwrap().bbox().unwrap()
+}
+
+#[test]
+fn revolute_hinge_and_slider() {
+    let (mut doc, [_ob, ol, os], [hinge, slider]) = hinge_doc();
+    let rep = doc.solve_mates();
+    assert!(rep.ok(), "{rep:?}");
+    assert_eq!(rep.moved.len(), 2);
+    assert_eq!(doc.undo_label(), Some("Solve mates"));
+    // closed: the lid lies on the base top
+    let bb = world_bbox(&mut doc, ol);
+    assert!((bb.min.z - 20.0).abs() < 1e-6 && (bb.max.z - 22.0).abs() < 1e-6, "{bb:?}");
+    assert!((bb.min.x + 30.0).abs() < 1e-6 && (bb.min.y + 20.0).abs() < 1e-6, "{bb:?}");
+    // open 90°: the lid stands up behind the hinge
+    doc.edit_mate(hinge, "open", |m| m.angle = (-90.0).into()).unwrap();
+    assert!(doc.solve_mates().ok());
+    let bb = world_bbox(&mut doc, ol);
+    assert!((bb.size().z - 40.0).abs() < 1e-6 && (bb.size().y - 2.0).abs() < 1e-6, "{bb:?}");
+    assert!((bb.min.z - 20.0).abs() < 1e-6, "{bb:?}");
+    // the slider block runs along the rail by its drive value
+    let x0 = world_bbox(&mut doc, os).min.x;
+    doc.edit_mate(slider, "slide", |m| m.distance = "15".into()).unwrap();
+    assert!(doc.solve_mates().ok());
+    let x1 = world_bbox(&mut doc, os).min.x;
+    assert!((x1 - x0 - 15.0).abs() < 1e-6, "{x0} -> {x1}");
+    let bb = world_bbox(&mut doc, os);
+    assert!((bb.min.z - 20.0).abs() < 1e-6 && bb.center().y.abs() < 1e-6, "{bb:?}");
+    // solving again changes nothing
+    assert!(doc.solve_mates().moved.is_empty());
+}
+
+#[test]
+fn over_constrained_unsolved_planar_snap_and_explode() {
+    let (mut doc, [ob, ol, os], _) = hinge_doc();
+    assert!(doc.solve_mates().ok());
+    // a rigid mate that contradicts the hinge
+    let bad = doc.add_mate(
+        "Bad",
+        MateKind::Rigid,
+        MateConnector::point(vec![ob], DVec3::new(0.0, 0.0, 30.0)),
+        MateConnector::point(vec![ol], DVec3::ZERO),
+        false,
+    );
+    let rep = doc.solve_mates();
+    let st = &rep.mates.iter().find(|m| m.mate == bad).unwrap().status;
+    assert!(matches!(st, MateStatus::OverConstrained(m) if m.contains("off by")), "{st:?}");
+    doc.edit_mate(bad, "off", |m| m.suppressed = true).unwrap();
+    assert!(doc.solve_mates().ok());
+    // two loose parts mated only to each other: unsolved, reported as floating
+    let loose = doc.add_component("Loose");
+    block(&mut doc, loose, "L", ("5", "5", "5"), DVec2::ZERO);
+    let o1 = doc.add_occurrence(ComponentId::ROOT, loose, "Loose:1", Transform::IDENTITY).unwrap();
+    let o2 = doc.add_occurrence(ComponentId::ROOT, loose, "Loose:2", Transform::IDENTITY).unwrap();
+    doc.add_mate("Pair", MateKind::Ball, MateConnector::point(vec![o1], DVec3::ZERO), MateConnector::point(vec![o2], DVec3::ZERO), false);
+    let rep = doc.solve_mates();
+    assert!(!rep.ok());
+    assert!(rep.mates.iter().any(|m| matches!(&m.status, MateStatus::Unsolved(r) if r.contains("grounded"))), "{rep:?}");
+    assert!(rep.floating.contains(&o1) && rep.floating.contains(&o2));
+    // snap to a planar face: put Loose:1 on the base top face (faces touching)
+    let base_shape = doc.regenerate_assembly().instances_of(&[ob]).next().unwrap().body.shape().clone();
+    let top = base_shape.faces().unwrap().into_iter().max_by(|a, b| a.centroid.z.total_cmp(&b.centroid.z)).unwrap();
+    let loose_shape = doc.regenerate_assembly().instances_of(&[o1]).next().unwrap().body.shape().clone();
+    let bottom = loose_shape.faces().unwrap().into_iter().min_by(|a, b| a.centroid.z.total_cmp(&b.centroid.z)).unwrap();
+    doc.add_mate("On top", MateKind::Planar, MateConnector::from_face(vec![ob], &top), MateConnector::from_face(vec![o1], &bottom), true);
+    let rep = doc.solve_mates();
+    assert_eq!(rep.mates.iter().find(|m| m.name == "On top").unwrap().status, MateStatus::Solved, "{rep:?}");
+    assert_eq!(rep.mates.iter().find(|m| m.name == "Pair").unwrap().status, MateStatus::Solved, "now reachable through Loose:1");
+    assert!(rep.ok() && rep.floating.is_empty());
+    let bb = world_bbox(&mut doc, o1);
+    assert!((bb.min.z - 20.0).abs() < 1e-6 && (bb.max.z - 25.0).abs() < 1e-6, "{bb:?}");
+    // explode is display only
+    let before = doc.regenerate_assembly().instances_of(&[os]).next().unwrap().transform;
+    doc.edit_occurrence(os, "explode", |o| o.explode = DVec3::Z * 30.0).unwrap();
+    let r = doc.regenerate_assembly();
+    let i = r.instances_of(&[os]).next().unwrap();
+    assert_eq!(i.transform, before);
+    assert!((i.display.translation - before.translation - DVec3::Z * 30.0).length() < 1e-9);
 }

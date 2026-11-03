@@ -489,6 +489,29 @@ Work in progress; see the BREAKING "Assemblies" entry in the changelog.
   components form a graph; a cycle is reported in `AssemblyResult.issues`
   ("in-context dependency cycle: Base -> Lid -> Base") and each `ContextRef` on it
   fails with the same message. The rest of the assembly still regenerates.
+- **Mates** (not "joints", which are parting joints). `Mate { id, name, kind, a, b,
+  flip, angle, distance, suppressed }` with `MateKind::{Rigid, Revolute, Slider,
+  Planar, Cylindrical, Ball}` (`dof()` = 0, 1, 1, 3, 2, 3). A `MateConnector
+  { occurrence: OccPath, origin, z, x }` is a frame in that occurrence's component
+  frame; snap with `MateConnector::from_face(path, &FaceInfo)` (centroid, outward
+  normal), `from_circular_edge(path, &EdgeInfo)` (centre, axis) or
+  `point(path, p)` / `new(path, origin, z)`. The mate puts `b`'s frame on `a`'s
+  (`flip` turns `b` over, so touching faces face each other), then applies the
+  motion: Rigid = `distance` along z; Revolute = `angle` about z (+ `distance`);
+  Slider = `distance` along z; Cylindrical, Planar (+ `distance` gap) and Ball keep
+  the current position in their free directions.
+  `Document::{add_mate, edit_mate, solve_mates() -> MateSolve}`. The solver holds
+  grounded top-level occurrences (and the root's own bodies) fixed and propagates:
+  a mate with one placed side moves the other side's *top-level* occurrence (a
+  sub-assembly moves rigidly). Both sides already placed → `Redundant` or
+  `OverConstrained("off by 1.234 mm / 5.00° ...")`; never reached →
+  `Unsolved("neither side is connected to a grounded occurrence")` and the
+  occurrences are listed in `MateSolve.floating`. With nothing grounded the first
+  mated occurrence is held (noted in `MateSolve.notes`). The solved transforms are
+  written as one undo step "Solve mates" (nothing is written when nothing moves);
+  `assembly::solve_mates(&DocData)` is the dry run.
+- **Explode.** `Occurrence.explode` (parent frame, mm) only changes
+  `Instance.display`; mates, interference, BOM and export use `transform`.
 
 ## File format (`.cwk`), sync-friendly
 

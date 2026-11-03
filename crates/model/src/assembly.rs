@@ -7,7 +7,7 @@
 //! regenerates in its own local frame with its own regeneration cache; an occurrence
 //! places a component in its parent's frame with a rigid [`Transform`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DAffine3, DMat3, DQuat, DVec3};
 use occt::Shape;
@@ -254,10 +254,11 @@ pub struct Mate {
     /// Turn `b` over (z reversed): faces that touch face each other.
     #[serde(default)]
     pub flip: bool,
-    /// Revolute/Cylindrical drive value (degrees about z).
+    /// Revolute drive value (degrees about z). Cylindrical, Planar and Ball keep
+    /// their current position in their free directions.
     #[serde(default = "zero")]
     pub angle: crate::params::Expr,
-    /// Slider/Cylindrical drive value (mm along z), also the gap of Planar/Rigid.
+    /// Slider drive value (mm along z), also the z gap of Rigid, Revolute and Planar.
     #[serde(default = "zero")]
     pub distance: crate::params::Expr,
     #[serde(default)]
@@ -583,8 +584,8 @@ impl AssemblyResult {
         self.components.iter().find(|c| c.component == id)
     }
     /// Instances of one occurrence path (its component's bodies, placed).
-    pub fn instances_of<'a>(&'a self, path: &'a [OccurrenceId]) -> impl Iterator<Item = &'a Instance> + 'a {
-        self.instances.iter().filter(move |i| i.path == path)
+    pub fn instances_of(&self, path: &[OccurrenceId]) -> std::vec::IntoIter<&Instance> {
+        self.instances.iter().filter(|i| i.path == path).collect::<Vec<_>>().into_iter()
     }
     /// Every feature error of every component, plus structural issues.
     pub fn errors(&self) -> Vec<String> {
@@ -853,4 +854,246 @@ impl Document {
             Ok::<_, DocError>(id)
         })
     }
+}
+
+// ---------------------------------------------------------------- mates
+
+/// Outcome of one mate in [`Document::solve_mates`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum MateStatus {
+    /// Placed its moving occurrence.
+    Solved,
+    /// Both sides were already placed and the mate holds.
+    Redundant,
+    /// Both sides were already placed and the mate does not hold (by how much).
+    OverConstrained(String),
+    /// Not solvable (neither side reaches a grounded occurrence, bad path, ...).
+    Unsolved(String),
+    Suppressed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MateReport {
+    pub mate: MateId,
+    pub name: String,
+    pub status: MateStatus,
+    /// Degrees of freedom the mate leaves (`MateKind::dof`).
+    pub dof: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct MateSolve {
+    pub mates: Vec<MateReport>,
+    /// Top-level occurrences whose transform was changed.
+    pub moved: Vec<OccurrenceId>,
+    /// Top-level occurrences with mates that are not connected to anything fixed.
+    pub floating: Vec<OccurrenceId>,
+    /// Notes (e.g. "nothing grounded: `Base:1` was held fixed").
+    pub notes: Vec<String>,
+}
+
+impl MateSolve {
+    pub fn ok(&self) -> bool {
+        self.mates.iter().all(|m| matches!(m.status, MateStatus::Solved | MateStatus::Redundant | MateStatus::Suppressed))
+    }
+}
+
+fn flip_x() -> Transform {
+    Transform::new(DQuat::from_rotation_x(std::f64::consts::PI), DVec3::ZERO)
+}
+
+/// Rotation angle of `t` about z (from its x axis projected on the xy plane).
+fn z_angle(t: &Transform) -> f64 {
+    let x = t.vector(DVec3::X);
+    x.y.atan2(x.x)
+}
+
+/// The allowed relative placement of B's connector in A's (flipped) connector frame
+/// closest to `rel` (the current one), given the mate's kind and drive values.
+fn project_motion(kind: MateKind, rel: &Transform, angle_deg: f64, dist: f64) -> Transform {
+    let rz = |a: f64| DQuat::from_rotation_z(a);
+    match kind {
+        MateKind::Rigid => Transform::translation(DVec3::Z * dist),
+        MateKind::Revolute => Transform::new(rz(angle_deg.to_radians()), DVec3::Z * dist),
+        MateKind::Slider => Transform::translation(DVec3::Z * dist),
+        MateKind::Cylindrical => Transform::new(rz(z_angle(rel)), DVec3::Z * rel.translation.z),
+        MateKind::Planar => Transform::new(rz(z_angle(rel)), DVec3::new(rel.translation.x, rel.translation.y, dist)),
+        MateKind::Ball => Transform::new(rel.rotation, DVec3::ZERO),
+    }
+}
+
+/// Mismatch between two placements: (distance mm, angle deg).
+fn mismatch(a: &Transform, b: &Transform) -> (f64, f64) {
+    ((a.translation - b.translation).length(), a.rotation.angle_between(b.rotation).to_degrees())
+}
+
+impl Document {
+    pub fn add_mate(&mut self, name: &str, kind: MateKind, a: MateConnector, b: MateConnector, flip: bool) -> MateId {
+        self.edit(&format!("Mate {name}"), |d| {
+            let id = MateId(d.alloc());
+            d.mates.push(Mate { id, name: name.into(), kind, a, b, flip, angle: zero(), distance: zero(), suppressed: false });
+            Ok::<_, DocError>(id)
+        })
+        .unwrap()
+    }
+
+    pub fn edit_mate<T>(&mut self, id: MateId, label: &str, f: impl FnOnce(&mut Mate) -> T) -> Result<T, DocError> {
+        self.edit(label, |d| d.mates.iter_mut().find(|m| m.id == id).map(f).ok_or_else(|| DocError::Other(format!("mate {id:?} does not exist"))))
+    }
+
+    /// Solve the mates and write the resulting transforms of the top-level
+    /// occurrences into the document (one undo step "Solve mates" when anything
+    /// moved). The report is returned either way.
+    pub fn solve_mates(&mut self) -> MateSolve {
+        let (tf, rep) = solve_mates(&self.data);
+        if !rep.moved.is_empty() {
+            let _ = self.edit("Solve mates", |d| {
+                for (id, t) in &tf {
+                    if let Some(o) = d.occurrences.iter_mut().find(|o| o.id == *id) {
+                        o.transform = *t;
+                    }
+                }
+                Ok::<_, DocError>(())
+            });
+        }
+        rep
+    }
+}
+
+/// Solve without modifying the document: new transforms of the top-level
+/// occurrences that moved, plus the report.
+///
+/// A simple propagation solver: grounded top-level occurrences (and the root's own
+/// bodies) are fixed; a mate with one placed side places the other side's top-level
+/// occurrence (a whole sub-assembly moves rigidly), keeping its current position in
+/// the mate's free degrees of freedom. A mate whose sides are both placed is checked
+/// (redundant or over-constrained). Mates that never get a placed side are unsolved.
+pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
+    let mut rep = MateSolve::default();
+    let vals = d.values().unwrap_or_default();
+    // current transform of each top-level occurrence; None key = root (fixed)
+    let mut cur: BTreeMap<OccurrenceId, Transform> = d.occurrences.iter().map(|o| (o.id, o.transform)).collect();
+    let mut placed: BTreeSet<Option<OccurrenceId>> = BTreeSet::new();
+    placed.insert(None);
+    for o in d.occurrences.iter().filter(|o| o.grounded) {
+        placed.insert(Some(o.id));
+    }
+    let active: Vec<&Mate> = d.mates.iter().filter(|m| !m.suppressed).collect();
+    if d.occurrences.iter().all(|o| !o.grounded) {
+        let first = active.iter().find_map(|m| m.a.occurrence.first().or(m.b.occurrence.first()).copied());
+        if let Some(f) = first {
+            placed.insert(Some(f));
+            rep.notes.push(format!("nothing is grounded: `{}` was held fixed", d.occurrence(f).map(|o| o.name.as_str()).unwrap_or("?")));
+        }
+    }
+    // connector frame relative to its top-level occurrence: (top, rest * frame)
+    let local = |c: &MateConnector| -> Result<(Option<OccurrenceId>, Transform), String> {
+        d.component_at(&c.occurrence)?;
+        match c.occurrence.first() {
+            None => Ok((None, c.frame())),
+            Some(top) => {
+                let top_t = d.occurrences.iter().find(|o| o.id == *top).ok_or_else(|| format!("occurrence {top:?} is not at the top level"))?.transform;
+                let w = d.world_transform(&c.occurrence)?;
+                Ok((Some(*top), top_t.inverse().mul(&w).mul(&c.frame())))
+            }
+        }
+    };
+    let world = |cur: &BTreeMap<OccurrenceId, Transform>, top: Option<OccurrenceId>, l: &Transform| match top {
+        None => *l,
+        Some(t) => cur[&t].mul(l),
+    };
+    let mut status: BTreeMap<MateId, MateStatus> = BTreeMap::new();
+    let mut prepared = Vec::new();
+    for m in &active {
+        match (local(&m.a), local(&m.b)) {
+            (Ok(a), Ok(b)) => {
+                let ang = m.angle.eval(&vals);
+                let dist = m.distance.eval(&vals);
+                match (ang, dist) {
+                    (Ok(ang), Ok(dist)) => prepared.push((*m, a, b, ang, dist)),
+                    (Err(e), _) | (_, Err(e)) => {
+                        status.insert(m.id, MateStatus::Unsolved(format!("drive value: {e}")));
+                    }
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                status.insert(m.id, MateStatus::Unsolved(e));
+            }
+        }
+    }
+    let mut moved = BTreeSet::new();
+    loop {
+        let mut progress = false;
+        for (m, (ta, la), (tb, lb), ang, dist) in &prepared {
+            if status.contains_key(&m.id) {
+                continue;
+            }
+            let flip = if m.flip { flip_x() } else { Transform::IDENTITY };
+            let (pa, pb) = (placed.contains(ta), placed.contains(tb));
+            if ta == tb || (pa && pb) {
+                let fa = world(&cur, *ta, la).mul(&flip);
+                let fb = world(&cur, *tb, lb);
+                let rel = fa.inverse().mul(&fb);
+                let want = project_motion(m.kind, &rel, *ang, *dist);
+                let (dl, da) = mismatch(&rel, &want);
+                let st = if dl < 1e-6 && da < 1e-6 {
+                    MateStatus::Redundant
+                } else {
+                    MateStatus::OverConstrained(format!("off by {dl:.3} mm / {da:.2}° (both sides are already fixed)"))
+                };
+                status.insert(m.id, st);
+                continue;
+            }
+            if !pa && !pb {
+                continue;
+            }
+            // move the unplaced side so its connector lands on the placed one
+            let (fixed_t, fixed_l, mov_t, mov_l, a_moves) = if pa { (*ta, la, *tb, lb, false) } else { (*tb, lb, *ta, la, true) };
+            let fixed_w = world(&cur, fixed_t, fixed_l);
+            let mov_w = world(&cur, mov_t, mov_l);
+            let target = if !a_moves {
+                // B onto A: fb = fa·flip·M
+                let base = fixed_w.mul(&flip);
+                let rel = base.inverse().mul(&mov_w);
+                base.mul(&project_motion(m.kind, &rel, *ang, *dist))
+            } else {
+                // A onto B: fa = fb·M⁻¹·flip⁻¹
+                let rel = mov_w.mul(&flip).inverse().mul(&fixed_w);
+                fixed_w.mul(&project_motion(m.kind, &rel, *ang, *dist).inverse()).mul(&flip.inverse())
+            };
+            let Some(top) = mov_t else { continue };
+            let new_top = target.mul(&mov_l.inverse());
+            let (dl, da) = mismatch(&new_top, &cur[&top]);
+            if dl > 1e-9 || da > 1e-9 {
+                moved.insert(top);
+            }
+            cur.insert(top, new_top);
+            placed.insert(Some(top));
+            status.insert(m.id, MateStatus::Solved);
+            progress = true;
+        }
+        if !progress {
+            break;
+        }
+    }
+    for m in &d.mates {
+        let st = if m.suppressed {
+            MateStatus::Suppressed
+        } else {
+            status.remove(&m.id).unwrap_or_else(|| MateStatus::Unsolved("neither side is connected to a grounded occurrence".into()))
+        };
+        if let MateStatus::Unsolved(_) = st {
+            for c in [&m.a, &m.b] {
+                if let Some(t) = c.occurrence.first() {
+                    if !placed.contains(&Some(*t)) && !rep.floating.contains(t) {
+                        rep.floating.push(*t);
+                    }
+                }
+            }
+        }
+        rep.mates.push(MateReport { mate: m.id, name: m.name.clone(), status: st, dof: m.kind.dof() });
+    }
+    rep.moved = moved.iter().copied().collect();
+    let tf = moved.into_iter().map(|id| (id, cur[&id])).collect();
+    (tf, rep)
 }
