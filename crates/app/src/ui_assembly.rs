@@ -84,12 +84,11 @@ pub fn occ_name(d: &DocData, path: &[OccurrenceId]) -> String {
         .unwrap_or_else(|| d.name.clone())
 }
 
-/// Number of placed occurrences of a component in the whole tree (design-position
-/// anchors left out).
+/// Number of placed occurrences of a component in the whole tree.
 pub fn instance_count(d: &DocData, c: ComponentId) -> usize {
     d.all_occurrences()
         .iter()
-        .filter(|(_, o, _)| o.component == c && !crate::adapters::is_anchor(d, o.id))
+        .filter(|(_, o, _)| o.component == c)
         .count()
 }
 
@@ -134,7 +133,6 @@ impl CaseworkApp {
             self.close_dialog(false);
         }
         self.active = path;
-        self.comp_rollback = None;
         self.selection.clear();
         self.stack.clear();
         self.asm.sel = None;
@@ -639,11 +637,11 @@ fn rows(
         return;
     }
     let Some(kids) = d.children_of(comp) else { return };
-    for o in kids.iter().filter(|o| !crate::adapters::is_anchor(d, o.id)) {
+    for o in kids {
         let mut path = prefix.clone();
         path.push(o.id);
         let c = d.component(o.component);
-        let has_kids = c.is_some_and(|c| c.children.iter().any(|k| !crate::adapters::is_anchor(d, k.id)));
+        let has_kids = c.is_some_and(|c| !c.children.is_empty());
         // locked references (a STEP board's sub-parts) start collapsed
         let collapsed = app.asm.collapsed.contains(&path) != c.is_some_and(|c| c.locked);
         let sel = app.asm.sel.as_ref() == Some(&path);

@@ -227,7 +227,6 @@ fn assembly(app: &CaseworkApp) -> Value {
     let occ: Vec<Value> = d
         .all_occurrences()
         .into_iter()
-        .filter(|(_, o, _)| !crate::adapters::is_anchor(d, o.id))
         .map(|(path, o, _)| {
             let b = crate::ui_gizmo::occ_bounds(app, &path);
             let anchors = b.map(|(lo, hi)| {

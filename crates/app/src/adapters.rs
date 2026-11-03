@@ -2,13 +2,8 @@
 //!
 //! * **Old plane bindings.** Files from before plane `offset` expressions are
 //!   migrated on open ([`migrate_bindings`]).
-//! * **Rollback inside a component.** `DocData.rollback` is the root's; while a
-//!   component is active the GUI keeps its marker and truncates its features.
-//! * **Movable in-context components.** A component made by `split_to_components`
-//!   is built in the frame of its context occurrence, so moving its only occurrence
-//!   re-expresses the master's half and it stays put. Each gets a hidden "design
-//!   position" anchor occurrence inside the master as its `context`
-//!   ([`anchor_in_context`]); its visible occurrence then moves (hinged lids).
+//! * **Old design-position anchors.** Files from before `Component.context_frame`
+//!   carry hidden anchor occurrences; [`migrate_anchors`] turns them into frames.
 //! * **Usage counts.** "Used by" in the Parameters panel scans feature, sketch and
 //!   parameter JSON for identifiers.
 
@@ -70,11 +65,6 @@ pub fn effective_in(
     active: Option<usize>,
 ) -> DocData {
     let mut d = d.clone();
-    // the root's saved marker: truncate here and clear it, so component views
-    // (which copy the root's fields) are not cut at the root's index
-    if let Some(r) = d.rollback.take() {
-        d.features.truncate(r);
-    }
     if let (Some(n), Some(f)) = (active, crate::scope::features_mut(&mut d, scope)) {
         f.truncate(n);
     }
@@ -170,51 +160,35 @@ pub fn values(d: &DocData) -> Values {
 
 const ANCHOR: &str = "gui.anchor.";
 
-/// Is this occurrence a design-position anchor (hidden from the tree and counts)?
-pub fn is_anchor(d: &DocData, o: casework_model::assembly::OccurrenceId) -> bool {
-    d.meta.contains_key(&format!("{ANCHOR}{}", o.0))
-}
-
-/// Give in-context components a fixed frame: an anchor occurrence of each inside the
-/// master component (`master` = the master's occurrence path), placed where the
-/// master is, grounded and out of the BOM, set as the component's `context`. One
-/// undo step. See GUI_NEEDS ("movable in-context components").
-pub fn anchor_in_context(
-    doc: &mut Document,
-    master: &[casework_model::assembly::OccurrenceId],
-    comps: &[casework_model::assembly::ComponentId],
-) -> Result<(), DocError> {
-    use casework_model::assembly::{Occurrence, OccurrenceId, Transform};
-    let master = master.to_vec();
-    doc.edit("Anchor in-context components", |d| {
-        let mc = d.component_at(&master).map_err(DocError::Other)?;
-        for c in comps {
-            let name = d.component_name(*c);
-            let id = OccurrenceId(d.next_id);
-            d.next_id += 1;
-            let o = Occurrence {
-                id,
-                component: *c,
-                name: format!("{name} (design position)"),
-                transform: Transform::IDENTITY,
-                visible: true,
-                grounded: true,
-                explode: glam::DVec3::ZERO,
-                in_bom: false,
-            };
-            d.component_mut(mc)
-                .ok_or_else(|| DocError::Other("master component vanished".into()))?
-                .children
-                .push(o);
-            d.meta.insert(format!("{ANCHOR}{}", id.0), "1".into());
-            let mut p = master.clone();
-            p.push(id);
-            if let Some(comp) = d.component_mut(*c) {
-                comp.context = Some(p);
+/// Files saved while split components needed hidden "design position" anchor
+/// occurrences (GUI_NEEDS #17, done by the engine): each anchor's world placement
+/// becomes its component's `context_frame` and the anchor goes.
+pub fn migrate_anchors(d: &mut DocData) {
+    let ids: Vec<(String, u32)> = d
+        .meta
+        .keys()
+        .filter_map(|k| k.strip_prefix(ANCHOR).and_then(|v| v.parse().ok()).map(|id| (k.clone(), id)))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let all = d.all_occurrences();
+    for (key, id) in ids {
+        let id = casework_model::assembly::OccurrenceId(id);
+        if let Some((_, o, world)) = all.iter().find(|(_, o, _)| o.id == id) {
+            if let Some(c) = d.component_mut(o.component) {
+                if c.context_frame.is_none() {
+                    c.context_frame = Some(*world);
+                }
+                c.context = None;
             }
         }
-        Ok(())
-    })
+        d.occurrences.retain(|o| o.id != id);
+        for c in &mut d.components {
+            c.children.retain(|o| o.id != id);
+        }
+        d.meta.remove(&key);
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +226,25 @@ mod tests {
         assert_eq!(counts["lid_split"], 1);
         assert!(counts["wall"] >= 3, "{counts:?}");
         assert!(counts["height"] >= 2, "extrude + lid_split");
+    }
+
+    #[test]
+    fn old_anchors_become_context_frames() {
+        use casework_model::assembly::{ComponentId, Transform};
+        let mut doc = Document::new("asm");
+        let master = doc.add_component("Enclosure");
+        let lid = doc.add_component("Lid");
+        let t = Transform::translation(glam::DVec3::new(0.0, 0.0, 5.0));
+        let m_occ = doc.add_occurrence(ComponentId::ROOT, master, "Enclosure:1", t).unwrap();
+        let anchor = doc.add_occurrence(master, lid, "Lid (design position)", Transform::IDENTITY).unwrap();
+        doc.add_occurrence(ComponentId::ROOT, lid, "Lid:1", t).unwrap();
+        let _ = doc.edit_component(lid, "ctx", |c| c.context = Some(vec![m_occ, anchor]));
+        doc.data.meta.insert(format!("{ANCHOR}{}", anchor.0), "1".into());
+        migrate_anchors(&mut doc.data);
+        let c = doc.data.component(lid).unwrap();
+        assert_eq!(c.context, None);
+        assert!((c.context_frame.unwrap().translation.z - 5.0).abs() < 1e-12);
+        assert!(doc.data.component(master).unwrap().children.is_empty());
+        assert!(doc.data.meta.keys().all(|k| !k.starts_with(ANCHOR)));
     }
 }

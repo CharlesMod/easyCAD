@@ -63,6 +63,7 @@ pub fn edit<T>(
         comp.sketches = v.sketches;
         comp.features = v.features;
         comp.imports = v.imports;
+        comp.rollback = v.rollback;
         d.meta = v.meta;
         d.next_id = d.next_id.max(v.next_id);
         Ok(r)
@@ -98,18 +99,20 @@ mod tests {
     }
 
     #[test]
-    fn root_rollback_is_the_documents_and_component_views_ignore_it() {
+    fn rollback_markers_are_per_component() {
         let mut doc = crate::sample::sensor_node();
         let n = doc.data.features.len();
         doc.set_rollback(Some(2));
         let c = doc.add_component("Part");
         doc.add_occurrence(ComponentId::ROOT, c, "Part:1", Transform::IDENTITY)
             .unwrap();
-        // the worker's copy: root cut at the marker, marker cleared for components
+        // the engine keeps the root's marker out of component views (GUI_NEEDS #20)
         let eff = crate::adapters::effective_in(&doc.data, ComponentId::ROOT, None);
-        assert_eq!(eff.features.len(), 2);
-        assert_eq!(eff.rollback, None);
+        assert_eq!(eff.rollback, Some(2));
         assert_eq!(eff.component_view(c).unwrap().rollback, None);
+        // a component's own marker is saved in the document and undoable
+        doc.set_component_rollback(c, None).unwrap();
+        assert_eq!(doc.data.component(c).unwrap().rollback, None);
         assert_eq!(doc.data.features.len(), n);
     }
 }

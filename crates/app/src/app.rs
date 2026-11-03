@@ -83,9 +83,6 @@ pub struct CaseworkApp {
     pub stack_since: f64,
     pub hover_pos: Option<egui::Pos2>,
     pub hidden: HashSet<BodyId>,
-    /// Rollback marker while a component is being edited (the root's is
-    /// `DocData.rollback`, saved and undoable).
-    pub comp_rollback: Option<usize>,
     pub mode: Mode,
     pub dialog: Option<Dialog>,
     pub params: ParamsUi,
@@ -200,7 +197,6 @@ impl CaseworkApp {
             stack_since: 0.0,
             hover_pos: None,
             hidden: HashSet::new(),
-            comp_rollback: None,
             mode: Mode::Model,
             dialog: None,
             params: ParamsUi::default(),
@@ -259,19 +255,19 @@ impl CaseworkApp {
 
     /// The history rollback marker of the component being edited.
     pub fn rollback(&self) -> Option<usize> {
-        if self.active.is_empty() {
+        let c = self.scope();
+        if c == casework_model::assembly::ComponentId::ROOT {
             self.doc.data.rollback
         } else {
-            self.comp_rollback
+            self.doc.data.component(c).and_then(|c| c.rollback)
         }
     }
 
-    /// Move the rollback marker (the root's is an undoable document edit).
+    /// Move the rollback marker of the component being edited (undoable, saved).
     pub fn set_rollback(&mut self, at: Option<usize>) {
-        if self.active.is_empty() {
-            self.doc.set_rollback(at);
-        } else {
-            self.comp_rollback = at;
+        let c = self.scope();
+        if let Err(e) = self.doc.set_component_rollback(c, at) {
+            self.warn(e.to_string());
         }
         self.request_model();
     }
@@ -665,14 +661,11 @@ impl CaseworkApp {
     ) {
         let at = self.rollback();
         let scope = self.scope();
-        let root = self.active.is_empty();
         let added = feats.len() as isize - replace.is_some() as isize;
         let r = crate::scope::edit(&mut self.doc, scope, label, |d| {
-            if root {
-                // the marker moves with what was inserted before it
-                if let Some(r) = d.rollback {
-                    d.rollback = Some((r as isize + added).max(0) as usize);
-                }
+            // the marker moves with what was inserted before it (root or component)
+            if let Some(r) = d.rollback {
+                d.rollback = Some((r as isize + added).max(0) as usize);
             }
             let pos = match replace {
                 Some(id) => d
@@ -698,11 +691,6 @@ impl CaseworkApp {
         });
         match r {
             Ok(()) => {
-                if !root {
-                    if let Some(n) = self.comp_rollback.as_mut() {
-                        *n = (*n as isize + added).max(0) as usize;
-                    }
-                }
                 self.request_model();
             }
             Err(e) => self.warn(e.to_string()),
@@ -917,12 +905,12 @@ impl CaseworkApp {
 
     pub fn load(&mut self, mut doc: Document, path: Option<PathBuf>) {
         adapters::migrate_bindings(&mut doc.data);
+        adapters::migrate_anchors(&mut doc.data);
         self.saved_revision = doc.data.revision;
         self.doc = doc;
         self.path = path;
         self.selection.clear();
         self.hidden.clear();
-        self.comp_rollback = None;
         self.dialog = None;
         self.mode = Mode::Model;
         self.model = None;

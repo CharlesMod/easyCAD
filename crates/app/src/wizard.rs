@@ -468,11 +468,8 @@ fn make_components(
     let (_, master) = doc
         .move_root_into_component("Enclosure")
         .map_err(|e| format!("components: {e}"))?;
-    let [(base_c, base), (lid_c, _)] = doc
+    let [(_, base), _] = doc
         .split_to_components(&[master], joint, Some(("Base", "Lid")))
-        .map_err(|e| format!("components: {e}"))?;
-    // so Base and Lid can be moved and mated (GUI_NEEDS: movable in-context components)
-    crate::adapters::anchor_in_context(doc, &[master], &[base_c, lid_c])
         .map_err(|e| format!("components: {e}"))?;
     doc.edit_occurrence(master, "Master", |o| o.grounded = true)
         .map_err(|e| e.to_string())?;
