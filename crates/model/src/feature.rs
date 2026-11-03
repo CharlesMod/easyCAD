@@ -49,6 +49,13 @@ pub enum ProfileSel {
     Containing(Vec<DVec2>),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RibExtent {
+    #[default]
+    Height,
+    ToBody,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PatternKind {
     Linear { dir: DVec3, spacing: Expr, count: Expr },
@@ -188,6 +195,10 @@ pub enum FeatureKind {
         flip: bool,
         #[serde(default)]
         body: Option<BodyId>,
+        /// `Height` uses `height`; `ToBody` grows the rib along its direction until it
+        /// meets the body and trims it there.
+        #[serde(default)]
+        extent: RibExtent,
     },
     ScrewBoss {
         #[serde(default)]

@@ -24,12 +24,35 @@ use crate::sketch::{segment_point, Sketch, SolveReport};
 /// Geometry of a body plus its lazily computed display mesh.
 pub struct BodyGeom {
     pub shape: Shape,
-    mesh: OnceLock<Result<Arc<Mesh>, String>>,
+    meshes: [OnceLock<Result<Arc<Mesh>, String>>; 3],
 }
 
 impl BodyGeom {
     pub fn new(shape: Shape) -> Arc<Self> {
-        Arc::new(BodyGeom { shape, mesh: OnceLock::new() })
+        Arc::new(BodyGeom { shape, meshes: Default::default() })
+    }
+}
+
+/// Tessellation levels. `Preview` is for interactive dragging, `Display` the
+/// default viewport mesh, `Final` print/export quality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum MeshQuality {
+    Preview,
+    Display,
+    Final,
+}
+
+impl MeshQuality {
+    /// (linear deflection mm, angular deflection deg).
+    pub fn deflection(self) -> (f64, f64) {
+        match self {
+            MeshQuality::Preview => (0.25, 25.0),
+            MeshQuality::Display => (MESH_LIN_DEFL, MESH_ANG_DEFL_DEG),
+            MeshQuality::Final => (0.02, 8.0),
+        }
+    }
+    fn slot(self) -> usize {
+        self as usize
     }
 }
 
@@ -66,10 +89,13 @@ impl Body {
     }
     /// Display mesh (computed once per shape, shared by every cached state).
     pub fn mesh(&self) -> Result<Arc<Mesh>, String> {
-        self.geom
-            .mesh
-            .get_or_init(|| self.geom.shape.tessellate(MESH_LIN_DEFL, MESH_ANG_DEFL_DEG).map(Arc::new).map_err(|e| e.0))
-            .clone()
+        self.mesh_quality(MeshQuality::Display)
+    }
+    /// Mesh at a quality level (computed once per shape and level, shared by every
+    /// cached state that holds this geometry).
+    pub fn mesh_quality(&self, q: MeshQuality) -> Result<Arc<Mesh>, String> {
+        let (l, a) = q.deflection();
+        self.geom.meshes[q.slot()].get_or_init(|| self.geom.shape.tessellate(l, a).map(Arc::new).map_err(|e| e.0)).clone()
     }
 }
 
@@ -77,7 +103,6 @@ impl Body {
 struct ToolOp {
     target: BodyId,
     op: BoolOp,
-    tool: Arc<Shape>,
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +145,9 @@ pub struct FeatureReport {
     pub joint: Option<crate::joint::JointReport>,
     /// Served from the regeneration cache.
     pub cached: bool,
+    /// Time spent computing this feature (0 when cached).
+    #[serde(default)]
+    pub elapsed_ms: f64,
 }
 
 #[derive(Clone)]
@@ -343,10 +371,11 @@ impl Regenerator {
                 continue;
             }
             recomputed += 1;
+            let t0 = std::time::Instant::now();
             let (next, report) = if f.suppressed {
-                ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, joint: None, cached: false })
+                ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, joint: None, cached: false, elapsed_ms: 0.0 })
             } else {
-                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None, joint: None };
+                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None, joint: None, xf: Vec::new(), target_default: None };
                 let res = ctx.exec(f, &state);
                 let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
                 match res {
@@ -359,6 +388,7 @@ impl Regenerator {
                             sketch,
                             joint,
                             cached: false,
+                            elapsed_ms: 0.0,
                         },
                     ),
                     Err(Fail { msg, unresolved }) => {
@@ -369,10 +399,12 @@ impl Regenerator {
                                 None => msg,
                             }),
                         };
-                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, joint, cached: false })
+                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, joint, cached: false, elapsed_ms: 0.0 })
                     }
                 }
             };
+            let mut report = report;
+            report.elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
             let step: Step = Arc::new((next, report));
             self.insert(key, step.clone());
             state = Arc::new(step.0.clone());
@@ -425,6 +457,10 @@ struct Ctx<'a> {
     sketch_report: Option<SolveReport>,
     warning: Option<String>,
     joint: Option<crate::joint::JointReport>,
+    /// Pattern transform stack (applied innermost first).
+    xf: Vec<Xf>,
+    /// Target used when a re-executed feature has `None` as its target.
+    target_default: Option<BodyId>,
 }
 
 fn frame(p: &Plane) -> Frame {
@@ -454,6 +490,26 @@ enum Xf {
 }
 
 impl Xf {
+    fn point(&self, p: DVec3) -> DVec3 {
+        match *self {
+            Xf::Translate(v) => p + v,
+            Xf::Rotate(o, d, a) => o + glam::DQuat::from_axis_angle(d.normalize(), a.to_radians()) * (p - o),
+            Xf::Mirror(o, n) => {
+                let n = n.normalize();
+                p - n * 2.0 * (p - o).dot(n)
+            }
+        }
+    }
+    fn dir(&self, v: DVec3) -> DVec3 {
+        match *self {
+            Xf::Translate(_) => v,
+            Xf::Rotate(_, d, a) => glam::DQuat::from_axis_angle(d.normalize(), a.to_radians()) * v,
+            Xf::Mirror(_, n) => {
+                let n = n.normalize();
+                v - n * 2.0 * v.dot(n)
+            }
+        }
+    }
     fn apply(&self, s: &Shape) -> Result<Shape, occt::Error> {
         match *self {
             Xf::Translate(v) => s.translated(v),
@@ -483,6 +539,21 @@ impl Ctx<'_> {
         e.eval(self.vals).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
     }
 
+    /// Apply the pattern transform stack to a tool shape.
+    fn tx(&self, s: Shape) -> R<Shape> {
+        let mut s = s;
+        for x in self.xf.iter().rev() {
+            s = x.apply(&s)?;
+        }
+        Ok(s)
+    }
+    fn tx_point(&self, p: DVec3) -> DVec3 {
+        self.xf.iter().rev().fold(p, |p, x| x.point(p))
+    }
+    fn tx_dir(&self, v: DVec3) -> DVec3 {
+        self.xf.iter().rev().fold(v, |v, x| x.dir(v))
+    }
+
     /// Evaluate with a default fit role unless the expression carries its own.
     fn ev_fit(&self, e: &Expr, default: Fit) -> R<f64> {
         e.eval_or(self.vals, default).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
@@ -491,7 +562,10 @@ impl Ctx<'_> {
     fn target(&self, st: &ModelState, id: Option<BodyId>) -> R<usize> {
         match id {
             Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail::msg(format!("body {id:?} does not exist"))),
-            None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail::msg("there is no solid body yet")),
+            None => match self.target_default {
+                Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail::msg(format!("body {id:?} does not exist"))),
+                None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail::msg("there is no solid body yet")),
+            },
         }
     }
 
@@ -555,14 +629,20 @@ impl Ctx<'_> {
                 st.bodies[i].id
             }
         };
-        st.tools.entry(fid).or_default().push(ToolOp { target: tid, op, tool });
+        st.tools.entry(fid).or_default().push(ToolOp { target: tid, op });
         Ok(())
     }
 
     fn exec(&mut self, f: &Feature, prev: &ModelState) -> R<ModelState> {
         let mut st = prev.clone();
-        let fid = f.id;
-        match &f.kind {
+        self.exec_kind(&f.kind, &f.name, f.id, &mut st)?;
+        Ok(st)
+    }
+
+    /// Execute a feature recipe into `st`. Patterns call this again for their source
+    /// features with a transform pushed on `self.xf`.
+    fn exec_kind(&mut self, kind: &FeatureKind, name: &str, fid: FeatureId, st: &mut ModelState) -> R<()> {
+        match kind {
             FeatureKind::Extrude { sketch, profiles, distance, symmetric, reverse, draft_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles)?;
                 let d = self.ev(distance)?;
@@ -572,8 +652,8 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.extrude_ext(&frame(&plane), dir, d, *symmetric, draft)?);
                 }
-                let tool = fuse_many(&tools)?;
-                self.apply_op(&mut st, fid, &f.name, *op, *target, tool)?;
+                let tool = self.tx(fuse_many(&tools)?)?;
+                self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Revolve { sketch, profiles, axis, angle_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles)?;
@@ -582,17 +662,17 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.revolve(axis.origin, axis.dir, a)?);
                 }
-                let tool = fuse_many(&tools)?;
-                self.apply_op(&mut st, fid, &f.name, *op, *target, tool)?;
+                let tool = self.tx(fuse_many(&tools)?)?;
+                self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Fillet { body, edges, radius, auto_reduce } | FeatureKind::Chamfer { body, edges, distance: radius, auto_reduce } => {
-                let i = self.target(&st, *body)?;
+                let i = self.target(st, *body)?;
                 let r = self.ev(radius)?;
                 let shape = st.bodies[i].shape().clone();
                 let ids = resolve_edges(&shape, edges)?;
                 let req: Vec<(u32, f64)> = ids.iter().map(|e| (*e, r)).collect();
                 let opts = dressup::DressUpOptions { auto_reduce: *auto_reduce, ..Default::default() };
-                let (out, rep) = if matches!(f.kind, FeatureKind::Fillet { .. }) {
+                let (out, rep) = if matches!(kind, FeatureKind::Fillet { .. }) {
                     dressup::fillet(&shape, &req, &opts)?
                 } else {
                     dressup::chamfer(&shape, &req, &opts)?
@@ -610,29 +690,89 @@ impl Ctx<'_> {
                 st.bodies[i].geom = BodyGeom::new(out);
             }
             FeatureKind::Shell { body, open_faces, thickness, outward } => {
-                let i = self.target(&st, *body)?;
+                let i = self.target(st, *body)?;
                 let t = self.ev(thickness)?;
                 let shape = st.bodies[i].shape().clone();
                 let faces = resolve_faces(&shape, open_faces)?;
                 st.bodies[i].geom = BodyGeom::new(shape.shell(&faces, t, *outward)?);
             }
             FeatureKind::Draft { body, faces, neutral, pull, angle_deg } => {
-                let i = self.target(&st, *body)?;
+                let i = self.target(st, *body)?;
                 let a = self.ev(angle_deg)?;
                 let shape = st.bodies[i].shape().clone();
                 let ids = resolve_faces(&shape, faces)?;
                 st.bodies[i].geom = BodyGeom::new(shape.draft(&ids, *pull, a, &frame(neutral))?);
             }
-            FeatureKind::Rib { sketch, thickness, height, draft_deg, flip, body } => {
+            FeatureKind::Rib { sketch, thickness, height, draft_deg, flip, body, extent } => {
                 let sk = self.sketch(*sketch)?;
-                let (t, h, dr) = (self.ev(thickness)?, self.ev(height)?, self.ev(draft_deg)?);
+                let (t, dr) = (self.ev(thickness)?, self.ev(draft_deg)?);
                 let chains = sk.profiles().open;
                 if chains.is_empty() {
                     return fail("rib sketch has no open chain");
                 }
                 let dir = if *flip { -sk.plane.normal } else { sk.plane.normal };
-                let tool = rib_tool(&sk.plane, &chains, t, h, dr, dir)?;
-                self.apply_op(&mut st, fid, &f.name, BoolOp::Join, *body, tool)?;
+                let tool = match extent {
+                    RibExtent::Height => self.tx(rib_tool(&sk.plane, &chains, t, self.ev(height)?, dr, dir)?)?,
+                    RibExtent::ToBody => {
+                        // grow far, then keep only the part between the sketch plane
+                        // and the first body surface along the direction
+                        let i = self.target(st, *body)?;
+                        let bshape = st.bodies[i].shape().clone();
+                        let bb = bshape.bbox()?;
+                        let tall = bb.size().length() * 2.0 + 10.0;
+                        let long = self.tx(rib_tool(&sk.plane, &chains, t, tall, 0.0, dir)?)?;
+                        let d = self.tx_dir(dir).normalize();
+                        let start = self.tx_point(sk.plane.origin).dot(d);
+                        let span = |s: &Shape| -> R<(f64, f64)> {
+                            let b = s.bbox()?;
+                            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                            for k in 0..8 {
+                                let p = DVec3::new(
+                                    if k & 1 == 0 { b.min.x } else { b.max.x },
+                                    if k & 2 == 0 { b.min.y } else { b.max.y },
+                                    if k & 4 == 0 { b.min.z } else { b.max.z },
+                                );
+                                lo = lo.min(p.dot(d));
+                                hi = hi.max(p.dot(d));
+                            }
+                            Ok((lo, hi))
+                        };
+                        let pieces = long.cut(&bshape)?;
+                        let mut keep = Vec::new();
+                        for sol in pieces.solids()? {
+                            let (lo, hi) = span(&sol)?;
+                            if (lo - start).abs() < 1e-3 {
+                                if hi > start + tall - 1e-3 {
+                                    return fail("the rib never meets the body along its direction (flip it?)");
+                                }
+                                keep.push(sol);
+                            }
+                        }
+                        if keep.is_empty() {
+                            return fail("the rib starts inside the body; move the sketch plane into free space");
+                        }
+                        if dr.abs() < 1e-9 {
+                            fuse_many(&keep)?
+                        } else {
+                            // drafted: rebuild only as tall as needed (plus overshoot), trim again
+                            let reach = keep.iter().map(|k| span(k).map(|(_, hi)| hi - start)).collect::<R<Vec<_>>>()?.into_iter().fold(0.0, f64::max);
+                            let h2 = reach + (0.05 * reach).max(1.0);
+                            let drafted = self.tx(rib_tool(&sk.plane, &chains, t, h2, dr, dir)?)?;
+                            let pieces = drafted.cut(&bshape)?;
+                            let mut keep2 = Vec::new();
+                            for sol in pieces.solids()? {
+                                if (span(&sol)?.0 - start).abs() < 1e-3 {
+                                    keep2.push(sol);
+                                }
+                            }
+                            if keep2.is_empty() {
+                                return fail("the drafted rib vanished before reaching the body (reduce the draft)");
+                            }
+                            fuse_many(&keep2)?
+                        }
+                    }
+                };
+                self.apply_op(st, fid, name, BoolOp::Join, *body, tool)?;
             }
             FeatureKind::ScrewBoss { body, plane, points, od, hole_dia, height, hole_depth, base_fillet, draft_deg } => {
                 let spec = BossSpec {
@@ -643,10 +783,10 @@ impl Ctx<'_> {
                     fillet: self.ev(base_fillet)?,
                     draft: self.ev(draft_deg)?,
                 };
-                self.bosses(&mut st, fid, *body, plane, points, &spec)?;
+                self.bosses(st, fid, *body, plane, points, &spec)?;
             }
             FeatureKind::StandoffsFromPcb { body, source, plane, od, hole_dia, height, base_fillet, draft_deg } => {
-                let pts = self.pcb_points(&st, source, plane)?;
+                let pts = self.pcb_points(st, source, plane)?;
                 if pts.is_empty() {
                     return fail("no mounting holes found in the PCB within the diameter range");
                 }
@@ -658,7 +798,7 @@ impl Ctx<'_> {
                     fillet: self.ev(base_fillet)?,
                     draft: self.ev(draft_deg)?,
                 };
-                self.bosses(&mut st, fid, *body, plane, &pts, &spec)?;
+                self.bosses(st, fid, *body, plane, &pts, &spec)?;
             }
             FeatureKind::Pattern { source, kind } => {
                 let xfs: Vec<Xf> = match kind {
@@ -673,13 +813,13 @@ impl Ctx<'_> {
                         (1..n.max(1)).map(|i| Xf::Rotate(axis.origin, axis.dir, step * i as f64)).collect()
                     }
                 };
-                self.replicate(&mut st, fid, &f.name, source, &xfs)?;
+                self.replicate(st, fid, name, source, &xfs)?;
             }
             FeatureKind::Mirror { source, plane } => {
-                self.replicate(&mut st, fid, &f.name, source, &[Xf::Mirror(plane.origin, plane.normal)])?;
+                self.replicate(st, fid, name, source, &[Xf::Mirror(plane.origin, plane.normal)])?;
             }
             FeatureKind::Split { body, plane, new_name } => {
-                let i = self.target(&st, *body)?;
+                let i = self.target(st, *body)?;
                 let (below, above) = st.bodies[i].shape().split(plane.origin, plane.normal)?;
                 let (Some(below), Some(above)) = (below, above) else {
                     return fail("the split plane does not cut the body");
@@ -688,7 +828,7 @@ impl Ctx<'_> {
                 st.bodies.push(Body { id: BodyId::of(fid), name: new_name.clone(), reference: false, part: None, geom: BodyGeom::new(above) });
             }
             FeatureKind::PartingJoint { body, plane, offset, kind, rim, upper_name, class, closing_radius } => {
-                let i = self.target(&st, *body)?;
+                let i = self.target(st, *body)?;
                 let pl = plane.offset(self.ev(offset)?);
                 let rim = match rim {
                     Some(r) => Some((self.ev(&r.width)?, self.ev(&r.height)?)),
@@ -731,7 +871,7 @@ impl Ctx<'_> {
             FeatureKind::InsertPart { part, placements, flip, offset, auto_hole, target } => {
                 let inst = self.part(part)?;
                 let off = self.ev(offset)?;
-                let ti = self.target(&st, *target).ok();
+                let ti = self.target(st, *target).ok();
                 let mut holes = Vec::new();
                 let hole_spec = match auto_hole {
                     Some(ah) => {
@@ -752,14 +892,17 @@ impl Ctx<'_> {
                     None => None,
                 };
                 for (k, pl) in placements.iter().enumerate() {
-                    let (origin, mut axis) = self.placement(&st, ti, pl)?;
+                    let (origin, axis) = self.placement(st, ti, pl)?;
+                    let (origin, mut axis) = (self.tx_point(origin), self.tx_dir(axis));
                     if *flip {
                         axis = -axis;
                     }
                     let placed = place(&inst.shape, origin + axis * off, axis, 0.0)?;
+                    let index = st.bodies.iter().filter(|b| b.id.feature == fid).count() as u32;
+                    let _ = k;
                     st.bodies.push(Body {
-                        id: BodyId { feature: fid, index: k as u32 },
-                        name: format!("{} {} #{}", part.name, part.size, k + 1),
+                        id: BodyId { feature: fid, index },
+                        name: format!("{} {} #{}", part.name, part.size, index + 1),
                         reference: true,
                         part: Some(PartUse { feature: fid, part: part.clone() }),
                         geom: BodyGeom::new(placed),
@@ -775,11 +918,11 @@ impl Ctx<'_> {
                 if !holes.is_empty() {
                     let Some(i) = ti else { return fail("auto-hole needs a target body") };
                     let tid = st.bodies[i].id;
-                    self.apply_op(&mut st, fid, &f.name, BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
+                    self.apply_op(st, fid, name, BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
                 }
             }
         }
-        Ok(st)
+        Ok(())
     }
 
     fn step_shape(&mut self, blob: &str) -> R<Arc<Shape>> {
@@ -936,15 +1079,15 @@ impl Ctx<'_> {
         if b.hole >= b.od {
             return fail("hole diameter must be smaller than the boss diameter");
         }
-        let n = plane.normal.normalize();
+        let n = self.tx_dir(plane.normal).normalize();
+        let bases: Vec<DVec3> = points.iter().map(|p| self.tx_point(plane.to_world(*p))).collect();
         let r_top = b.od / 2.0 - b.height * b.draft.to_radians().tan();
         if r_top <= b.hole / 2.0 {
             return fail("draft makes the boss top narrower than the hole");
         }
         let mut bosses = Vec::new();
         let mut holes = Vec::new();
-        for p in points {
-            let base = plane.to_world(*p);
+        for &base in &bases {
             bosses.push(if b.draft.abs() > 1e-9 {
                 Shape::cone(base, n, b.od / 2.0, r_top, b.height)?
             } else {
@@ -963,7 +1106,7 @@ impl Ctx<'_> {
             let req: Vec<(u32, f64)> = edges
                 .iter()
                 .filter(|e| match e.circle {
-                    Some((c, _, r)) => (r - b.od / 2.0).abs() < 1e-3 && points.iter().any(|p| plane.to_world(*p).distance(c) < 1e-3),
+                    Some((c, _, r)) => (r - b.od / 2.0).abs() < 1e-3 && bases.iter().any(|p| p.distance(c) < 1e-3),
                     None => false,
                 })
                 .map(|e| (e.index, b.fillet))
@@ -996,36 +1139,40 @@ impl Ctx<'_> {
                     all.push(x.apply(&orig)?);
                 }
                 let fused = tidy(fuse_many(&all)?);
-                let tool = fuse_many(&all[1..])?;
                 st.bodies[i].geom = BodyGeom::new(fused);
-                st.tools.entry(fid).or_default().push(ToolOp { target: *b, op: BoolOp::Join, tool: Arc::new(tool) });
+                st.tools.entry(fid).or_default().push(ToolOp { target: *b, op: BoolOp::Join });
             }
             PatternSource::Features(fs) => {
-                // Group transformed tools per (target, op) and apply each group once.
-                let mut groups: Vec<(BodyId, BoolOp, Vec<Shape>)> = Vec::new();
+                // Re-run each source feature's recipe at every transformed placement,
+                // so bosses keep their fillets, parts are copied, fits and process
+                // stages apply as for the original.
                 for f in fs {
-                    let ops = st.tools.get(f).cloned().ok_or_else(|| Fail::msg(format!("feature {f:?} has no tool bodies to pattern (only extrude, revolve, rib, boss, hole and pattern features can be patterned)")))?;
-                    for op in ops {
-                        let gi = match groups.iter().position(|g| g.0 == op.target && g.1 == op.op && op.op != BoolOp::NewBody) {
-                            Some(g) => g,
-                            None => {
-                                groups.push((op.target, op.op, Vec::new()));
-                                groups.len() - 1
-                            }
-                        };
-                        for x in xfs {
-                            groups[gi].2.push(x.apply(&op.tool)?);
-                        }
+                    let src = self.doc.feature(*f).cloned().ok_or_else(|| Fail::msg(format!("feature {f:?} does not exist")))?;
+                    if !matches!(
+                        src.kind,
+                        FeatureKind::Extrude { .. }
+                            | FeatureKind::Revolve { .. }
+                            | FeatureKind::Rib { .. }
+                            | FeatureKind::ScrewBoss { .. }
+                            | FeatureKind::StandoffsFromPcb { .. }
+                            | FeatureKind::InsertPart { .. }
+                            | FeatureKind::Pattern { .. }
+                            | FeatureKind::Mirror { .. }
+                    ) {
+                        return fail(format!("`{}` ({}) cannot be patterned; pattern the body instead", src.name, src.kind.label()));
                     }
-                }
-                for (target, op, tools) in groups {
-                    if op == BoolOp::NewBody {
-                        for t in tools {
-                            self.apply_op(st, fid, name, BoolOp::NewBody, None, t)?;
-                        }
-                    } else {
-                        let tool = fuse_many(&tools)?;
-                        self.apply_op(st, fid, name, op, Some(target), tool)?;
+                    if src.suppressed {
+                        continue;
+                    }
+                    let target = st.tools.get(f).and_then(|ops| ops.iter().find(|o| o.op != BoolOp::NewBody)).map(|o| o.target);
+                    for x in xfs {
+                        let saved = self.target_default;
+                        self.target_default = target.or(saved);
+                        self.xf.push(*x);
+                        let r = self.exec_kind(&src.kind, name, fid, st);
+                        self.xf.pop();
+                        self.target_default = saved;
+                        r.map_err(|e| Fail::msg(format!("pattern instance of `{}`: {}", src.name, e.msg)))?;
                     }
                 }
             }

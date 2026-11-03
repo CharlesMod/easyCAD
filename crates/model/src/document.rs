@@ -624,23 +624,25 @@ impl Document {
         &mut self.regen
     }
 
-    /// Bill of materials from `InsertPart` features (suppressed ones excluded).
-    pub fn bom(&self) -> Vec<BomLine> {
+    /// Bill of materials: one line per (part, size), counting every placed part
+    /// body in the regenerated model (so patterned/mirrored parts are included).
+    pub fn bom(&mut self) -> Vec<BomLine> {
+        let bodies = self.regenerate().bodies.clone();
         let mut lines: Vec<BomLine> = Vec::new();
-        for f in self.data.features.iter().filter(|f| !f.suppressed) {
-            if let FeatureKind::InsertPart { part, placements, .. } = &f.kind {
-                match lines.iter_mut().find(|l| l.source == part.source && l.part == part.id && l.size == part.size) {
-                    Some(l) => l.qty += placements.len(),
-                    None => lines.push(BomLine {
-                        source: part.source.clone(),
-                        part: part.id.clone(),
-                        name: part.name.clone(),
-                        size: part.size.clone(),
-                        qty: placements.len(),
-                        vendor: part.vendor.clone(),
-                        part_number: part.part_number.clone(),
-                    }),
-                }
+        for b in &bodies {
+            let Some(pu) = &b.part else { continue };
+            let part = &pu.part;
+            match lines.iter_mut().find(|l| l.source == part.source && l.part == part.id && l.size == part.size) {
+                Some(l) => l.qty += 1,
+                None => lines.push(BomLine {
+                    source: part.source.clone(),
+                    part: part.id.clone(),
+                    name: part.name.clone(),
+                    size: part.size.clone(),
+                    qty: 1,
+                    vendor: part.vendor.clone(),
+                    part_number: part.part_number.clone(),
+                }),
             }
         }
         lines.sort_by(|a, b| (&a.name, &a.size).cmp(&(&b.name, &b.size)));

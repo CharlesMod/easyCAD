@@ -134,7 +134,7 @@ fn enclosure_end_to_end() {
     let rib_sk = doc.add_sketch(rib_sk);
     let rib = doc.add_feature(
         "Rib",
-        FeatureKind::Rib { sketch: rib_sk, thickness: 1.5.into(), height: 8.0.into(), draft_deg: 0.0.into(), flip: false, body: Some(base_id) },
+        FeatureKind::Rib { sketch: rib_sk, thickness: 1.5.into(), height: 8.0.into(), draft_deg: 0.0.into(), flip: false, body: Some(base_id), extent: Default::default() },
     );
     doc.add_feature("Mirror rib", FeatureKind::Mirror { source: PatternSource::Features(vec![rib]), plane: Plane::XZ });
 

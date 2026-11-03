@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -182,6 +183,12 @@ TopTools_IndexedMapOfShape mapOf(const TopoDS_Shape &s, TopAbs_ShapeEnum kind) {
   return m;
 }
 
+// Parallel booleans / meshing (set CW_SERIAL_BOP=1 to compare against serial).
+bool parallelBop() {
+  static const bool on = std::getenv("CW_SERIAL_BOP") == nullptr;
+  return on;
+}
+
 std::mutex &meshMutex() {
   static std::mutex m;
   return m;
@@ -212,7 +219,8 @@ TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op
   alg->SetArguments(args);
   alg->SetTools(tools);
   alg->SetNonDestructive(Standard_True);
-  alg->SetRunParallel(Standard_False);
+  alg->SetRunParallel(parallelBop());
+  alg->SetUseOBB(parallelBop());
   alg->Build();
   if (!alg->IsDone() || alg->HasErrors()) {
     std::ostringstream ss;
@@ -460,7 +468,8 @@ std::unique_ptr<Shape> fuse_all(const Shape &c) {
   f.SetArguments(args);
   f.SetTools(tools);
   f.SetNonDestructive(Standard_True);
-  f.SetRunParallel(Standard_False);
+  f.SetRunParallel(parallelBop());
+  f.SetUseOBB(parallelBop());
   f.Build();
   if (!f.IsDone() || f.HasErrors()) {
     std::ostringstream ss;
@@ -1120,7 +1129,10 @@ MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad) {
   requireShape(s, "tessellate");
   if (lin_defl <= 0 || ang_defl_rad <= 0) fail("deflection must be positive");
   std::lock_guard<std::mutex> lock(meshMutex());
-  BRepMesh_IncrementalMesh mesher(s.s, lin_defl, Standard_False, ang_defl_rad, Standard_False);
+  // BRepMesh never coarsens an existing finer triangulation: start clean so each
+  // quality level gets its own density (callers cache meshes per level).
+  BRepTools::Clean(s.s);
+  BRepMesh_IncrementalMesh mesher(s.s, lin_defl, Standard_False, ang_defl_rad, parallelBop());
   if (!mesher.IsDone()) fail("meshing failed");
   MeshData md;
   auto fm = mapOf(s.s, TopAbs_FACE);

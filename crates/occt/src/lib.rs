@@ -412,7 +412,13 @@ impl Shape {
                 Err(e) => Err(e),
             }
         };
-        let (below, above) = (side(false)?, side(true)?);
+        // the two sides are independent booleans: run them concurrently
+        let (below, above) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| side(true));
+            let below = side(false);
+            (below, h.join().unwrap_or_else(|_| Err(Error("split worker panicked".into()))))
+        });
+        let (below, above) = (below?, above?);
         if below.is_none() && above.is_none() {
             return Err(Error("split produced nothing".into()));
         }

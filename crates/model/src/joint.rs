@@ -394,12 +394,27 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
     let evf = |e: &Expr, f: Fit| e.eval_or(inp.vals, f).map_err(|err| format!("`{}`: {err}", e.0));
     let res = |v: f64, f: Fit| inp.profile.resolve(v, f);
 
-    let (lower, upper) = k(inp.body.split(plane.origin, n), "split")?;
+    let prof = std::env::var("CW_PROF").is_ok();
+    let t0 = std::time::Instant::now();
+    let lap = |what: &str| {
+        if prof {
+            eprintln!("  joint {what}: {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
+    // the split and the wall-ring analysis are independent: run them concurrently
+    let (split, ring) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| inp.body.split(plane.origin, n));
+        let ring = wall_ring(inp.body, &plane, inp.closing);
+        (h.join().unwrap_or_else(|_| Err(occt::Error("split worker panicked".into()))), ring)
+    });
+    let (lower, upper) = k(split, "split")?;
+    lap("split");
     let (mut lower, mut upper) = match (lower, upper) {
         (Some(l), Some(u)) => (l, u),
         _ => return Err("the joint plane does not cut the body".into()),
     };
-    let ring = wall_ring(inp.body, &plane, inp.closing)?;
+    let ring = ring?;
+    lap("ring");
     let mut rep = JointReport { wall_thickness: ring.t, effective_wall: ring.t, ..Default::default() };
 
     // available material on each side of the plane (floor / lid limits)
@@ -419,6 +434,8 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
         }
         m
     };
+    // booleans are deferred: one fuse + one cut per half at the end
+    let mut pend = Pending::default();
     let up_room = extent(&upper, 1.0);
     let down_room = extent(&lower, -1.0);
     let room = |h: Half| if h == Half::Upper { up_room } else { down_room };
@@ -442,7 +459,7 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 }
                 _ => None,
             };
-            for (half, s) in [(Half::Lower, &mut lower), (Half::Upper, &mut upper)] {
+            for half in [Half::Lower, Half::Upper] {
                 let want = match snap_need {
                     Some((hf, need)) if hf == half && need > h => {
                         rep.warnings.push(format!("rim extended to {need:.2} mm on the window half so the snap hooks engage"));
@@ -453,7 +470,7 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 let hh = want.min(room(half) - MIN_WALL).max(0.0);
                 if hh > 1e-6 {
                     let p = k(prism(&r2, n, 0.0, side(half) * hh), "rim prism")?;
-                    *s = tidy(k(s.fuse(&p), "rim fuse")?);
+                    pend.adds[half as usize].push(p);
                 }
             }
             rr = r2;
@@ -463,6 +480,7 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             rep.warnings.push(format!("rim width {w:.2} ≤ wall {:.2}: no thickening needed", ring.t));
         }
     }
+    lap("rim");
     let t = rep.effective_wall;
     let band = |width: f64, what: &str| -> JR<Shape> {
         let m = (t - width) / 2.0;
@@ -471,18 +489,16 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
         }
         rr.offset_region(-m).map_err(|_| format!("{what} ({width:.2} mm) does not fit in the {t:.2} mm wall; add rim thickening"))
     };
-    let add = |half: Half, solid: Shape, lower: &mut Shape, upper: &mut Shape| -> JR<()> {
-        let s = if half == Half::Upper { upper } else { lower };
-        *s = tidy(k(s.fuse(&solid), "joint fuse")?);
+    let add = |half: Half, solid: Shape, pend: &mut Pending| -> JR<()> {
+        pend.adds[half as usize].push(solid);
         Ok(())
     };
-    let cut = |half: Half, tool: &Shape, lower: &mut Shape, upper: &mut Shape, what: &str, depth: f64| -> JR<()> {
+    let cut = |half: Half, tool: &Shape, pend: &mut Pending, what: &str, depth: f64| -> JR<()> {
         let avail = room(half);
         if depth + MIN_WALL > avail {
             return Err(format!("{what} depth {depth:.2} mm needs {:.2} mm of material but only {avail:.2} mm is available on that side of the plane (too close to the floor/lid)", depth + MIN_WALL));
         }
-        let s = if half == Half::Upper { upper } else { lower };
-        *s = tidy(k(s.cut(tool), what)?);
+        pend.cuts[half as usize].push(tool.clone());
         Ok(())
     };
 
@@ -509,7 +525,10 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 let sel = crate::select::EdgeSelector::OfFace(crate::select::FaceSelector::Extreme { normal: top, which: crate::select::Extremum::Max });
                 if let Ok(ids) = sel.resolve(&tongue) {
                     let req: Vec<(u32, f64)> = ids.iter().map(|e| (*e, li.min(tw * 0.45))).collect();
-                    if let Ok((s, r)) = occt::dressup::chamfer(&tongue, &req, &occt::dressup::DressUpOptions { auto_reduce: true, ..Default::default() }) {
+                    let sizes: Vec<f64> = req.iter().map(|r| r.1).collect();
+                    if let Some(s) = tongue.chamfer_raw(&ids, &sizes).ok().filter(|s| s.is_valid()) {
+                        tongue = s;
+                    } else if let Ok((s, r)) = occt::dressup::chamfer(&tongue, &req, &occt::dressup::DressUpOptions { auto_reduce: true, ..Default::default() }) {
                         if !r.all_applied() {
                             rep.warnings.push(format!("lead-in: {}", r.summary()));
                         }
@@ -519,8 +538,8 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             }
             let groove = k(prism(&band(gw, "groove")?, n, 0.0, -side(*tongue_on) * depth), "groove")?;
             let g_half = other(*tongue_on);
-            add(*tongue_on, tongue, &mut lower, &mut upper)?;
-            cut(g_half, &groove, &mut lower, &mut upper, "groove", depth)?;
+            add(*tongue_on, tongue, &mut pend)?;
+            cut(g_half, &groove, &mut pend, "groove", depth)?;
             rep.clearance_per_side = Some((gw - tw) / 2.0);
         }
         JointKind::Lip { width, height, clearance, lip_on } => {
@@ -543,8 +562,8 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             };
             let lip = k(prism(&inner(lw, "lip")?, n, 0.0, -side(*lip_on) * lh), "lip")?;
             let recess = k(prism(&inner(rw, "recess")?, n, 0.0, -side(*lip_on) * depth), "recess")?;
-            add(*lip_on, lip, &mut lower, &mut upper)?;
-            cut(other(*lip_on), &recess, &mut lower, &mut upper, "lip recess", depth)?;
+            add(*lip_on, lip, &mut pend)?;
+            cut(other(*lip_on), &recess, &mut pend, "lip recess", depth)?;
             rep.clearance_per_side = Some(rw - lw);
         }
         JointKind::ORingGland { cord, squeeze, depth, width, gland_on, compression_rib } => {
@@ -589,10 +608,10 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 rep.warnings.push(format!("gland corner radius {min_r:.2} mm is below the {min_bend:.2} mm bend guidance for a {d:.2} mm cord (round the outline corners)"));
             }
             let gland = k(prism(&gland_face, n, 0.0, side(*gland_on) * gd), "gland")?;
-            cut(*gland_on, &gland, &mut lower, &mut upper, "gland", gd)?;
+            cut(*gland_on, &gland, &mut pend, "gland", gd)?;
             if rib_h > 0.0 {
                 let rib = k(prism(&band(rib_w, "compression rib")?, n, 0.0, side(*gland_on) * rib_h), "rib")?;
-                add(other(*gland_on), rib, &mut lower, &mut upper)?;
+                add(other(*gland_on), rib, &mut pend)?;
                 rep.clearance_per_side = Some((gw - rib_w) / 2.0);
             }
             rep.oring = Some(ORingReport {
@@ -699,19 +718,68 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 return Err(format!("no snap-fit position could be placed: {}", why.join("; ")));
             }
             for (bm, w) in beams.into_iter().zip(windows) {
-                add(*beam_on, bm, &mut lower, &mut upper)?;
-                let s = if other(*beam_on) == Half::Upper { &mut upper } else { &mut lower };
-                *s = tidy(k(s.cut(&w), "snap window")?);
+                add(*beam_on, bm, &mut pend)?;
+                pend.cuts[other(*beam_on) as usize].push(w);
             }
             rep.clearance_per_side = Some(c);
         }
     }
+    let [lo_ops, up_ops] = pend.take();
+    // the halves are independent: finish them concurrently
+    let (lo, up) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| apply_pending(upper, up_ops));
+        let lo = apply_pending(lower, lo_ops);
+        (lo, h.join().unwrap_or_else(|_| Err("joint worker panicked".to_string())))
+    });
+    lower = lo?;
+    upper = up?;
+    lap("joint geometry");
     for (nm, s) in [("lower", &lower), ("upper", &upper)] {
         if !s.is_valid() || s.count(occt::ShapeKind::Solid) == 0 {
             return Err(format!("the {nm} half came out invalid; joint not applied"));
         }
     }
+    lap("validate");
     Ok((lower, upper, rep))
+}
+
+#[derive(Default)]
+struct Pending {
+    /// Indexed by `Half as usize` (Lower = 0, Upper = 1).
+    adds: [Vec<Shape>; 2],
+    cuts: [Vec<Shape>; 2],
+}
+
+impl Pending {
+    fn take(self) -> [(Vec<Shape>, Vec<Shape>); 2] {
+        let [al, au] = self.adds;
+        let [cl, cu] = self.cuts;
+        [(al, cl), (au, cu)]
+    }
+}
+
+fn apply_pending(mut s: Shape, (adds, cuts): (Vec<Shape>, Vec<Shape>)) -> JR<Shape> {
+    let prof = std::env::var("CW_PROF").is_ok();
+    let t = std::time::Instant::now();
+    let lap = |w: &str| {
+        if prof {
+            eprintln!("    apply {w}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0)
+        }
+    };
+    if !adds.is_empty() {
+        let mut all = vec![&s];
+        all.extend(adds.iter());
+        s = k(Shape::fuse_all(&all), "joint fuse")?;
+        lap("fuse");
+    }
+    if !cuts.is_empty() {
+        let tool = if cuts.len() == 1 { cuts[0].clone() } else { k(Shape::fuse_all(&cuts.iter().collect::<Vec<_>>()), "joint tools")? };
+        s = k(s.cut(&tool), "joint cut")?;
+        lap("cut");
+    }
+    let r = tidy(s);
+    lap("tidy");
+    Ok(r)
 }
 
 struct SnapDims {
