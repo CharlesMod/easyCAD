@@ -113,6 +113,8 @@ pub struct CaseworkApp {
     pub state_dump: Option<crate::e2e_state::StateDump>,
     /// Tab / Shift+Tab presses taken from the raw input for the pick stack.
     pub pending_cycle: i32,
+    /// A text field had keyboard focus this frame.
+    pub typing: bool,
 }
 
 impl CaseworkApp {
@@ -178,6 +180,7 @@ impl CaseworkApp {
             quit: false,
             state_dump: crate::e2e_state::StateDump::from_env(),
             pending_cycle: 0,
+            typing: false,
         }
     }
 
@@ -859,32 +862,34 @@ impl CaseworkApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let typing = ctx.egui_wants_keyboard_input();
-        let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+        self.typing = typing;
         let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         let pressed_m = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        if cmd {
+        // Chords are matched on each key event's own modifiers: a fast Ctrl+Z (or one
+        // typed during a slow frame) has Ctrl released again by the end of the frame.
+        // In a text field Ctrl+Z / Ctrl+Shift+Z stay the field's own undo.
+        if !typing {
             if pressed_m(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
                 || pressed_m(Modifiers::COMMAND, Key::Y)
             {
                 self.redo();
-            } else if !shift && pressed_m(Modifiers::COMMAND, Key::Z) && !typing {
+            } else if pressed_m(Modifiers::COMMAND, Key::Z) {
                 self.undo();
             }
-            if pressed_m(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
-                self.save(true);
-            } else if pressed_m(Modifiers::COMMAND, Key::S) {
-                self.save(false);
-            }
-            if pressed_m(Modifiers::COMMAND, Key::O) {
-                self.open_dialog_file();
-            }
-            if pressed_m(Modifiers::COMMAND, Key::N) {
-                self.new_doc();
-            }
-            if pressed_m(Modifiers::COMMAND, Key::I) {
-                self.import_file();
-            }
-            return;
+        }
+        if pressed_m(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            self.save(true);
+        } else if pressed_m(Modifiers::COMMAND, Key::S) {
+            self.save(false);
+        }
+        if pressed_m(Modifiers::COMMAND, Key::O) {
+            self.open_dialog_file();
+        }
+        if pressed_m(Modifiers::COMMAND, Key::N) {
+            self.new_doc();
+        }
+        if pressed_m(Modifiers::COMMAND, Key::I) {
+            self.import_file();
         }
         if typing {
             return;
@@ -1041,6 +1046,13 @@ impl CaseworkApp {
 
 impl eframe::App for CaseworkApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::env::var_os("CASEWORK_DEBUG_KEYS").is_some() {
+            for e in &raw_input.events {
+                if matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)) {
+                    eprintln!("key event: {e:?}");
+                }
+            }
+        }
         self.intercept_keys(ctx, raw_input);
     }
 

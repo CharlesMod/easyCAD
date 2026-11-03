@@ -293,7 +293,7 @@ pub fn sensor_node() -> Document {
         .find(|i| i.import.name == "sensor-node")
         .map(|i| i.id)
         .unwrap();
-    doc.add_feature(
+    let standoffs = doc.add_feature(
         "Standoffs",
         FeatureKind::StandoffsFromPcb {
             body: Some(base),
@@ -310,6 +310,8 @@ pub fn sensor_node() -> Document {
             draft_deg: "draft".into(),
         },
     );
+    // standoffs start on the floor, whatever the wall thickness
+    crate::adapters::bind_plane_offset(&mut doc, standoffs, "wall");
 
     let mut rib = Sketch::new("Rib", Plane::XY.offset(2.0));
     rib.line(DVec2::new(-25.0, 12.0), DVec2::new(25.0, 12.0));

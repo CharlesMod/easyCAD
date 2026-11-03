@@ -163,5 +163,6 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "teardropped": m.map(|m| m.result.process.teardropped.len()),
         "toasts": app.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>(),
         "overlay": app.overlay_name(),
+        "typing": app.typing,
     })
 }

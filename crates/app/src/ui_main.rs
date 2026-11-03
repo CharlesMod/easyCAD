@@ -878,11 +878,21 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
                     let buf = app.params.buffers.entry(p.name.clone()).or_insert_with(|| display_expr(&p.expr.0));
                     let id = ui.scope_id().with(("param", &p.name));
                     let o = widgets::expr_field(ui, id, buf, 98.0, &env, None);
-                    if o.changed {
+                    let escaped = o.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if escaped {
+                        // Esc abandons the edit: back to the stored expression
+                        *buf = display_expr(&p.expr.0);
+                        if app.params.pending.as_ref().is_some_and(|x| x.0 == p.name) {
+                            app.params.pending = None;
+                        }
+                        if app.params.error.as_ref().is_some_and(|x| x.0 == p.name) {
+                            app.params.error = None;
+                        }
+                    } else if o.changed {
                         let text = buf.clone();
                         app.params.pending = Some((p.name.clone(), text, app.now + crate::app::DEBOUNCE));
                     }
-                    if o.committed {
+                    if o.committed && !escaped {
                         if let Some((n, t, _)) = app.params.pending.take() {
                             app.params.pending = Some((n, t, app.now));
                         }
