@@ -992,6 +992,9 @@ impl Dialog {
         let id = ui.scope_id().with("dlg");
         crate::widgets::card_frame().show(ui, |ui| {
             ui.set_width(360.0);
+            // rules are painted once the card's final width is known (a wide
+            // report can grow it past 360 after the header rule was placed)
+            let mut rules: Vec<f32> = Vec::new();
             // header
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(14, 12))
@@ -1010,7 +1013,8 @@ impl Dialog {
                         });
                     });
                 });
-            widgets::divider(ui);
+            rules.push(ui.cursor().top());
+            ui.add_space(1.0);
             let changed = egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(14, 12))
                 .show(ui, |ui| {
@@ -1032,7 +1036,8 @@ impl Dialog {
                         ui.label(RichText::new(err).size(11.5).color(theme::ORANGE_SOFT));
                     });
             }
-            widgets::divider(ui);
+            rules.push(ui.cursor().top());
+            ui.add_space(1.0);
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(14, 12))
                 .show(ui, |ui| {
@@ -1054,6 +1059,11 @@ impl Dialog {
                         });
                     });
                 });
+            let x = ui.min_rect().x_range();
+            for y in rules {
+                ui.painter()
+                    .hline(x, y, egui::Stroke::new(1.0, theme::DIVIDER));
+            }
         });
         ev
     }

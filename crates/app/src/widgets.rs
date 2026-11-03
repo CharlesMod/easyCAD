@@ -407,6 +407,7 @@ pub fn button(ui: &mut Ui, label: &str) -> Response {
 }
 
 /// Dialog section divider (full width line).
+/// A rule inside a frame with a 14 px horizontal margin, bleeding to the card edge.
 pub fn divider(ui: &mut Ui) {
     let r = ui.available_rect_before_wrap();
     let y = ui.cursor().top();

@@ -679,9 +679,14 @@ impl FilletD {
                             widgets::icon(ui, Icon::Warn, 16.0, theme::ORANGE_SOFT);
                             ui.vertical(|ui| {
                                 ui.label(format!("{nm} · r {r_txt} doesn't fit"));
+                                let rest = match others {
+                                    0 => String::new(),
+                                    1 => " The other edge is kept either way.".to_string(),
+                                    n => format!(" The other {n} edges are kept either way."),
+                                };
                                 let msg = match max {
-                                    Some(m) => format!("The largest {word} that fits is {m:.2}. The other {others} edges are kept either way."),
-                                    None => format!("No {word} size works here ({reason}). The other {others} edges are kept either way."),
+                                    Some(m) => format!("The largest {word} that fits is {m:.2}.{rest}"),
+                                    None => format!("No {word} size works here ({reason}).{rest}"),
                                 };
                                 ui.label(RichText::new(msg).size(11.0).color(theme::hex(0xc9b8a8)));
                                 ui.horizontal_wrapped(|ui| {
