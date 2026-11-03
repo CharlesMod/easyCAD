@@ -722,9 +722,19 @@ pub fn point_in_polygon(q: DVec2, poly: &[DVec2]) -> bool {
     inside
 }
 
-/// Signed area of a loop (positive = CCW), exact for arcs.
+/// Signed area of a loop (positive = CCW), exact for arcs (Green's theorem).
 pub fn loop_area(l: &Loop2) -> f64 {
-    signed_area(&polygonize(l))
+    l.iter()
+        .map(|s| match *s {
+            Segment2::Line { a, b } => a.perp_dot(b) / 2.0,
+            Segment2::Arc { center, start, end, ccw } => {
+                let r2 = (start - center).length_squared();
+                let sweep = arc_sweep(center, start, end, ccw) * if ccw { 1.0 } else { -1.0 };
+                center.perp_dot(end - start) / 2.0 + r2 * sweep / 2.0
+            }
+            Segment2::Circle { radius, .. } => std::f64::consts::PI * radius * radius,
+        })
+        .sum()
 }
 
 /// Chain segments into closed loops / open chains, then nest loops by containment
@@ -789,7 +799,7 @@ pub fn profiles_from_segments(segs: &[Segment2], tol: f64) -> SketchProfiles {
     let mut profiles = Vec::new();
     let mut outer_ids = Vec::new();
     for i in 0..n {
-        if depth[i] % 2 == 0 {
+        if depth[i].is_multiple_of(2) {
             let mut l = loops[i].clone();
             if signed_area(&polys[i]) < 0.0 {
                 l = reverse_loop(&l);
