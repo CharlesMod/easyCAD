@@ -193,7 +193,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         let n = std::mem::take(&mut app.pending_cycle);
         app.stack.cycle(n);
     }
-    if hover.is_some() && !app.stack.is_empty() && !ui.ctx().egui_wants_keyboard_input() {
+    if hover.is_some() && !app.stack.is_empty() && !ui.ctx().text_edit_focused() {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)) {
             app.stack.cycle(-1);
         } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {

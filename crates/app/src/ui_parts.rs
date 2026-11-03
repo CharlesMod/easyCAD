@@ -313,7 +313,7 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
         banner(app, ui, rect);
     });
     // Enter places at the picked hole edges (or the origin)
-    if !ui.ctx().egui_wants_keyboard_input()
+    if !ui.ctx().text_edit_focused()
         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
     {
         let keys: Vec<PickKey> = app

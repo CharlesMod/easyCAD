@@ -1236,7 +1236,7 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
             }
         }
     }
-    if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !ui.ctx().egui_wants_keyboard_input() {
+    if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !ui.ctx().text_edit_focused() {
         if let (Some(sel), Some(dr)) = (d.selected, &mut d.draft) {
             dr.views.retain(|v| v.id != sel);
             d.selected = None;

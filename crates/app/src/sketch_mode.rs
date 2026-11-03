@@ -1683,7 +1683,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         s.hover = s.pick(rect, hp);
     }
     // keyboard
-    let typing = ui.ctx().egui_wants_keyboard_input();
+    let typing = ui.ctx().text_edit_focused();
     let mut cancel = false;
     if !typing {
         ui.input_mut(|i| {

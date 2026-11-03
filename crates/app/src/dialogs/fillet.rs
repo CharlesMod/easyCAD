@@ -124,6 +124,8 @@ pub struct FilletD {
     pub auto_heal: bool,
     /// Feature report says a stored edge reference no longer matches.
     pub unresolved: Option<(Selector, Option<Selector>, f64)>,
+    /// OK was pressed once with edges that still fail: a second OK keeps them.
+    pub keep_failing: bool,
 }
 
 impl FilletD {
@@ -145,6 +147,7 @@ impl FilletD {
             setback: false,
             auto_heal: true,
             unresolved: None,
+            keep_failing: false,
         }
     }
 
@@ -186,6 +189,7 @@ impl FilletD {
             setback: false,
             auto_heal: true,
             unresolved: None,
+            keep_failing: false,
         }
     }
 
@@ -345,7 +349,7 @@ impl FilletD {
         }
     }
 
-    fn totals(&self) -> (usize, usize, usize, usize) {
+    pub fn totals(&self) -> (usize, usize, usize, usize) {
         let (mut done, mut total, mut pending, mut skipped) = (0, 0, 0, 0);
         for s in &self.sets {
             for (i, _) in s.edges.iter().enumerate() {

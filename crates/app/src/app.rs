@@ -588,8 +588,22 @@ impl CaseworkApp {
     }
 
     pub fn close_dialog(&mut self, ok: bool) {
-        let Some(d) = self.dialog.take() else { return };
+        let Some(mut d) = self.dialog.take() else { return };
         if ok {
+            // a fillet whose report still has failing edges: say so once
+            if let crate::dialogs::Body::Fillet(f) = &mut d.body {
+                let (_, _, failing, _) = f.totals();
+                if failing > 0 && !f.keep_failing {
+                    f.keep_failing = true;
+                    d.error = Some(format!(
+                        "{failing} edge{} still won't take this size. Use the largest size or skip {}; OK again keeps the feature failing.",
+                        if failing == 1 { "" } else { "s" },
+                        if failing == 1 { "it" } else { "them" },
+                    ));
+                    self.dialog = Some(d);
+                    return;
+                }
+            }
             let cx = self.dialog_cx_data();
             match d.build(&cx) {
                 Ok(feats) if !feats.is_empty() => {
@@ -920,7 +934,15 @@ impl CaseworkApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let typing = ctx.egui_wants_keyboard_input();
+        // Only a text field holds the keyboard. A button or checkbox that took focus
+        // (Tab out of a field) must not swallow Enter / Esc / shortcuts: Enter there
+        // "clicked" e.g. "+ New edge set" instead of the dialog's OK.
+        let typing = ctx.text_edit_focused();
+        if !typing {
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
         self.typing = typing;
         let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         let pressed_m = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -1080,7 +1102,7 @@ impl CaseworkApp {
         if !self.mode.is_model()
             || self.hover_pos.is_none()
             || self.stack.is_empty()
-            || ctx.egui_wants_keyboard_input()
+            || ctx.text_edit_focused()
         {
             return;
         }

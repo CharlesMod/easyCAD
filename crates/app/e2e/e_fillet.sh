@@ -22,8 +22,10 @@ check "r 3 does not fit: the report offers the largest radius" \
     '.dialog.sets[0].results | length == 2 and all(test("Failed .*max: Some\\(1\\.9"))' 60
 idle
 shot 00_too_big
+key Return
+check "OK with failing edges asks first" '.dialog.kind == "Fillet" and (.dialog.error | test("won.t take this size"))'
 
-click 801 411 # Use 1.99
+click 843 411 # Use 1.99
 check "both edges reduced to r_max" \
     '.dialog.sets[0].results | length == 2 and all(test("Reduced .*applied: 1\\.9"))' 60
 idle

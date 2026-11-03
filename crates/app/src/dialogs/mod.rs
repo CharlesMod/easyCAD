@@ -920,7 +920,10 @@ impl Dialog {
 
     pub fn on_preview(&mut self, out: &Output, model: Option<&Output>) {
         match &mut self.body {
-            Body::Fillet(f) => f.on_preview(out, model, self.editing),
+            Body::Fillet(f) => {
+                f.keep_failing = false;
+                f.on_preview(out, model, self.editing)
+            }
             Body::Joint(j) => j.on_preview(out),
             _ => {}
         }
