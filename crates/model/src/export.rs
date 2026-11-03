@@ -137,6 +137,63 @@ pub fn write_3mf(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     Ok(())
 }
 
+/// 3MF of an assembly: one `<object>` per entry of `objects` (its bodies merged in
+/// the object's own frame) and one build `<item>` per `(object index, transform)`
+/// (row-major 3×4 rotation | translation, as `assembly::Transform::to_rows`).
+pub fn write_3mf_assembly(objects: &[(String, Vec<&Body>)], items: &[(usize, [f64; 12])], path: &Path) -> Result<(), ExportError> {
+    if objects.is_empty() || items.is_empty() {
+        return Err(ExportError::Empty);
+    }
+    let mut model = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n <metadata name=\"Application\">Casework</metadata>\n <resources>\n",
+    );
+    for (i, (name, bodies)) in objects.iter().enumerate() {
+        model += &format!("  <object id=\"{}\" type=\"model\" name=\"{}\">\n   <mesh>\n    <vertices>\n", i + 1, xml_escape(name));
+        let meshes = print_mesh(bodies)?;
+        let mut base = 0u32;
+        let mut tris = String::new();
+        for m in &meshes {
+            for v in &m.vertices {
+                model += &format!("     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>\n", v[0], v[1], v[2]);
+            }
+            for t in &m.triangles {
+                tris += &format!("     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>\n", t[0] + base, t[1] + base, t[2] + base);
+            }
+            base += m.vertices.len() as u32;
+        }
+        model += "    </vertices>\n    <triangles>\n";
+        model += &tris;
+        model += "    </triangles>\n   </mesh>\n  </object>\n";
+    }
+    model += " </resources>\n <build>\n";
+    for (k, r) in items {
+        // 3MF uses row vectors: p' = p · M, M = [m00 m01 m02; m10 ..; m20 ..; m30 m31 m32]
+        let m = [r[0], r[4], r[8], r[1], r[5], r[9], r[2], r[6], r[10], r[3], r[7], r[11]];
+        let t: Vec<String> = m.iter().map(|x| format!("{}", if x.abs() < 1e-15 { 0.0 } else { *x })).collect();
+        model += &format!("  <item objectid=\"{}\" transform=\"{}\"/>\n", k + 1, t.join(" "));
+    }
+    model += " </build>\n</model>\n";
+    write_3mf_package(&model, path)
+}
+
+fn write_3mf_package(model: &str, path: &Path) -> Result<(), ExportError> {
+    let f = std::fs::File::create(path)?;
+    let mut z = zip::ZipWriter::new(f);
+    let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    z.start_file("[Content_Types].xml", opt)?;
+    z.write_all(
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n</Types>\n",
+    )?;
+    z.start_file("_rels/.rels", opt)?;
+    z.write_all(
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n</Relationships>\n",
+    )?;
+    z.start_file("3D/3dmodel.model", opt)?;
+    z.write_all(model.as_bytes())?;
+    z.finish()?;
+    Ok(())
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }

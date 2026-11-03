@@ -374,3 +374,57 @@ fn faults_outside_kernel_calls_reach_rusts_handler() {
     assert!(err.contains("overflowed its stack"), "stderr: {err}");
     assert!(!err.contains("*** Abort ***"), "stderr: {err}");
 }
+
+/// XCAF product structure: a part instanced twice under a sub-assembly, the
+/// sub-assembly placed in a root; names, colours and placements round-trip.
+#[test]
+fn step_assembly_tree_round_trip() {
+    use occt::{StepLink, StepNode, StepTree};
+    let screw = Shape::cylinder(DVec3::ZERO, DVec3::Z, 1.5, 10.0).unwrap();
+    let plate = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 4.0)).unwrap();
+    let t = |x: f64, y: f64, z: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, y, 0.0, 0.0, 1.0, z];
+    let rz90 = |x: f64| [0.0, -1.0, 0.0, x, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let tree = StepTree {
+        nodes: vec![
+            StepNode { name: "Rack".into(), children: vec![StepLink { child: 1, name: "Bracket:1".into(), matrix: t(0.0, 0.0, 0.0) }, StepLink { child: 1, name: "Bracket:2".into(), matrix: rz90(100.0) }], ..Default::default() },
+            StepNode {
+                name: "Bracket".into(),
+                children: vec![
+                    StepLink { child: 2, name: "Plate".into(), matrix: t(0.0, 0.0, 0.0) },
+                    StepLink { child: 3, name: "Screw:1".into(), matrix: t(5.0, 5.0, 4.0) },
+                    StepLink { child: 3, name: "Screw:2".into(), matrix: t(35.0, 5.0, 4.0) },
+                ],
+                ..Default::default()
+            },
+            StepNode { name: "Plate".into(), color: Some([0.2, 0.4, 0.8]), shape: Some(plate), children: vec![] },
+            StepNode { name: "SHCS M3".into(), color: Some([0.1, 0.1, 0.1]), shape: Some(screw), children: vec![] },
+        ],
+        roots: vec![0],
+    };
+    let step = tree.to_step_string().unwrap();
+    let back = StepTree::read(&step).unwrap();
+    assert_eq!(back.roots.len(), 1);
+    let root = &back.nodes[back.roots[0]];
+    assert_eq!(root.name, "Rack");
+    assert_eq!(root.children.len(), 2);
+    let names: Vec<&str> = root.children.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Bracket:1", "Bracket:2"]);
+    assert_eq!(root.children[0].child, root.children[1].child, "one Bracket product, instanced twice");
+    let m = root.children[1].matrix;
+    for (a, b) in m.iter().zip(rz90(100.0)) {
+        assert!((a - b).abs() < 1e-9, "{m:?}");
+    }
+    let br = &back.nodes[root.children[0].child];
+    assert_eq!(br.name, "Bracket");
+    assert_eq!(br.children.len(), 3);
+    let screw_nodes: Vec<usize> = br.children.iter().filter(|l| l.name.starts_with("Screw")).map(|l| l.child).collect();
+    assert_eq!(screw_nodes.len(), 2);
+    assert_eq!(screw_nodes[0], screw_nodes[1]);
+    let sn = &back.nodes[screw_nodes[0]];
+    assert_eq!(sn.name, "SHCS M3");
+    assert!(sn.color.is_some_and(|c| (c[0] - 0.1).abs() < 0.01));
+    assert!(close(sn.shape.as_ref().unwrap().volume().unwrap(), std::f64::consts::PI * 1.5 * 1.5 * 10.0, 1e-6));
+    // the plain reader sees 2 plates + 4 screws, placed
+    let flat = Shape::read_step_str(&step).unwrap();
+    assert_eq!(flat.solids().unwrap().len(), 6);
+}

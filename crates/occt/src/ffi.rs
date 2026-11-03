@@ -107,6 +107,27 @@ pub mod bridge {
         has_color: bool,
     }
 
+    /// A product (part or sub-assembly) of an XCAF assembly. `shape` indexes the
+    /// direct children of the accompanying compound (-1 for an assembly).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct AsmNode {
+        name: String,
+        r: f32,
+        g: f32,
+        b: f32,
+        has_color: bool,
+        shape: i32,
+    }
+
+    /// An instance of node `child` inside assembly node `parent`; its placement is
+    /// the 12 doubles at `12 * index` of the accompanying matrix list (row-major 3×4).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct AsmLink {
+        parent: u32,
+        child: u32,
+        name: String,
+    }
+
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct BBox {
         min: V3,
@@ -134,6 +155,9 @@ pub mod bridge {
         fn sub_shape(s: &Shape, kind: u32, index: u32) -> Result<UniquePtr<Shape>>;
         fn compound_new() -> UniquePtr<Shape>;
         fn compound_add(c: Pin<&mut Shape>, s: &Shape) -> Result<()>;
+        /// Number of direct children (TopoDS_Iterator).
+        fn child_count(s: &Shape) -> u32;
+        fn child_at(s: &Shape, i: u32) -> Result<UniquePtr<Shape>>;
 
         fn make_box(origin: V3, dx: f64, dy: f64, dz: f64) -> Result<UniquePtr<Shape>>;
         fn make_cylinder(base: V3, dir: V3, r: f64, h: f64) -> Result<UniquePtr<Shape>>;
@@ -210,6 +234,18 @@ pub mod bridge {
         fn write_step_xcaf(c: &Shape, parts: &[XcafPart]) -> Result<String>;
         /// For each face of `c` (MapShapes order), the index of the direct child owning it.
         fn face_owners(c: &Shape) -> Result<Vec<u32>>;
+        /// Write an XCAF product structure: `nodes` (parts reference children of
+        /// `shapes`), `links` (instances with placements in `mats`), free `roots`.
+        fn write_step_asm(shapes: &Shape, nodes: &[AsmNode], links: &[AsmLink], mats: &[f64], roots: &[u32]) -> Result<String>;
+        /// Read the product structure back (inverse of `write_step_asm`); returns the
+        /// compound of part shapes (unplaced) indexed by `AsmNode::shape`.
+        fn read_step_asm(
+            data: &str,
+            nodes: &mut Vec<AsmNode>,
+            links: &mut Vec<AsmLink>,
+            mats: &mut Vec<f64>,
+            roots: &mut Vec<u32>,
+        ) -> Result<UniquePtr<Shape>>;
         fn read_step_file(path: &str) -> Result<UniquePtr<Shape>>;
         fn read_step_str(data: &str) -> Result<UniquePtr<Shape>>;
         fn write_step_file(s: &Shape, path: &str) -> Result<()>;

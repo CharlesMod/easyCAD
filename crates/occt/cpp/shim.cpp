@@ -10,6 +10,7 @@
 #include <csignal>
 #include <cstring>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -75,6 +76,7 @@
 #include <TDF_Label.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDF_Tool.hxx>
 #include <TDocStd_Document.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_ColorTool.hxx>
@@ -437,6 +439,21 @@ void compound_add(Shape &c, const Shape &s) {
   requireShape(s, "compound_add");
   BRep_Builder b;
   b.Add(c.s, s.s);
+}
+
+uint32_t child_count(const Shape &s) {
+  uint32_t n = 0;
+  if (s.s.IsNull()) return 0;
+  for (TopoDS_Iterator it(s.s); it.More(); it.Next()) ++n;
+  return n;
+}
+
+std::unique_ptr<Shape> child_at(const Shape &s, uint32_t i) {
+  requireShape(s, "child_at");
+  uint32_t n = 0;
+  for (TopoDS_Iterator it(s.s); it.More(); it.Next(), ++n)
+    if (n == i) return wrap(it.Value());
+  fail("child_at: index out of range");
 }
 
 // ---------------------------------------------------------------- primitives
@@ -1618,6 +1635,165 @@ rust::Vec<uint32_t> face_owners(const Shape &c) {
   rust::Vec<uint32_t> out;
   for (auto v : own) out.push_back(v);
   return out;
+}
+
+namespace {
+gp_Trsf trsfFrom(const double *m) {
+  gp_Trsf t;
+  t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+  return t;
+}
+
+void trsfTo(const gp_Trsf &t, rust::Vec<double> &out) {
+  for (int r = 1; r <= 3; ++r)
+    for (int c = 1; c <= 4; ++c) out.push_back(t.Value(r, c));
+}
+
+struct AsmRead {
+  Handle(XCAFDoc_ShapeTool) st;
+  Handle(XCAFDoc_ColorTool) ct;
+  rust::Vec<AsmNode> *nodes;
+  rust::Vec<AsmLink> *links;
+  rust::Vec<double> *mats;
+  BRep_Builder bb;
+  TopoDS_Compound comp;
+  int nshapes = 0;
+  std::map<std::string, uint32_t> seen;
+
+  uint32_t visit(const TDF_Label &label, int depth) {
+    if (depth > 64) fail("STEP assembly is nested too deeply");
+    TCollection_AsciiString entry;
+    TDF_Tool::Entry(label, entry);
+    std::string key = entry.ToCString();
+    auto f = seen.find(key);
+    if (f != seen.end()) return f->second;
+    AsmNode n;
+    n.name = rust::String(labelName(label));
+    Quantity_Color c;
+    n.has_color = labelColor(ct, label, c);
+    if (!n.has_color) {
+      TopoDS_Shape sh = XCAFDoc_ShapeTool::GetShape(label);
+      n.has_color = !sh.IsNull() && (ct->GetColor(sh, XCAFDoc_ColorSurf, c) || ct->GetColor(sh, XCAFDoc_ColorGen, c));
+    }
+    if (n.has_color) {
+      double r, g, b;
+      c.Values(r, g, b, Quantity_TOC_sRGB);
+      n.r = static_cast<float>(r);
+      n.g = static_cast<float>(g);
+      n.b = static_cast<float>(b);
+    }
+    n.shape = -1;
+    const uint32_t me = static_cast<uint32_t>(nodes->size());
+    nodes->push_back(n);
+    seen[key] = me;
+    if (XCAFDoc_ShapeTool::IsAssembly(label)) {
+      TDF_LabelSequence comps;
+      XCAFDoc_ShapeTool::GetComponents(label, comps);
+      for (int i = 1; i <= comps.Length(); ++i) {
+        TDF_Label cl = comps.Value(i);
+        TDF_Label ref;
+        if (!XCAFDoc_ShapeTool::GetReferredShape(cl, ref)) continue;
+        uint32_t child = visit(ref, depth + 1);
+        AsmLink l;
+        l.parent = me;
+        l.child = child;
+        l.name = rust::String(labelName(cl));
+        links->push_back(l);
+        trsfTo(XCAFDoc_ShapeTool::GetLocation(cl).Transformation(), *mats);
+      }
+    } else {
+      TopoDS_Shape sh = XCAFDoc_ShapeTool::GetShape(label);
+      if (!sh.IsNull()) {
+        bb.Add(comp, sh.Located(TopLoc_Location()));
+        (*nodes)[me].shape = nshapes++;
+      }
+    }
+    return me;
+  }
+};
+} // namespace
+
+rust::String write_step_asm(const Shape &shapes, rust::Slice<const AsmNode> nodes, rust::Slice<const AsmLink> links,
+                            rust::Slice<const double> mats, rust::Slice<const uint32_t> roots) {
+  return withStepLock([&] {
+    requireShape(shapes, "write_step_asm");
+    std::vector<TopoDS_Shape> kids;
+    for (TopoDS_Iterator it(shapes.s); it.More(); it.Next()) kids.push_back(it.Value());
+    const size_t n = nodes.size();
+    if (n == 0) fail("STEP assembly: no products");
+    if (mats.size() < links.size() * 12) fail("STEP assembly: one placement per instance required");
+    for (uint32_t r : roots)
+      if (r >= n) fail("STEP assembly: root index out of range");
+    std::vector<bool> isAsm(n, false);
+    for (const auto &l : links) {
+      if (l.parent >= n || l.child >= n) fail("STEP assembly: instance index out of range");
+      isAsm[l.parent] = true;
+    }
+    Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+    Handle(TDocStd_Document) doc;
+    app->NewDocument("MDTV-XCAF", doc);
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    std::vector<TDF_Label> labels(n);
+    for (size_t i = 0; i < n; ++i) {
+      const AsmNode &nd = nodes[i];
+      if (isAsm[i]) {
+        labels[i] = st->NewShape();
+      } else {
+        if (nd.shape < 0 || static_cast<size_t>(nd.shape) >= kids.size()) fail("STEP assembly: part `" + std::string(nd.name) + "` has no shape");
+        labels[i] = st->AddShape(kids[static_cast<size_t>(nd.shape)], Standard_False, Standard_False);
+      }
+      TDataStd_Name::Set(labels[i], TCollection_ExtendedString(std::string(nd.name).c_str(), Standard_True));
+      if (nd.has_color) ct->SetColor(labels[i], Quantity_Color(nd.r, nd.g, nd.b, Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+    }
+    for (size_t k = 0; k < links.size(); ++k) {
+      const AsmLink &l = links[k];
+      TopLoc_Location loc(trsfFrom(mats.data() + 12 * k));
+      TDF_Label c = st->AddComponent(labels[l.parent], labels[l.child], loc);
+      if (c.IsNull()) fail("STEP assembly: cannot add instance `" + std::string(l.name) + "`");
+      if (!l.name.empty()) TDataStd_Name::Set(c, TCollection_ExtendedString(std::string(l.name).c_str(), Standard_True));
+    }
+    st->UpdateAssemblies();
+    Interface_Static::SetCVal("write.step.unit", "MM");
+    Interface_Static::SetCVal("write.step.schema", "AP214IS");
+    STEPCAFControl_Writer w;
+    w.SetColorMode(Standard_True);
+    w.SetNameMode(Standard_True);
+    if (!w.Transfer(doc, STEPControl_AsIs)) fail("STEP transfer failed");
+    std::ostringstream os;
+    if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
+    app->Close(doc);
+    return rust::String(os.str());
+  });
+}
+
+std::unique_ptr<Shape> read_step_asm(rust::Str data, rust::Vec<AsmNode> &nodes, rust::Vec<AsmLink> &links,
+                                     rust::Vec<double> &mats, rust::Vec<uint32_t> &roots) {
+  return withStepLock([&] {
+    Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+    Handle(TDocStd_Document) doc;
+    app->NewDocument("MDTV-XCAF", doc);
+    STEPCAFControl_Reader rd;
+    rd.SetColorMode(Standard_True);
+    rd.SetNameMode(Standard_True);
+    rd.SetLayerMode(Standard_False);
+    std::istringstream is(std::string(data.data(), data.size()));
+    if (rd.ReadStream("memory.step", is) != IFSelect_RetDone) fail("STEP read failed (not a valid STEP file?)");
+    if (!rd.Transfer(doc)) fail("STEP transfer failed");
+    AsmRead r;
+    r.st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    r.ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    r.nodes = &nodes;
+    r.links = &links;
+    r.mats = &mats;
+    r.bb.MakeCompound(r.comp);
+    TDF_LabelSequence free;
+    r.st->GetFreeShapes(free);
+    for (int i = 1; i <= free.Length(); ++i) roots.push_back(r.visit(free.Value(i), 0));
+    app->Close(doc);
+    if (r.nshapes == 0) fail("STEP file contains no shapes");
+    return wrap(r.comp);
+  });
 }
 
 std::unique_ptr<Shape> read_step_file(rust::Str path) {

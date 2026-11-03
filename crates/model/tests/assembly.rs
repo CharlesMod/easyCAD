@@ -406,3 +406,143 @@ fn bom_rolls_up_quantities() {
     let bom = doc.bom_tree();
     assert_eq!(bom.flat.iter().map(|r| r.total).collect::<Vec<_>>(), vec![1, 4]);
 }
+
+fn pcb_step() -> String {
+    use casework_model::occt::{Shape, StepLink, StepNode, StepTree};
+    let t = |x: f64, y: f64, z: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, y, 0.0, 0.0, 1.0, z];
+    let board = Shape::make_box(DVec3::ZERO, DVec3::new(50.0, 30.0, 1.6)).unwrap();
+    let chip = Shape::make_box(DVec3::ZERO, DVec3::new(5.0, 5.0, 1.0)).unwrap();
+    let usb = Shape::make_box(DVec3::ZERO, DVec3::new(8.0, 6.0, 3.0)).unwrap();
+    StepTree {
+        nodes: vec![
+            StepNode {
+                name: "MainBoard".into(),
+                children: vec![
+                    StepLink { child: 1, name: "PCB".into(), matrix: t(0.0, 0.0, 0.0) },
+                    StepLink { child: 2, name: "U1".into(), matrix: t(10.0, 10.0, 1.6) },
+                    StepLink { child: 2, name: "U2".into(), matrix: t(30.0, 10.0, 1.6) },
+                    StepLink { child: 3, name: "J1".into(), matrix: t(0.0, 12.0, 1.6) },
+                ],
+                ..Default::default()
+            },
+            StepNode { name: "Board".into(), color: Some([0.0, 0.5, 0.1]), shape: Some(board), children: vec![] },
+            StepNode { name: "QFN".into(), color: Some([0.1, 0.1, 0.1]), shape: Some(chip), children: vec![] },
+            StepNode { name: "USB-C".into(), color: Some([0.8, 0.8, 0.8]), shape: Some(usb), children: vec![] },
+        ],
+        roots: vec![0],
+    }
+    .to_step_string()
+    .unwrap()
+}
+
+#[test]
+fn pcb_step_is_a_locked_reference_component_with_sub_parts() {
+    let mut doc = Document::new("Enclosure");
+    let (pcb, occ) = doc.import_step_assembly("Controller", pcb_step().into_bytes(), ComponentId::ROOT, true).unwrap();
+    let c = doc.data.component(pcb).unwrap().clone();
+    assert!(c.locked && c.purchased.is_some());
+    assert_eq!(c.name, "Controller");
+    let kids: Vec<&str> = c.children.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(kids, ["PCB", "U1", "U2", "J1"]);
+    // U1 and U2 are one component instanced twice
+    assert_eq!(c.children[1].component, c.children[2].component);
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let parts: Vec<_> = r.instances.iter().filter(|i| i.path.first() == Some(&occ)).collect();
+    assert_eq!(parts.len(), 4);
+    assert!(parts.iter().all(|i| i.body.reference));
+    let u2 = parts.iter().find(|i| doc.data.occurrence(*i.path.last().unwrap()).unwrap().name == "U2").unwrap();
+    let bb = u2.world_shape().unwrap().bbox().unwrap();
+    assert!((bb.min - DVec3::new(30.0, 10.0, 1.6)).length() < 1e-6, "{bb:?}");
+    assert!(u2.body.appearance().unwrap().parts[0].color.is_some());
+    // locked: no features; BOM: one purchased line, not expanded
+    let e = doc.add_feature_in(pcb, "x", FeatureKind::Split { body: None, plane: Plane::XY, new_name: "x".into() }).unwrap_err();
+    assert!(e.to_string().contains("locked"), "{e}");
+    let bom = doc.bom_tree();
+    assert_eq!(bom.indented.len(), 1);
+    assert!(matches!(bom.indented[0].kind, BomKind::Purchased { ref source, .. } if source == "STEP"));
+    // saved with its blob, reloads and regenerates
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("E.cwk");
+    doc.save_to_dir(&p).unwrap();
+    let mut back = Document::load_from_dir(&p).unwrap();
+    assert_eq!(back.regenerate_assembly().instances.len(), 4);
+}
+
+#[test]
+fn step_assembly_export_round_trips_tree_and_transforms() {
+    let (mut doc, _, _, [_a, b]) = bracket_assembly();
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("rack.step");
+    doc.export_assembly(AssemblyFormat::Step, &p, &AssemblyExportOptions { include_reference: true, include_hidden: false }).unwrap();
+    let data = std::fs::read_to_string(&p).unwrap();
+    let tree = casework_model::occt::StepTree::read(&data).unwrap();
+    let root = &tree.nodes[tree.roots[0]];
+    assert_eq!(root.name, "Rack");
+    let occ: Vec<&str> = root.children.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(occ, ["Bracket:1", "Bracket:2"]);
+    let br = &tree.nodes[root.children[0].child];
+    assert_eq!(br.name, "Bracket");
+    let names: Vec<&str> = br.children.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Plate", "Screw:1", "Screw:2", "Screw:3", "Screw:4"]);
+    // re-import: same tree, same transforms
+    let mut doc2 = Document::new("Back");
+    let (top, _) = doc2.import_step_assembly("Rack", data.into_bytes(), ComponentId::ROOT, false).unwrap();
+    let t = doc2.data.component(top).unwrap().clone();
+    assert_eq!(t.children.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["Bracket:1", "Bracket:2"]);
+    let want = doc.data.occurrence(b).unwrap().transform;
+    let got = t.children[1].transform;
+    assert!((want.translation - got.translation).length() < 1e-9 && want.rotation.angle_between(got.rotation) < 1e-9, "{want:?} vs {got:?}");
+    let r1 = doc.regenerate_assembly().clone();
+    let r2 = doc2.regenerate_assembly().clone();
+    assert!(r2.errors().is_empty(), "{:?}", r2.errors());
+    assert_eq!(r1.instances.len(), r2.instances.len());
+    let centers = |r: &AssemblyResult| {
+        let mut v: Vec<[i64; 3]> = r.instances.iter().map(|i| i.world_shape().unwrap().bbox().unwrap().center()).map(|c| [(c.x * 1e3).round() as i64, (c.y * 1e3).round() as i64, (c.z * 1e3).round() as i64]).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(centers(&r1), centers(&r2));
+    // non-reference re-import: solids are printable (not reference)
+    assert!(r2.instances.iter().any(|i| !i.body.reference));
+}
+
+#[test]
+fn three_mf_and_stl_per_component() {
+    let (mut doc, [_, _lid, _], _, _) = base_lid_doc();
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("box.3mf");
+    doc.export_assembly(AssemblyFormat::ThreeMf, &p, &AssemblyExportOptions::default()).unwrap();
+    let mut z = zip::ZipArchive::new(std::fs::File::open(&p).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut xml).unwrap();
+    let x = roxmltree::Document::parse(&xml).unwrap();
+    let objects: Vec<_> = x.descendants().filter(|n| n.has_tag_name("object")).map(|n| n.attribute("name").unwrap().to_string()).collect();
+    assert_eq!(objects, ["Base", "Lid", "Board"]);
+    let items: Vec<_> = x.descendants().filter(|n| n.has_tag_name("item")).collect();
+    assert_eq!(items.len(), 3);
+    let tr: Vec<f64> = items[0].attribute("transform").unwrap().split(' ').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(tr.len(), 12);
+    assert!((tr[9] - 100.0).abs() < 1e-9, "translation x in m30: {tr:?}");
+    // a second occurrence of the lid becomes a second build item of the same object
+    let lid_c = doc.data.components.iter().find(|c| c.name == "Lid").unwrap().id;
+    doc.add_occurrence(ComponentId::ROOT, lid_c, "Lid:2", Transform::translation(DVec3::new(0.0, 100.0, 0.0))).unwrap();
+    doc.export_assembly(AssemblyFormat::ThreeMf, &p, &AssemblyExportOptions::default()).unwrap();
+    let mut z = zip::ZipArchive::new(std::fs::File::open(&p).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut xml).unwrap();
+    let x = roxmltree::Document::parse(&xml).unwrap();
+    assert_eq!(x.descendants().filter(|n| n.has_tag_name("object")).count(), 3);
+    let items: Vec<_> = x.descendants().filter(|n| n.has_tag_name("item")).map(|n| n.attribute("objectid").unwrap().to_string()).collect();
+    assert_eq!(items.iter().filter(|i| *i == "2").count(), 2, "{items:?}");
+    // STL per component, in each component's own frame
+    let out = dir.path().join("stl");
+    let files = doc.export_assembly(AssemblyFormat::StlPerComponent, &out, &AssemblyExportOptions::default()).unwrap();
+    let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["Base.stl", "Lid.stl", "Board.stl"]);
+    for f in &files {
+        let b = std::fs::read(f).unwrap();
+        let n = u32::from_le_bytes(b[80..84].try_into().unwrap()) as usize;
+        assert!(n > 0 && b.len() == 84 + 50 * n);
+    }
+}

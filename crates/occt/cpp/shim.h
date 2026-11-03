@@ -75,6 +75,8 @@ struct BBox;
 struct MassProps;
 struct HlrData;
 struct XcafPart;
+struct AsmNode;
+struct AsmLink;
 
 std::unique_ptr<Shape> shape_clone(const Shape &s);
 bool shape_is_null(const Shape &s);
@@ -84,6 +86,8 @@ uint32_t count_sub(const Shape &s, uint32_t kind);
 std::unique_ptr<Shape> sub_shape(const Shape &s, uint32_t kind, uint32_t index);
 std::unique_ptr<Shape> compound_new();
 void compound_add(Shape &c, const Shape &s);
+uint32_t child_count(const Shape &s);
+std::unique_ptr<Shape> child_at(const Shape &s, uint32_t i);
 
 std::unique_ptr<Shape> make_box(V3 origin, double dx, double dy, double dz);
 std::unique_ptr<Shape> make_cylinder(V3 base, V3 dir, double r, double h);
@@ -132,6 +136,10 @@ BBox bounding_box(const Shape &s);
 std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts);
 rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts);
 rust::Vec<uint32_t> face_owners(const Shape &c);
+rust::String write_step_asm(const Shape &shapes, rust::Slice<const AsmNode> nodes, rust::Slice<const AsmLink> links,
+                            rust::Slice<const double> mats, rust::Slice<const uint32_t> roots);
+std::unique_ptr<Shape> read_step_asm(rust::Str data, rust::Vec<AsmNode> &nodes, rust::Vec<AsmLink> &links,
+                                     rust::Vec<double> &mats, rust::Vec<uint32_t> &roots);
 std::unique_ptr<Shape> read_step_file(rust::Str path);
 std::unique_ptr<Shape> read_step_str(rust::Str data);
 void write_step_file(const Shape &s, rust::Str path);

@@ -138,8 +138,14 @@ pub enum ComponentSource {
     /// copied in. The embedded content is a cache so the host opens without the file.
     Linked { path: String, hash: String },
     /// A node of an imported STEP assembly (blob sha256, node index in the XCAF tree).
-    /// Its own geometry is one locked reference body; its children are occurrences.
-    Step { blob: String, node: u32 },
+    /// Its own geometry (a part node's shape) is one locked body, a reference body
+    /// when `reference`; its sub-parts are child occurrences.
+    Step {
+        blob: String,
+        node: u32,
+        #[serde(default)]
+        reference: bool,
+    },
 }
 
 /// A component definition.
@@ -604,6 +610,7 @@ impl AssemblyResult {
 #[derive(Default)]
 pub struct AssemblyCache {
     regens: HashMap<ComponentId, Regenerator>,
+    step_trees: HashMap<String, Arc<occt::StepTree>>,
 }
 
 impl AssemblyCache {
@@ -760,7 +767,7 @@ pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: 
         regen.context_keys = keys;
         regen.context_errors = errs;
         let r = match d.component(c).map(|c| &c.source) {
-            Some(ComponentSource::Step { blob, node }) => step_component(d, c, blob, *node, blobs, cache),
+            Some(ComponentSource::Step { blob, node, reference }) => step_component(blob, *node, *reference, blobs, cache),
             _ => regen.regenerate(&view, blobs, lib),
         };
         results.push(ComponentResult { component: c, name: d.component_name(c), regen: r });
@@ -807,9 +814,33 @@ pub fn regenerate_assembly(d: &DocData, blobs: &BlobStore, lib: &Library, root: 
     AssemblyResult { components: results, instances, issues }
 }
 
-/// Placeholder for STEP reference components (filled in by the STEP assembly import).
-fn step_component(_d: &DocData, _c: ComponentId, _blob: &str, _node: u32, _blobs: &BlobStore, _cache: &mut AssemblyCache) -> RegenResult {
-    RegenResult { bodies: Vec::new(), reports: Vec::new(), recomputed: 0, reused: 0, process: Default::default() }
+fn step_tree(blob: &str, blobs: &BlobStore, cache: &mut AssemblyCache) -> Result<Arc<occt::StepTree>, String> {
+    if let Some(t) = cache.step_trees.get(blob) {
+        return Ok(t.clone());
+    }
+    let data = blobs.get(blob).ok_or_else(|| format!("blob {blob} is missing"))?;
+    let t = Arc::new(occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| e.to_string())?);
+    cache.step_trees.insert(blob.to_string(), t.clone());
+    Ok(t)
+}
+
+/// A STEP node's own geometry as one body (no body for an assembly node).
+fn step_component(blob: &str, node: u32, reference: bool, blobs: &BlobStore, cache: &mut AssemblyCache) -> RegenResult {
+    use crate::regen::{Appearance, BodyGeom, FeatureReport, FeatureStatus, SubPart};
+    let fid = FeatureId(0);
+    let mut out = RegenResult { bodies: Vec::new(), reports: Vec::new(), recomputed: 0, reused: 0, process: Default::default() };
+    let res = step_tree(blob, blobs, cache).and_then(|t| t.nodes.get(node as usize).cloned().ok_or_else(|| format!("STEP node {node} does not exist")));
+    match res {
+        Ok(n) => {
+            if let Some(shape) = n.shape {
+                let nf = shape.faces().map(|f| f.len()).unwrap_or(0);
+                let app = Appearance { parts: vec![SubPart { name: n.name.clone(), color: n.color }], face_part: vec![0; nf] };
+                out.bodies.push(Body { id: crate::feature::BodyId::of(fid), name: n.name, reference, part: None, geom: BodyGeom::with_appearance(shape, app) });
+            }
+        }
+        Err(e) => out.reports.push(FeatureReport { feature: fid, status: FeatureStatus::Error(e), dressup: None, sketch: None, joint: None, cached: false, elapsed_ms: 0.0 }),
+    }
+    out
 }
 
 impl Document {
@@ -1320,5 +1351,239 @@ impl Document {
     pub fn bom_tree(&mut self) -> AssemblyBom {
         let r = self.regenerate_assembly().clone();
         bom(&self.data, &r)
+    }
+}
+
+// ---------------------------------------------------------------- STEP import / export
+
+impl Document {
+    /// Import a STEP file as components: one component per XCAF product (shared by
+    /// all its instances), sub-parts as child occurrences with the file's placements,
+    /// placed in `parent` at the origin. `reference` (a PCB, a bought part): bodies
+    /// are reference bodies and the top component is purchased (its BOM line). STEP
+    /// components are always locked. Returns the top component and its occurrence.
+    pub fn import_step_assembly(&mut self, name: &str, data: Vec<u8>, parent: ComponentId, reference: bool) -> Result<(ComponentId, OccurrenceId), DocError> {
+        let tree = occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| DocError::Other(e.to_string()))?;
+        let blob = self.blobs.put(data);
+        self.asm.step_trees.insert(blob.clone(), Arc::new(tree.clone()));
+        let (top, occ) = self.edit(&format!("Import {name}"), |d| {
+            let mut ids: HashMap<usize, ComponentId> = HashMap::new();
+            for k in 0..tree.nodes.len() {
+                ids.insert(k, ComponentId(d.alloc()));
+            }
+            let mut comps = Vec::new();
+            for (k, n) in tree.nodes.iter().enumerate() {
+                let mut children = Vec::new();
+                for (j, l) in n.children.iter().enumerate() {
+                    let child = &tree.nodes[l.child];
+                    let nm = if l.name.is_empty() || l.name.starts_with("=>") { format!("{}:{}", child.name, j + 1) } else { l.name.clone() };
+                    children.push(Occurrence {
+                        id: OccurrenceId(d.alloc()),
+                        component: ids[&l.child],
+                        name: nm,
+                        transform: Transform::from_rows(&l.matrix),
+                        visible: true,
+                        grounded: false,
+                        explode: DVec3::ZERO,
+                        in_bom: true,
+                    });
+                }
+                let nm = if n.name.is_empty() { format!("{name} part {}", k + 1) } else { n.name.clone() };
+                comps.push(Component {
+                    id: ids[&k],
+                    name: nm,
+                    children,
+                    source: ComponentSource::Step { blob: blob.clone(), node: k as u32, reference },
+                    locked: true,
+                    ..Default::default()
+                });
+            }
+            // the top: the single root product, or a wrapper around several
+            let top = if tree.roots.len() == 1 {
+                ids[&tree.roots[0]]
+            } else {
+                let id = ComponentId(d.alloc());
+                let children = tree
+                    .roots
+                    .iter()
+                    .map(|r| Occurrence {
+                        id: OccurrenceId(d.alloc()),
+                        component: ids[r],
+                        name: format!("{}:1", tree.nodes[*r].name),
+                        transform: Transform::IDENTITY,
+                        visible: true,
+                        grounded: false,
+                        explode: DVec3::ZERO,
+                        in_bom: true,
+                    })
+                    .collect();
+                comps.push(Component { id, name: name.into(), children, locked: true, ..Default::default() });
+                id
+            };
+            if let Some(c) = comps.iter_mut().find(|c| c.id == top) {
+                c.name = name.into();
+                if reference {
+                    c.purchased = Some(PartRef {
+                        source: "STEP".into(),
+                        id: name.into(),
+                        size: String::new(),
+                        name: name.into(),
+                        part_number: None,
+                        vendor: None,
+                        blob: Some(blob.clone()),
+                        thread: None,
+                    });
+                }
+            }
+            d.components.extend(comps);
+            d.components.sort_by_key(|c| c.id);
+            let occ = OccurrenceId(d.alloc());
+            let o = Occurrence { id: occ, component: top, name: format!("{name}:1"), transform: Transform::IDENTITY, visible: true, grounded: false, explode: DVec3::ZERO, in_bom: true };
+            d.children_mut(parent).ok_or_else(|| DocError::Other(format!("component {parent:?} does not exist")))?.push(o);
+            Ok::<_, DocError>((top, occ))
+        })?;
+        Ok((top, occ))
+    }
+}
+
+/// What `Document::export_assembly` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssemblyFormat {
+    /// One STEP file with the product structure (XCAF): components as assemblies,
+    /// bodies as parts, occurrences as placed instances with names and colours.
+    Step,
+    /// One 3MF with an object per component (its solid bodies) and a build item per
+    /// placed occurrence (with its transform).
+    ThreeMf,
+    /// `path` is a directory: one binary STL per component with solids, in the
+    /// component's own frame, named after the component.
+    StlPerComponent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AssemblyExportOptions {
+    /// STEP: include reference bodies (PCBs, library parts). STL/3MF never do.
+    pub include_reference: bool,
+    /// Include hidden occurrences.
+    pub include_hidden: bool,
+}
+
+fn file_safe(s: &str) -> String {
+    s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' }).collect::<String>().trim().to_string()
+}
+
+impl Document {
+    /// Export the whole assembly. Returns the files written.
+    pub fn export_assembly(&mut self, format: AssemblyFormat, path: &std::path::Path, opts: &AssemblyExportOptions) -> Result<Vec<std::path::PathBuf>, DocError> {
+        let r = self.regenerate_assembly().clone();
+        let d = &self.data;
+        let other = |e: String| DocError::Other(e);
+        let keep_body = |b: &Body, step: bool| if step { opts.include_reference || !b.reference } else { !b.reference };
+        let step = format == AssemblyFormat::Step;
+        // components that end up with something to export (bodies or exported children)
+        let mut memo: HashMap<ComponentId, bool> = HashMap::new();
+        fn has_content(d: &DocData, r: &AssemblyResult, c: ComponentId, keep: &dyn Fn(&Body) -> bool, hidden: bool, memo: &mut HashMap<ComponentId, bool>, depth: usize) -> bool {
+            if let Some(v) = memo.get(&c) {
+                return *v;
+            }
+            let own = r.component(c).is_some_and(|cr| cr.regen.bodies.iter().any(keep));
+            let kids = depth < 64
+                && d.children_of(c).is_some_and(|k| k.iter().any(|o| (hidden || o.visible) && has_content(d, r, o.component, keep, hidden, memo, depth + 1)));
+            memo.insert(c, own || kids);
+            own || kids
+        }
+        let keep = |b: &Body| keep_body(b, step);
+        match format {
+            AssemblyFormat::Step => {
+                let mut tree = occt::StepTree::default();
+                let mut node_of: HashMap<ComponentId, usize> = HashMap::new();
+                #[allow(clippy::too_many_arguments)] // recursive helper over the export state
+                fn build(
+                    d: &DocData,
+                    r: &AssemblyResult,
+                    c: ComponentId,
+                    keep: &dyn Fn(&Body) -> bool,
+                    hidden: bool,
+                    tree: &mut occt::StepTree,
+                    node_of: &mut HashMap<ComponentId, usize>,
+                    memo: &mut HashMap<ComponentId, bool>,
+                    depth: usize,
+                ) -> usize {
+                    if let Some(n) = node_of.get(&c) {
+                        return *n;
+                    }
+                    let me = tree.nodes.len();
+                    tree.nodes.push(occt::StepNode { name: d.component_name(c), ..Default::default() });
+                    node_of.insert(c, me);
+                    let ident = Transform::IDENTITY.to_rows();
+                    if let Some(cr) = r.component(c) {
+                        for b in cr.regen.bodies.iter().filter(|b| keep(b)) {
+                            let color = b.appearance().and_then(|a| a.parts.first()).and_then(|p| p.color);
+                            let leaf = tree.nodes.len();
+                            tree.nodes.push(occt::StepNode { name: b.name.clone(), color, shape: Some(b.shape().clone()), children: Vec::new() });
+                            tree.nodes[me].children.push(occt::StepLink { child: leaf, name: b.name.clone(), matrix: ident });
+                        }
+                    }
+                    for o in d.children_of(c).unwrap_or(&[]) {
+                        if !(hidden || o.visible) || !has_content(d, r, o.component, keep, hidden, memo, depth + 1) || depth > 64 {
+                            continue;
+                        }
+                        let child = build(d, r, o.component, keep, hidden, tree, node_of, memo, depth + 1);
+                        tree.nodes[me].children.push(occt::StepLink { child, name: o.name.clone(), matrix: o.transform.to_rows() });
+                    }
+                    me
+                }
+                if !has_content(d, &r, ComponentId::ROOT, &keep, opts.include_hidden, &mut memo, 0) {
+                    return Err(DocError::Other("nothing to export".into()));
+                }
+                let root = build(d, &r, ComponentId::ROOT, &keep, opts.include_hidden, &mut tree, &mut node_of, &mut memo, 0);
+                tree.roots = vec![root];
+                let s = tree.to_step_string().map_err(|e| other(e.to_string()))?;
+                std::fs::write(path, s)?;
+                Ok(vec![path.to_path_buf()])
+            }
+            AssemblyFormat::ThreeMf => {
+                let mut objects: Vec<(String, Vec<&Body>)> = Vec::new();
+                let mut obj_of: HashMap<ComponentId, usize> = HashMap::new();
+                let mut items: Vec<(usize, [f64; 12])> = Vec::new();
+                for i in r.instances.iter().filter(|i| (opts.include_hidden || i.visible) && keep(&i.body)) {
+                    let k = *obj_of.entry(i.component).or_insert_with(|| {
+                        let cr = r.component(i.component).unwrap();
+                        objects.push((d.component_name(i.component), cr.regen.bodies.iter().filter(|b| keep(b)).collect()));
+                        objects.len() - 1
+                    });
+                    let m = i.transform.to_rows();
+                    if !items.iter().any(|(o, mm)| *o == k && *mm == m) {
+                        items.push((k, m));
+                    }
+                }
+                crate::export::write_3mf_assembly(&objects, &items, path).map_err(|e| other(e.to_string()))?;
+                Ok(vec![path.to_path_buf()])
+            }
+            AssemblyFormat::StlPerComponent => {
+                std::fs::create_dir_all(path)?;
+                let mut written = Vec::new();
+                let mut used: HashMap<String, usize> = HashMap::new();
+                let mut done: BTreeSet<ComponentId> = BTreeSet::new();
+                for i in r.instances.iter().filter(|i| (opts.include_hidden || i.visible) && keep(&i.body)) {
+                    if !done.insert(i.component) {
+                        continue;
+                    }
+                    let cr = r.component(i.component).unwrap();
+                    let bodies: Vec<&Body> = cr.regen.bodies.iter().filter(|b| keep(b)).collect();
+                    let base = file_safe(&d.component_name(i.component));
+                    let n = used.entry(base.clone()).or_insert(0);
+                    *n += 1;
+                    let fname = if *n == 1 { format!("{base}.stl") } else { format!("{base} ({n}).stl") };
+                    let p = path.join(fname);
+                    crate::export::write_stl(&bodies, &p).map_err(|e| other(e.to_string()))?;
+                    written.push(p);
+                }
+                if written.is_empty() {
+                    return Err(DocError::Other("nothing to export".into()));
+                }
+                Ok(written)
+            }
+        }
     }
 }

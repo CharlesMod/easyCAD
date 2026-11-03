@@ -528,6 +528,28 @@ Work in progress; see the BREAKING "Assemblies" entry in the changelog.
   `in_bom = false` (and everything under them) are left out. The flat BOM sums
   totals per component / part, made first. The old `Document::bom()` (root bodies
   only) is unchanged.
+- **STEP assemblies in.** `Document::import_step_assembly(name, bytes, parent,
+  reference) -> (ComponentId, OccurrenceId)` reads the XCAF product structure: one
+  component per product (`ComponentSource::Step { blob, node, reference }`, always
+  locked), shared by all its instances, with the file's sub-parts as child
+  occurrences (names and placements from the file) and each part's shape as one
+  body coloured from the file. With `reference = true` (a PCB) the bodies are
+  reference bodies and the top component is purchased (`PartRef { source: "STEP" }`),
+  so the BOM shows one line. The old `import_step` / `ImportStep` feature (one body
+  per solid, or one reference body) is unchanged.
+- **Assembly export.** `Document::export_assembly(AssemblyFormat, path,
+  &AssemblyExportOptions { include_reference, include_hidden }) -> Vec<PathBuf>`:
+  - `Step`: XCAF product structure: the root and every component are assemblies,
+    each body a part (name, colour), each occurrence an instance with its name and
+    transform; a component placed four times is one product with four instances.
+    Re-importing gives the same tree and transforms.
+  - `ThreeMf`: one `<object>` per component with solids (its bodies merged, in its
+    own frame) and one build `<item transform=...>` per placed occurrence.
+  - `StlPerComponent`: `path` is a folder; one binary STL per component with
+    solids, in the component's frame, named `<component>.stl`.
+- Kernel: `occt::StepTree { nodes: Vec<StepNode { name, color, shape, children:
+  Vec<StepLink { child, name, matrix: [f64; 12] }> }>, roots }` with
+  `StepTree::read(&str)` and `to_step_string()`; `Shape::children()`.
 
 ## File format (`.cwk`), sync-friendly
 

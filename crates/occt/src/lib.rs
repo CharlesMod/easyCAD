@@ -163,6 +163,82 @@ pub struct StepPart {
     pub color: Option<[f32; 3]>,
 }
 
+/// An XCAF product structure (STEP assembly): parts carry a shape, assemblies carry
+/// placed instances of other nodes.
+#[derive(Clone, Debug, Default)]
+pub struct StepTree {
+    pub nodes: Vec<StepNode>,
+    /// Top-level products (XCAF free shapes).
+    pub roots: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StepNode {
+    pub name: String,
+    pub color: Option<[f32; 3]>,
+    /// The part's own shape, in its own frame (`None` for an assembly).
+    pub shape: Option<Shape>,
+    pub children: Vec<StepLink>,
+}
+
+/// An instance of `nodes[child]` inside its parent node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepLink {
+    pub child: usize,
+    /// Instance name (may be empty).
+    pub name: String,
+    /// Placement, row-major 3×4 `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]`.
+    pub matrix: [f64; 12],
+}
+
+impl StepTree {
+    /// Read the product structure of a STEP file (names, colours, placements).
+    pub fn read(data: &str) -> Result<StepTree> {
+        let (mut nodes, mut links, mut mats, mut roots) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let comp = wrap(raw::read_step_asm(data, &mut nodes, &mut links, &mut mats, &mut roots))?;
+        let mut out = StepTree { nodes: Vec::with_capacity(nodes.len()), roots: roots.iter().map(|r| *r as usize).collect() };
+        for n in &nodes {
+            let shape = if n.shape >= 0 { Some(wrap(raw::child_at(comp.r(), n.shape as u32))?) } else { None };
+            out.nodes.push(StepNode { name: n.name.clone(), color: n.has_color.then_some([n.r, n.g, n.b]), shape, children: Vec::new() });
+        }
+        for (k, l) in links.iter().enumerate() {
+            let mut m = [0.0; 12];
+            m.copy_from_slice(&mats[12 * k..12 * k + 12]);
+            out.nodes[l.parent as usize].children.push(StepLink { child: l.child as usize, name: l.name.clone(), matrix: m });
+        }
+        Ok(out)
+    }
+
+    /// Write as an AP214 STEP assembly (XCAF), keeping names, colours and placements.
+    /// A node with children is an assembly (its `shape` is ignored); every other node
+    /// must have a shape.
+    pub fn to_step_string(&self) -> Result<String> {
+        let mut shapes: Vec<&Shape> = Vec::new();
+        let mut nodes = Vec::new();
+        for n in &self.nodes {
+            let shape = match (&n.shape, n.children.is_empty()) {
+                (Some(s), true) => {
+                    shapes.push(s);
+                    shapes.len() as i32 - 1
+                }
+                _ => -1,
+            };
+            let c = n.color.unwrap_or([0.0; 3]);
+            nodes.push(raw::AsmNode { name: n.name.clone(), r: c[0], g: c[1], b: c[2], has_color: n.color.is_some(), shape });
+        }
+        let (mut links, mut mats) = (Vec::new(), Vec::new());
+        for (p, n) in self.nodes.iter().enumerate() {
+            for l in &n.children {
+                links.push(raw::AsmLink { parent: p as u32, child: l.child as u32, name: l.name.clone() });
+                mats.extend_from_slice(&l.matrix);
+            }
+        }
+        let roots: Vec<u32> = self.roots.iter().map(|r| *r as u32).collect();
+        let comp = Shape::compound(&shapes)?;
+        Ok(raw::write_step_asm(comp.r(), &nodes, &links, &mats, &roots)?)
+    }
+}
+
 /// Triangle mesh of a shape with per-triangle face ids and per-edge polylines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
@@ -487,6 +563,10 @@ impl Shape {
     }
     pub fn count(&self, kind: ShapeKind) -> u32 {
         raw::count_sub(self.r(), kind as u32)
+    }
+    /// Direct children (of a compound, solid, shell, ...), in order.
+    pub fn children(&self) -> Result<Vec<Shape>> {
+        (0..raw::child_count(self.r())).map(|i| wrap(raw::child_at(self.r(), i))).collect()
     }
     pub fn solids(&self) -> Result<Vec<Shape>> {
         (0..self.count(ShapeKind::Solid)).map(|i| wrap(raw::sub_shape(self.r(), ShapeKind::Solid as u32, i))).collect()
