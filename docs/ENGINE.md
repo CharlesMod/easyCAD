@@ -777,6 +777,27 @@ verified on load.
 
 ## Changelog for GUI
 
+- **GUI_NEEDS #17–#20.**
+  - **Movable split components (#17).** New `Component.context_frame:
+    Option<Transform>` (serde-defaulted): a captured in-context frame used instead
+    of the context occurrence's world transform. `split_to_components` sets it to
+    the source occurrence's placement at split time, so Base / Lid are built where
+    they were split and their occurrences move freely (a hinge mate opens the lid).
+    The GUI's hidden "design position" anchor occurrences can go. Rule: with
+    `context_frame` every occurrence is a moved copy; without it the old rule holds
+    (built in the context / first occurrence's frame, see Assemblies).
+  - **Mate DOF and limits (#18).** `MateReport.free: Vec<FreeDof::{Rotate { origin,
+    axis }, Translate { dir }, Spin { origin }}>` (world, after solving) and
+    `MateReport.limited`; `Mate.{angle_limits, distance_limits}: Option<(f64, f64)>`
+    clamp the drive values (serde-defaulted; I added `None`s to the `Mate { .. }`
+    literal in `ui_mates.rs`, committed since that file had no other changes).
+  - **Interference solid (#19).** `Interference.common: Option<Overlap>`;
+    `Overlap(pub Body)` is the common solid in world coordinates (`.0.mesh()`).
+  - **Rollback per component (#20).** `component_view` no longer inherits the
+    root's `rollback`; new `Component.rollback` (serde-defaulted) with
+    `Document::set_component_rollback(comp, at)` (undoable; `ROOT` = the root's
+    marker); `add_feature_in` inserts at a component's marker.
+
 - **Sketch editing (GUI_NEEDS #12–14).** New `Constraint::Offset { source, target,
   distance }` (exhaustive matches need an arm; it lowers to parallel + distance for
   lines and concentric + radius offset for arcs/circles) and module `sketch_edit`:

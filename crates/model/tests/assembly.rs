@@ -294,6 +294,20 @@ fn revolute_hinge_and_slider() {
     let bb = world_bbox(&mut doc, ol);
     assert!((bb.size().z - 40.0).abs() < 1e-6 && (bb.size().y - 2.0).abs() < 1e-6, "{bb:?}");
     assert!((bb.min.z - 20.0).abs() < 1e-6, "{bb:?}");
+    // the hinge's free direction is reported in world coordinates
+    let rep = doc.solve_mates();
+    let hm = rep.mates.iter().find(|m| m.mate == hinge).unwrap();
+    assert!(matches!(hm.free[..], [FreeDof::Rotate { axis, .. }] if axis.length() > 0.99), "{:?}", hm.free);
+    // joint limits clamp the drive: asked for -120°, stopped at -90°
+    doc.edit_mate(hinge, "limit", |m| {
+        m.angle_limits = Some((-90.0, 0.0));
+        m.angle = (-120.0).into();
+    })
+    .unwrap();
+    let rep = doc.solve_mates();
+    assert!(rep.mates.iter().find(|m| m.mate == hinge).unwrap().limited);
+    let bb = world_bbox(&mut doc, ol);
+    assert!((bb.size().z - 40.0).abs() < 1e-6, "clamped at -90°: {bb:?}");
     // the slider block runs along the rail by its drive value
     let x0 = world_bbox(&mut doc, os).min.x;
     doc.edit_mate(slider, "slide", |m| m.distance = "15".into()).unwrap();
@@ -373,6 +387,11 @@ fn interference_detected_then_cleared() {
     assert_eq!(rep.pairs.len(), 1, "{:?}", rep.pairs);
     let p = &rep.pairs[0];
     assert!((p.volume - 10.0 * 10.0 * 2.0).abs() < 1.0, "{}", p.volume);
+    // the overlap solid, in world coordinates, to draw (GUI_NEEDS #19)
+    let ov = p.common.as_ref().unwrap();
+    assert!((ov.0.shape().volume().unwrap() - p.volume).abs() < 1e-6);
+    assert!((ov.0.shape().bbox().unwrap().size().z - 2.0).abs() < 1e-3);
+    assert!(!ov.0.mesh().unwrap().indices.is_empty());
     let paths = [p.a.path.clone(), p.b.path.clone()];
     assert!(paths.contains(&vec![ob]) && paths.contains(&vec![os]));
     assert!(p.a.label.contains(':') && p.b.label.contains(':'), "{} / {}", p.a.label, p.b.label);
@@ -860,4 +879,62 @@ fn assembly_drawings_exports_and_bom() {
 /// Path of the first screw occurrence inside bracket occurrence `a`.
 fn doc_child(r: &AssemblyResult, a: OccurrenceId, screw: ComponentId) -> OccPath {
     r.instances.iter().find(|i| i.component == screw && i.path[0] == a).unwrap().path.clone()
+}
+
+/// GUI_NEEDS #17: the Base / Lid of `split_to_components` keep the frame they were
+/// split in (`Component.context_frame`), so a mate moves the lid.
+#[test]
+fn split_outputs_move_with_their_mates() {
+    let (mut doc, _) = common::enclosure_doc();
+    let joint = doc.data.features.iter().find(|f| f.name == "Joint").unwrap().id;
+    let (_enc, occ) = doc.move_root_into_component("Enclosure").unwrap();
+    let [(base, ob), (lid, ol)] = doc.split_to_components(&[occ], joint, Some(("Base", "Lid"))).unwrap();
+    assert!(doc.data.component(lid).unwrap().context_frame.is_some());
+    doc.edit_occurrence(ob, "ground", |o| o.grounded = true).unwrap();
+    let bb0 = world_bbox(&mut doc, ol);
+    // hinge along the back top edge of the lid (y = +30, z = 30), parallel to x
+    let edge = DVec3::new(0.0, 30.0, 30.0);
+    let a = MateConnector::new(vec![ob], edge, DVec3::X);
+    let b = MateConnector::new(vec![ol], edge, DVec3::X);
+    let hinge = doc.add_mate("Hinge", MateKind::Revolute, a, b, false);
+    assert!(doc.solve_mates().ok());
+    let closed = world_bbox(&mut doc, ol);
+    assert!((closed.min - bb0.min).length() < 1e-6 && (closed.max - bb0.max).length() < 1e-6, "closed lid stays: {closed:?} vs {bb0:?}");
+    doc.edit_mate(hinge, "open", |m| m.angle = (90.0).into()).unwrap();
+    assert!(doc.solve_mates().ok());
+    let open = world_bbox(&mut doc, ol);
+    // turned 90° about the hinge: its 60 mm depth now stands along z (or hangs)
+    assert!((open.size().z - closed.size().y).abs() < 1e-3, "{open:?} vs {closed:?}");
+    assert!((open.size().y - closed.size().z).abs() < 1e-3, "{open:?} vs {closed:?}");
+    // the base did not move, and both still regenerate cleanly
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let _ = base;
+}
+
+/// GUI_NEEDS #20: the root's rollback marker does not truncate components; each
+/// component has its own.
+#[test]
+fn rollback_is_per_component() {
+    let (mut doc, [_base, lid, _], [_, _ol, _], _) = base_lid_doc();
+    let n_lid = doc.data.component(lid).unwrap().features.len();
+    assert!(n_lid >= 2);
+    let v_full = doc.regenerate_assembly().component(lid).unwrap().regen.bodies[0].shape().volume().unwrap();
+    // a root marker (the root has no features of its own here: add one)
+    block(&mut doc, ComponentId::ROOT, "Root block", ("5", "5", "5"), DVec2::new(200.0, 0.0));
+    block(&mut doc, ComponentId::ROOT, "Root block 2", ("5", "5", "5"), DVec2::new(220.0, 0.0));
+    doc.set_rollback(Some(1));
+    let r = doc.regenerate_assembly().clone();
+    let lid_r = &r.component(lid).unwrap().regen;
+    assert!(lid_r.reports.iter().all(|x| !x.rolled_back), "the lid is not rolled back by the root marker");
+    assert!((lid_r.bodies[0].shape().volume().unwrap() - v_full).abs() < 1e-6);
+    // the lid's own marker, before its in-context cut (the last feature)
+    doc.set_component_rollback(lid, Some(n_lid - 1)).unwrap();
+    let r = doc.regenerate_assembly().clone();
+    let lid_r = &r.component(lid).unwrap().regen;
+    assert!(lid_r.reports.last().unwrap().rolled_back && !lid_r.reports[0].rolled_back);
+    assert!(lid_r.bodies[0].shape().volume().unwrap() > v_full + 1.0);
+    assert_eq!(doc.data.component(lid).unwrap().rollback, Some(n_lid - 1));
+    doc.undo();
+    assert_eq!(doc.data.component(lid).unwrap().rollback, None);
 }

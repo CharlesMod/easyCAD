@@ -44,31 +44,15 @@ today (adapter or limitation) and what would replace it.
 
 ## Assemblies
 
-17. **Movable in-context components.** `split_to_components` makes Base / Lid with a
-    `ContextRef` resolved in the frame of the component's context occurrence, which is
-    its only occurrence; moving that occurrence (a mate, the gizmo) re-expresses the
-    master's half in the new frame, so it stays where it was in the world and a
-    hinge never opens. *Adapter:* `adapters::anchor_in_context` adds a hidden,
-    grounded, out-of-BOM "design position" occurrence of each inside the master and
-    sets it as `Component.context` (marked `meta["gui.anchor.<occ>"]`, hidden in the
-    tree and counts); the visible occurrence then moves. *Want:* a captured context
-    frame (`Component.context_frame: Option<Transform>`, set by
-    `split_to_components`), or `split_to_components` doing the anchoring itself.
-18. **Mate DOF for the jog.** The dialog's draft mate rides along with each model
-    request and the worker runs `assembly::solve_mates` first: fine. *Want:* the
-    free direction(s) of each solved mate (axis / plane in world) so the jog control
-    can draw them on the model, and joint limits (min/max angle) to stop a jog.
-19. **Interference volume for display.** `Interference` has the volume but not the
-    common solid, so the GUI tints the whole pair red (translucent). *Want:*
-    `Interference.common: Option<Shape>` (world frame) to draw the overlap itself.
+17. ~~Movable in-context components~~ — done by the engine: `Component.context_frame`,
+    set by `split_to_components`; the anchor adapter can be dropped.
+18. ~~Mate DOF for the jog~~ — done by the engine: `MateReport.free` (world axes /
+    directions), `Mate.{angle_limits, distance_limits}` + `MateReport.limited`.
+19. ~~Interference volume for display~~ — done by the engine: `Interference.common`
+    (`Overlap(Body)`, world frame).
 
-20. **Root rollback leaks into component views.** `DocData::component_view` copies
-    every root field (`..self.clone()`), including `rollback`, so with the root
-    rolled back to `n` each component regenerates only its first `n` features. The
-    GUI clears `rollback` on its worker copy after truncating the root
-    (`adapters::effective_in`); `Document::regenerate_assembly` and exports still see
-    it. *Want:* `component_view` to reset `rollback` (and a per-component marker if
-    rollback inside components should be saved).
+20. ~~Root rollback leaks into component views~~ — done by the engine: components use
+    their own `Component.rollback` (`Document::set_component_rollback`).
 
 ## Sketch
 

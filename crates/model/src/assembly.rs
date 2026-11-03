@@ -179,6 +179,16 @@ pub struct Component {
     /// component are built in. `None` = its first occurrence (depth first).
     #[serde(default)]
     pub context: Option<OccPath>,
+    /// A captured in-context frame (component frame → world). When set it is used
+    /// instead of `context`'s world transform, so moving the component's
+    /// occurrences (mates, the gizmo) moves the in-context geometry with them.
+    /// `split_to_components` sets it to where the split happened.
+    #[serde(default)]
+    pub context_frame: Option<Transform>,
+    /// History rollback marker of this component's features (like
+    /// `DocData.rollback` for the root).
+    #[serde(default)]
+    pub rollback: Option<usize>,
     /// Set on components brought in by a linked assembly file: the linked
     /// component that owns them. They are replaced on update and unlocked on break;
     /// their params see the owner's params (the file's root params).
@@ -282,6 +292,24 @@ pub struct Mate {
     pub distance: crate::params::Expr,
     #[serde(default)]
     pub suppressed: bool,
+    /// Joint limits: the drive `angle` (degrees) and `distance` (mm) are clamped
+    /// to these ranges (`MateReport.limited` says when).
+    #[serde(default)]
+    pub angle_limits: Option<(f64, f64)>,
+    #[serde(default)]
+    pub distance_limits: Option<(f64, f64)>,
+}
+
+/// A direction a solved mate leaves free, in world coordinates (for drawing the
+/// jog handles).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub enum FreeDof {
+    /// Turns about the axis through `origin` along `axis`.
+    Rotate { origin: DVec3, axis: DVec3 },
+    /// Slides along `dir`.
+    Translate { dir: DVec3 },
+    /// Turns freely about `origin` (ball).
+    Spin { origin: DVec3 },
 }
 
 fn zero() -> crate::params::Expr {
@@ -429,7 +457,7 @@ impl DocData {
         d.imports = c.imports.clone();
         d.body_orientations.clear();
         d.teardrop_overrides.clear();
-        d.rollback = None; // the rollback marker is the root history's
+        d.rollback = c.rollback; // each component has its own marker
         if let Some(p) = &c.process {
             d.active_profile = p.clone();
         }
@@ -523,9 +551,36 @@ impl Document {
         }
         let id = FeatureId(self.data.next_id);
         let label = format!("{} {name}", kind.label());
-        self.edit_component(comp, &label, |c| c.features.push(Feature { id, name: name.into(), suppressed: false, kind }))?;
+        self.edit_component(comp, &label, |c| {
+            let f = Feature { id, name: name.into(), suppressed: false, kind };
+            match c.rollback {
+                Some(r) if r < c.features.len() => {
+                    c.features.insert(r, f);
+                    c.rollback = Some(r + 1);
+                }
+                _ => {
+                    c.features.push(f);
+                    c.rollback = None;
+                }
+            }
+        })?;
         self.data.next_id += 1;
         Ok(id)
+    }
+
+    /// Move a component's rollback marker (undoable); `ROOT` moves the root's.
+    pub fn set_component_rollback(&mut self, comp: ComponentId, at: Option<usize>) -> Result<(), DocError> {
+        if comp == ComponentId::ROOT {
+            self.set_rollback(at);
+            return Ok(());
+        }
+        let n = self.data.component(comp).ok_or_else(|| DocError::Other(format!("component {comp:?} does not exist")))?.features.len();
+        let at = at.filter(|k| *k < n);
+        let label = match at {
+            Some(k) => format!("Roll back to {k}"),
+            None => "Roll forward".to_string(),
+        };
+        self.edit_component(comp, &label, |c| c.rollback = at)
     }
 
     /// Set a component-local parameter (shadows a document parameter of that name).
@@ -764,6 +819,11 @@ fn context_frames(d: &DocData) -> (Frames, Vec<AssemblyIssue>, Vec<String>) {
                 _ => issues.push(AssemblyIssue { component: Some(c.id), message: format!("the context occurrence of `{}` is not one of its occurrences", c.name) }),
             }
         }
+        if let Some(t) = c.context_frame {
+            let path = m.get(&c.id).map(|f| f.0.clone()).unwrap_or_default();
+            m.insert(c.id, (path, t));
+            continue;
+        }
         let in_ctx = c.features.iter().any(|f| !f.suppressed && matches!(f.kind, FeatureKind::ContextRef { .. }));
         if in_ctx && count.get(&c.id).copied().unwrap_or(0) > 1 {
             let at = m.get(&c.id).map(|(p, _)| p.iter().filter_map(|o| d.occurrence(*o).map(|o| o.name.clone())).collect::<Vec<_>>().join(" / ")).unwrap_or_default();
@@ -989,6 +1049,10 @@ pub struct MateReport {
     pub status: MateStatus,
     /// Degrees of freedom the mate leaves (`MateKind::dof`).
     pub dof: u32,
+    /// Its free directions after solving (world; empty unless solved/redundant).
+    pub free: Vec<FreeDof>,
+    /// A drive value was clamped to the mate's limits.
+    pub limited: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1041,7 +1105,7 @@ impl Document {
     pub fn add_mate(&mut self, name: &str, kind: MateKind, a: MateConnector, b: MateConnector, flip: bool) -> MateId {
         self.edit(&format!("Mate {name}"), |d| {
             let id = MateId(d.alloc());
-            d.mates.push(Mate { id, name: name.into(), kind, a, b, flip, angle: zero(), distance: zero(), suppressed: false });
+            d.mates.push(Mate { id, name: name.into(), kind, a, b, flip, angle: zero(), distance: zero(), suppressed: false, angle_limits: None, distance_limits: None });
             Ok::<_, DocError>(id)
         })
         .unwrap()
@@ -1105,6 +1169,7 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
     }
     let world_of = |cur: &BTreeMap<OccurrenceId, Transform>, path: &[OccurrenceId]| path.iter().fold(Transform::IDENTITY, |t, o| t.mul(&cur[o]));
     let mut status: BTreeMap<MateId, MateStatus> = BTreeMap::new();
+    let mut limited: BTreeSet<MateId> = BTreeSet::new();
     let mut prepared = Vec::new();
     for m in &active {
         let bad = [&m.a, &m.b].into_iter().find_map(|c| d.component_at(&c.occurrence).err());
@@ -1113,7 +1178,14 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
             continue;
         }
         match (m.angle.eval(&vals), m.distance.eval(&vals)) {
-            (Ok(a), Ok(dist)) => prepared.push((*m, a, dist)),
+            (Ok(a), Ok(dist)) => {
+                let clamp = |v: f64, l: Option<(f64, f64)>| l.map(|(lo, hi)| v.clamp(lo.min(hi), lo.max(hi))).unwrap_or(v);
+                let (a2, d2) = (clamp(a, m.angle_limits), clamp(dist, m.distance_limits));
+                if a2 != a || d2 != dist {
+                    limited.insert(m.id);
+                }
+                prepared.push((*m, a2, d2))
+            }
             (Err(e), _) | (_, Err(e)) => {
                 status.insert(m.id, MateStatus::Unsolved(format!("drive value: {e}")));
             }
@@ -1194,7 +1266,21 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
                 }
             }
         }
-        rep.mates.push(MateReport { mate: m.id, name: m.name.clone(), status: st, dof: m.kind.dof() });
+        let free = if matches!(st, MateStatus::Solved | MateStatus::Redundant) {
+            let f = world_of(&cur, &m.a.occurrence).mul(&m.a.frame());
+            let (o, x, y, z) = (f.point(DVec3::ZERO), f.vector(DVec3::X), f.vector(DVec3::Y), f.vector(DVec3::Z));
+            match m.kind {
+                MateKind::Rigid => vec![],
+                MateKind::Revolute => vec![FreeDof::Rotate { origin: o, axis: z }],
+                MateKind::Slider => vec![FreeDof::Translate { dir: z }],
+                MateKind::Cylindrical => vec![FreeDof::Rotate { origin: o, axis: z }, FreeDof::Translate { dir: z }],
+                MateKind::Planar => vec![FreeDof::Translate { dir: x }, FreeDof::Translate { dir: y }, FreeDof::Rotate { origin: o, axis: z }],
+                MateKind::Ball => vec![FreeDof::Spin { origin: o }],
+            }
+        } else {
+            vec![]
+        };
+        rep.mates.push(MateReport { mate: m.id, name: m.name.clone(), status: st, dof: m.kind.dof(), free, limited: limited.contains(&m.id) });
     }
     rep.moved = moved.iter().copied().collect();
     let tf = moved.into_iter().map(|id| (id, cur[&id])).collect();
@@ -1218,6 +1304,19 @@ pub struct Interference {
     pub b: InstanceRef,
     /// Volume of the common solid (mm³).
     pub volume: f64,
+    /// The overlap itself in world coordinates, to draw it (GUI_NEEDS #19).
+    #[serde(skip)]
+    pub common: Option<Overlap>,
+}
+
+/// The common solid of an interference, as a display body (`mesh()` is cached).
+#[derive(Clone, Debug)]
+pub struct Overlap(pub Body);
+
+impl PartialEq for Overlap {
+    fn eq(&self, o: &Self) -> bool {
+        Arc::ptr_eq(&self.0.geom, &o.0.geom)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1279,14 +1378,15 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 8);
     let chunk = todo.len().div_ceil(threads).max(1);
     let placed = &placed;
-    let results: Vec<(usize, usize, Result<f64, String>)> = std::thread::scope(|sc| {
+    type PairResult = (usize, usize, Result<(f64, Option<Shape>), String>);
+    let results: Vec<PairResult> = std::thread::scope(|sc| {
         let hs: Vec<_> = todo
             .chunks(chunk)
             .map(|ch| {
                 sc.spawn(move || {
                     ch.iter()
                         .map(|&(x, y)| {
-                            let v = placed[x].1.common(&placed[y].1).and_then(|c| if c.count(occt::ShapeKind::Solid) == 0 { Ok(0.0) } else { c.volume() });
+                            let v = placed[x].1.common(&placed[y].1).and_then(|c| if c.count(occt::ShapeKind::Solid) == 0 { Ok((0.0, None)) } else { c.volume().map(|v| (v, Some(c))) });
                             (x, y, v.map_err(|e| e.to_string()))
                         })
                         .collect::<Vec<_>>()
@@ -1297,7 +1397,10 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     });
     for (x, y, v) in results {
         match v {
-            Ok(v) if v > opts.min_volume => rep.pairs.push(Interference { a: placed[x].0.clone(), b: placed[y].0.clone(), volume: v }),
+            Ok((v, c)) if v > opts.min_volume => {
+                let common = c.map(|c| Overlap(Body { id: placed[x].0.body, name: "overlap".into(), reference: true, part: None, geom: crate::regen::BodyGeom::new(c) }));
+                rep.pairs.push(Interference { a: placed[x].0.clone(), b: placed[y].0.clone(), volume: v, common })
+            }
             Ok(_) => {}
             Err(e) => rep.failed.push((placed[x].0.clone(), placed[y].0.clone(), e)),
         }
@@ -1912,7 +2015,9 @@ impl Document {
                     suppressed: false,
                     kind: FeatureKind::ContextRef { source: src.clone(), body: Some(body.clone()), op: crate::feature::BoolOp::NewBody, target: None, offset: zero(), reference: false, root: None },
                 };
-                d.components.push(Component { id, name: cname.clone(), features: vec![feat], ..Default::default() });
+                // the halves are built where the split happened, whatever their
+                // occurrences do later (mates move them)
+                d.components.push(Component { id, name: cname.clone(), features: vec![feat], context_frame: Some(world), ..Default::default() });
                 let occ = OccurrenceId(d.alloc());
                 d.occurrences.push(Occurrence { id: occ, component: id, name: format!("{cname}:1"), transform: world, visible: true, grounded: false, explode: DVec3::ZERO, in_bom: true });
                 out.push((id, occ));
