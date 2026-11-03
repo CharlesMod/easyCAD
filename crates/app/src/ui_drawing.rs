@@ -467,7 +467,7 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                     );
                 }
                 if busy {
-                    ui.add(egui::Spinner::new().size(10.0));
+                    crate::widgets::spinner(ui, 10.0, None);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(

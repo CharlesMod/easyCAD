@@ -770,3 +770,43 @@ pub fn label_caps(text: &str) -> RichText {
 pub fn mono_text(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).font(theme::mono(12.0))
 }
+
+/// Whether the window can be seen at all (not minimized, not covered).
+pub fn window_visible(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        let v = i.viewport();
+        v.minimized != Some(true) && v.occluded != Some(true)
+    })
+}
+
+/// A busy spinner that animates at full rate only in the focused window, at
+/// 2 frames/s when it is unfocused, and not at all when it cannot be seen
+/// (egui's own spinner asks for every frame, even in the background).
+pub fn spinner(ui: &mut Ui, size: f32, color: Option<Color32>) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let focused = ui.input(|i| i.focused);
+    let color = color.unwrap_or_else(|| ui.visuals().strong_text_color());
+    let t = ui.input(|i| i.time);
+    let t = if focused { t } else { (t * 2.0).floor() / 2.0 };
+    let radius = rect.height() / 2.0 - 2.0;
+    let start = t * std::f64::consts::TAU;
+    let end = start + 240f64.to_radians() * t.sin();
+    let points: Vec<egui::Pos2> = (0..=20)
+        .map(|i| {
+            let a = start + (end - start) * i as f64 / 20.0;
+            rect.center() + radius * egui::vec2(a.cos() as f32, a.sin() as f32)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, Stroke::new(3.0, color)));
+    if window_visible(ui.ctx()) {
+        if focused {
+            ui.ctx().request_repaint();
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+    resp
+}

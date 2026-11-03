@@ -43,6 +43,7 @@ mode a bare number means inches.
 | `ui_mates.rs` | Mates dialog: type pills, snap glyphs under the cursor (face centre + normal, circle / cylinder axis, straight-edge axis, component origin), live solve (the draft rides along with every model request), jog slider for the free motion, OK = mate + solved placements in one undo step. |
 | `ui_gizmo.rs` | Move gizmo (G) on an unconstrained occurrence: translate arrows and rotation rings in the view frame, 1 mm / 15° snapping (Shift: free); live through a model-matrix override, one undo step on release. |
 | `ui_interference.rs` / `ui_bom.rs` | Interference (I): pairs with volumes off the UI thread, the pair tinted red, zoom-to. BOM window: indented / flat, made vs purchased, CSV. |
+| `cloud.rs` | Google Drive sync on `easycad-sync`: the Google client lookup, the keychain sign-in check at start, Sign in / Sign out (browser, off the UI thread), the background `SyncHandle` over the Documents, Parts Library and Settings roots, and the status-bar indicator / conflict notices it derives from the sync events. Inert unless `main.rs` starts it, so tests never touch the keychain or the network. |
 | `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
 ## Assemblies
@@ -56,6 +57,42 @@ the camera keeps its world pose across activation. "New enclosure from PCB" make
 assembly by default (Enclosure master, hidden and out of the BOM → Base (grounded) +
 Lid in context; a STEP board as a locked, purchased reference). See GUI_NEEDS #17
 for the design-position anchors that let in-context components move.
+
+## Idle cost
+
+The app draws only when something asks: input, a worker or sync result, an
+animation. At rest it draws no frames. A frame whose 3D scene is unchanged (same
+camera, meshes, colours, highlights, size) reuses the last offscreen image, so hover
+and status-bar repaints cost a blit, not a 4×MSAA pass (`ViewportGpu::render_cached`).
+While the window is minimized or covered the viewport neither renders nor blits.
+Busy spinners (`widgets::spinner`) animate at full rate only in the focused window:
+2 frames/s when unfocused, none when hidden. `EASYCAD_DEBUG_REPAINT=1` prints frames
+per second, 3D renders and what requested each frame.
+
+## Google Drive sync
+
+File ▸ Settings ▸ Google Drive has **Sign in with Google**. It opens the browser
+(OAuth with PKCE, a loopback redirect, scope `drive.file`: easyCAD sees only the
+files it created) and keeps the refresh token in the OS keychain. While signed in,
+these folders sync with `easyCAD/` in My Drive:
+
+| local | Drive |
+|---|---|
+| `~/Documents/easyCAD` (Save starts here for a new document) | `easyCAD/Documents` |
+| `$XDG_DATA_HOME/easycad/library` (parts library) | `easyCAD/Parts Library` |
+| `settings.json` in the settings folder (nothing else there) | `easyCAD/Settings` |
+
+A pass runs at start, 2 s after a local change (file watcher), right after a save,
+when Drive's change feed has something (polled every minute) and every 15 minutes.
+The right end of the status bar shows Synced / Syncing n/N / Offline / Sign-in
+needed / Sync conflict / Sign in to sync; a click opens Settings. A document changed
+on two computers is never overwritten: this computer's version stays and is pushed,
+the other one is saved beside it as `Name (conflict <device> <date time>).ecad`, a
+warning toast names it, and Settings lists it with *Open their version* and *Dismiss*.
+Deleted files go to the Drive trash; files deleted locally by sync go to
+`.cwsync-trash/` in the root. Sync is off when no Google client file is installed
+(`~/.config/easycad/google_client.json`, see `crates/sync/README.md`) or with
+`EASYCAD_SYNC=off`. The state is in `$XDG_DATA_HOME/easycad/sync/state.json`.
 
 ## Keyboard
 

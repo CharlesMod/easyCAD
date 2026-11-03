@@ -109,3 +109,57 @@ fn orbit_frames_reuse_uploaded_mesh() {
         "CPU encode per orbit frame must stay well under a 60 fps budget"
     );
 }
+
+/// A frame that draws the same scene as the last one is not rendered again:
+/// UI-only repaints (hover, tooltips, status) cost a blit, not a 3D pass.
+#[test]
+fn unchanged_frames_reuse_the_image() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        eprintln!("no wgpu adapter: skipped");
+        return;
+    };
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let mut gpu = ViewportGpu::new(&device, &adapter, COLOR_FORMAT);
+    let mesh = Arc::new(grid_mesh(8));
+    let mut cam = Camera::default();
+    cam.fit_sphere(Vec3::new(50.0, 50.0, 0.0), 75.0, 1.6);
+    let size = Vec2::new(640.0, 400.0);
+    let frame = |cam: &Camera| {
+        Arc::new(Frame3D {
+            size_px: [640, 400],
+            view_proj: cam.view_proj(size),
+            eye: cam.eye(),
+            forward: cam.forward(),
+            ortho: false,
+            light: Vec3::Z,
+            background: [0.1, 0.1, 0.1, 1.0],
+            mode: DisplayMode::ShadedEdges,
+            edge_color: [0.1, 0.1, 0.1, 1.0],
+            bodies: vec![DrawBody {
+                mesh: mesh.clone(),
+                color: [0.7, 0.7, 0.7, 1.0],
+                translucent: false,
+                colors: None,
+                model: glam::Mat4::IDENTITY,
+            }],
+            highlights: Vec::new(),
+            grid: None,
+        })
+    };
+    let mut draw = |gpu: &mut ViewportGpu, f: &Arc<Frame3D>| {
+        let mut enc = device.create_command_encoder(&Default::default());
+        gpu.render_cached(&device, &queue, &mut enc, f);
+        queue.submit([enc.finish()]);
+    };
+    draw(&mut gpu, &frame(&cam));
+    draw(&mut gpu, &frame(&cam));
+    draw(&mut gpu, &frame(&cam));
+    assert_eq!(gpu.renders, 1, "same scene in new frames: one render");
+    cam.orbit(Vec2::new(4.0, 1.0));
+    draw(&mut gpu, &frame(&cam));
+    assert_eq!(gpu.renders, 2, "a camera move renders");
+}

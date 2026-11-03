@@ -51,7 +51,7 @@ Release zips for macOS, Linux and Windows: `scripts/build-release.sh` (run on a 
 | `crates/occt` | cxx bridge to a narrow C++ shim over OpenCascade 7.8 |
 | `crates/model` | documents, params/expressions, sketch solver, features, regen cache, joints, process profiles, parts library, assemblies, drawings, import/export |
 | `crates/app` | the desktop app (`easycad` binary) plus snapshot and click-through (`e2e/`) tests |
-| `crates/sync` | Google Drive sync, tabled work in progress, outside the workspace |
+| `crates/sync` | Google Drive sync: OAuth (PKCE, keychain), Drive v3 client, local-first three-way sync engine |
 | `docs/` | `ENGINE.md` (engine API), `GUI.md`, `GUI_NEEDS.md`, `BUILDING.md` |
 
 Documents are `.ecad` folders (`doc.json` plus content-addressed `blobs/`). Older `.cwk`

@@ -1,31 +1,36 @@
-# easycad-sync: work in progress (on hold)
+# easycad-sync: status and design
 
-Google sign-in and Drive sync were tabled before this crate was finished.
-It is **not** in the root workspace `members`. Its `Cargo.toml` has its own
-`[workspace]` table, so `cargo build` at the repo root never pulls in its
-network dependencies (reqwest, keyring, notify). To work on it on its own:
-`cd crates/sync && cargo clippy --all-targets`. When it is ready, remove the
-`[workspace]` table, switch `version`/`edition`/`license` to `.workspace = true`,
-and add `crates/sync` to the root `members`.
+A workspace member since 2026-11-03; the app uses it (`crates/app/src/cloud.rs`,
+see `docs/GUI.md` ▸ Google Drive sync). Setup for a new Google project:
+`README.md` here and `scripts/setup-google.sh`.
 
-## Done
+## Modules
 
-- `Cargo.toml`: the planned dependency set (reqwest 0.12 with rustls,
-  keyring 3 with native macOS/Windows backends and the pure-Rust
-  `async-secret-service` backend on Linux, so libdbus is not needed; notify 8,
-  tokio, wiremock in dev). It resolves and builds.
-- `src/error.rs`: `AuthError`, `RemoteError`, `SyncError`. Auth and network
-  failures are values, never panics.
-- `src/remote.rs`: the `RemoteStore` trait (root_id, list, get, download,
-  multipart upload, begin_resumable/resume_upload, server-side copy, trash,
-  start_page_token, changes_since), plus `RemoteFile`, `FileMeta` and `UploadRequest`.
-- `src/events.rs`: `SyncEvent` (Status, Progress, Conflict, AuthRequired,
-  Error, Completed), `SyncStatus`, `ConflictInfo`, `SyncReport`, and
-  `EventSink` (an std mpsc channel with an optional GUI repaint waker).
-- Compiles clean except for one dead-code warning (`SyncReport::merge`,
-  which the engine will use).
+| module | what |
+|---|---|
+| `auth/` | `ClientConfig` (console JSON lookup), `pkce`, `TokenStore` (`KeychainStore`, `MemoryStore`), `Authenticator` (loopback sign-in, single-flight refresh, rotation, `invalid_grant`, revoke), the `TokenProvider` trait |
+| `drive.rs` | `DriveClient`: folders, appProperties identity, paginated list, multipart / resumable upload, copy, trash, changes, `about` |
+| `memory.rs` | `MemoryRemote`: the in-memory fake (offline switch, interrupted upload, stats, edits behind the engine's back) |
+| `config.rs` | `SyncConfig`, `RootConfig` (include / ignore globs), default roots and folders, device name |
+| `state.rs` | the JSON state DB (base entries, stat cache, pending sessions, root id, page token) |
+| `local.rs` | scan with the stat cache, md5 / sha256, temp names, local trash, blob / doc.json path rules |
+| `plan.rs` | the three-way plan and conflict names |
+| `engine.rs` | `Engine::sync_once` and `remote_changed` |
+| `background.rs` | `SyncHandle` (thread + runtime, watcher, change polling, backoff, auth pause) |
 
-## Design (agreed, not implemented)
+Tests (`cargo test -p easycad-sync`, no network): unit tests per module; `tests/engine.rs`
+(new local, new remote, edits both ways, doc and file conflicts, deletes, blob dedupe,
+rename, interrupted upload resumed after a restart, offline then reconnect, safety
+stops, recreated Drive folder, lost state DB, the background handle with the
+watcher); `tests/auth.rs` (refresh and rotation, invalid_grant, 5xx, invalidate,
+revoke, loopback sign-in end to end, denied consent); `tests/drive.rs` (pagination,
+backoff on 503 / rate-limit 403, 401 refresh, retries exhausted, resumable from the
+server's offset, expired session).
+
+Examples: `cargo run -p easycad-sync --example login -- [--client-file F] [--sign-out]`,
+`cargo run -p easycad-sync --example sync_dir -- DIR [--root NAME] [--watch] [--memory]`.
+
+## Design (implemented)
 
 **Auth.** OAuth2 authorization code + PKCE (S256) with a loopback redirect
 `http://127.0.0.1:<random port>`; opens the system browser with the `open`
@@ -97,22 +102,12 @@ so it suits a non-async GUI.
 
 ## Left to do
 
-1. `src/auth/`: client-JSON loading, PKCE, loopback server, token refresh, `TokenStore`
-   (keychain and in-memory), `sign_out`.
-2. `src/drive.rs`: `DriveClient` implementing `RemoteStore` as above.
-3. `src/memory.rs`: an in-memory `RemoteStore` fake (offline toggle, mid-upload interruption,
-   transfer stats).
-4. `src/state.rs`, `src/local.rs` (scan, ignore, hashing, atomic write), `src/plan.rs`,
-   `src/engine.rs`, `src/config.rs` (sync roots, device name), `src/background.rs`.
-5. Tests (no network): new local, new remote, both edited (conflict), deleted on one
-   side, blob dedupe, rename, interrupted upload resume, offline then reconnect (two
-   engines sharing one fake); PKCE (RFC 7636 vector); token refresh, invalid_grant
-   and revoke against wiremock; a loopback login end to end against wiremock; Drive
-   pagination, backoff and resumable against wiremock.
-6. `examples/login.rs` (`--client-file`, `--sign-out`) and `examples/sync_dir.rs`.
-7. `README.md` and `scripts/setup-google.sh`. The script runs `gcloud projects create <id>` and
-   `gcloud services enable drive.googleapis.com --project <id>`, then prints console URLs
-   for the steps that have no gcloud command for a personal Gmail account: Google
-   Auth Platform, then Branding, then Audience (External, Testing, add yourself as a test user),
-   then Clients (Desktop app), then Download JSON.
-8. Integrate into the workspace (see top).
+- The Google project is in Testing mode: only listed test users can sign in and
+  refresh tokens expire after 7 days. Publish it (no review needed for `drive.file`
+  without a logo) before other people use it.
+- Local deletes by sync go to `<root>/.cwsync-trash/<date>/`, which nothing empties yet.
+- A Drive 403 `storageQuotaExceeded` is reported per file; the GUI shows only the last error.
+- Changes are polled from one token for all roots; a change outside `easyCAD/` the app
+  can see (none with `drive.file`) would only cost an extra pass.
+- No end-to-end test against the real Drive in CI (needs an account); the manual check
+  is the `login` and `sync_dir` examples.

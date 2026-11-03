@@ -689,7 +689,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(26.0);
-            ui.add(egui::Spinner::new().size(12.0));
+            crate::widgets::spinner(ui, 12.0, None);
             ui.label(widgets::muted("regenerating…"));
         });
         return;
@@ -1464,7 +1464,7 @@ fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                 let small = |t: &str| RichText::new(t).size(11.0).color(theme::TEXT_MUTED);
                 ui.label(small(&status_text(app)));
                 if app.regenerating() {
-                    ui.add(egui::Spinner::new().size(10.0).color(theme::TEXT_MUTED));
+                    crate::widgets::spinner(ui, 10.0, Some(theme::TEXT_MUTED));
                 }
                 if let Some(m) = &app.model {
                     ui.label(small(&format!(
@@ -1475,6 +1475,7 @@ fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                     )));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    sync_indicator(app, ui);
                     let (orbit, pan) = app.settings.nav.hints();
                     if ui
                         .add(egui::Label::new(small("? shortcuts")).sense(Sense::click()))
@@ -1496,6 +1497,44 @@ fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                 });
             });
         });
+}
+
+/// Drive sync state at the right end of the status bar; a click opens Settings.
+fn sync_indicator(app: &mut EasyCadApp, ui: &mut Ui) {
+    use crate::cloud::Indicator;
+    let ind = app.cloud.indicator();
+    if ind == Indicator::Hidden {
+        return;
+    }
+    let dot = match ind {
+        Indicator::Synced => theme::hex(0x4caf72),
+        Indicator::Syncing { .. } | Indicator::SigningIn | Indicator::Starting => theme::ACCENT,
+        Indicator::Conflict | Indicator::SignInNeeded => theme::ORANGE,
+        _ => theme::TEXT_MUTED,
+    };
+    let text = RichText::new(ind.label()).size(11.0).color(match ind {
+        Indicator::Conflict | Indicator::SignInNeeded => theme::ORANGE_SOFT,
+        _ => theme::TEXT_MUTED,
+    });
+    let r = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            let l = ui.add(egui::Label::new(text).sense(Sense::click()));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 3.5, dot);
+            l
+        })
+        .inner;
+    let tip = match ind {
+        Indicator::SignedOut => "Google Drive sync: sign in in Settings",
+        Indicator::SignInNeeded => "The Google sign-in expired: sign in again in Settings",
+        Indicator::Offline => "No connection to Google Drive: changes sync when it is back",
+        Indicator::Conflict => "A file changed on two computers: both versions are kept (see Settings)",
+        _ => "Google Drive sync (Settings)",
+    };
+    if r.on_hover_text(tip).clicked() {
+        app.show_settings = true;
+    }
 }
 
 fn toasts(app: &mut EasyCadApp, ui: &mut Ui) {

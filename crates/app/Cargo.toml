@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 easycad-model = { path = "../model" }
+easycad-sync = { path = "../sync" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 egui = "0.37"
 egui-wgpu = "0.37"

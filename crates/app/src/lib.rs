@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod app;
 pub mod camera;
+pub mod cloud;
 pub mod dialogs;
 pub mod e2e_state;
 pub mod files;
@@ -42,6 +43,11 @@ pub fn native_options() -> eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("easyCAD")
+            .with_app_id("easycad")
+            .with_icon(std::sync::Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/easycad-256.png"))
+                    .unwrap_or_default(),
+            ))
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([960.0, 600.0]),
         depth_buffer: 0,

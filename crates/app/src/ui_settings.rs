@@ -21,6 +21,7 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
     let mut open = true;
     let mut s = app.settings.clone();
     let mut inch = crate::units::inch();
+    let mut cloud_act = None;
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
@@ -96,7 +97,25 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
                 (None, None) => "Unsaved work is copied to the recovery folder and offered again after a crash.".into(),
             };
             ui.add(egui::Label::new(widgets::muted(&note)).wrap());
+            ui.add_space(6.0);
+            cloud_act = drive_section(app, ui);
         });
+    match cloud_act {
+        Some(CloudAct::SignIn) => app.cloud.sign_in(),
+        Some(CloudAct::SignOut) => app.cloud.sign_out(),
+        Some(CloudAct::SyncNow) => app.cloud.sync_now(),
+        Some(CloudAct::Open(p)) => {
+            if let Err(e) = app.open_path(&p) {
+                app.warn(format!("Open failed: {e}"));
+            }
+        }
+        Some(CloudAct::Dismiss(i)) => {
+            if i < app.cloud.conflicts.len() {
+                app.cloud.conflicts.remove(i);
+            }
+        }
+        None => {}
+    }
     if inch != crate::units::inch() {
         crate::units::set_inch(inch);
         s.inch = inch;
@@ -118,6 +137,110 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
     if !open {
         app.show_settings = false;
     }
+}
+
+enum CloudAct {
+    SignIn,
+    SignOut,
+    SyncNow,
+    Open(std::path::PathBuf),
+    Dismiss(usize),
+}
+
+/// Google Drive: sign in / out, what syncs where, status and conflicts.
+fn drive_section(app: &EasyCadApp, ui: &mut Ui) -> Option<CloudAct> {
+    use crate::cloud::Indicator;
+    let c = &app.cloud;
+    let mut act = None;
+    theme::section_label(ui, "Google Drive");
+    if !c.available() {
+        let why = c.unavailable.as_deref().unwrap_or("Sync is off in this session.");
+        ui.add(egui::Label::new(widgets::muted(format!("Sync is not set up on this computer. {why}"))).wrap());
+        return None;
+    }
+    let ind = c.indicator();
+    match &ind {
+        Indicator::Starting => {
+            ui.horizontal(|ui| {
+                crate::widgets::spinner(ui, 12.0, None);
+                ui.label(widgets::muted("Checking the sign-in…"));
+            });
+        }
+        Indicator::SigningIn => {
+            ui.horizontal(|ui| {
+                crate::widgets::spinner(ui, 12.0, None);
+                ui.label("Finish signing in in your browser…");
+            });
+        }
+        Indicator::SignedOut | Indicator::SignInNeeded => {
+            if c.needs_sign_in.is_some() {
+                ui.label(RichText::new("Your Google sign-in expired. Sign in again to keep syncing.").color(theme::ORANGE_SOFT));
+            }
+            ui.add(
+                egui::Label::new(widgets::muted(
+                    "Keep your designs, parts library and settings in easyCAD/ in your Google Drive, on every computer you sign in on. easyCAD can only see the files it creates.",
+                ))
+                .wrap(),
+            );
+            if widgets::primary(ui, "  Sign in with Google  ").clicked() {
+                act = Some(CloudAct::SignIn);
+            }
+        }
+        _ => {
+            let who = c.account.as_deref().unwrap_or("your Google account");
+            ui.label(format!("Signed in as {who}"));
+            ui.horizontal(|ui| {
+                if matches!(ind, Indicator::Syncing { .. }) {
+                    crate::widgets::spinner(ui, 12.0, None);
+                }
+                ui.label(widgets::muted(ind.label()));
+            });
+            ui.add(
+                egui::Label::new(widgets::muted(format!(
+                    "Documents: {} ↔ My Drive ▸ easyCAD ▸ Documents",
+                    crate::cloud::documents_dir().display()
+                )))
+                .wrap(),
+            );
+            ui.horizontal(|ui| {
+                if widgets::button(ui, "Sync now").clicked() {
+                    act = Some(CloudAct::SyncNow);
+                }
+                if widgets::button(ui, "Sign out").clicked() {
+                    act = Some(CloudAct::SignOut);
+                }
+            });
+        }
+    }
+    if let Some(e) = &c.last_error {
+        ui.add(egui::Label::new(RichText::new(e).size(11.5).color(theme::ORANGE_SOFT)).wrap());
+    }
+    for (i, k) in c.conflicts.iter().enumerate() {
+        let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Conflict: {} changed here and on {}. Theirs is kept as {}.",
+                    name(&k.local_abs),
+                    k.remote_device.as_deref().unwrap_or("another device"),
+                    name(&k.conflict_copy_abs)
+                ))
+                .size(11.5)
+                .color(theme::ORANGE_SOFT),
+            )
+            .wrap(),
+        );
+        ui.horizontal(|ui| {
+            let is_doc = k.conflict_copy_abs.join("doc.json").is_file();
+            if is_doc && widgets::button(ui, "Open their version").clicked() {
+                act = Some(CloudAct::Open(k.conflict_copy_abs.clone()));
+            }
+            if widgets::button(ui, "Dismiss").clicked() {
+                act = Some(CloudAct::Dismiss(i));
+            }
+        });
+    }
+    act
 }
 
 /// Every shortcut, grouped. Shown by `?`.

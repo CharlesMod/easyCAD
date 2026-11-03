@@ -54,7 +54,7 @@ pub struct FaceHighlight {
     pub model: Mat4,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Grid {
     pub z: f32,
     pub spacing: f32,
@@ -135,6 +135,11 @@ pub struct ViewportGpu {
     meshes: HashMap<usize, GpuMesh>,
     target: Option<Target>,
     frame: u64,
+    /// The frame the offscreen image holds. Kept alive so its mesh pointers
+    /// cannot be reused by new meshes while they are compared.
+    last: Option<Arc<Frame3D>>,
+    /// Offscreen renders done (the image cache skips the rest).
+    pub renders: u64,
     /// Bytes uploaded for meshes so far (for the status bar / tests).
     pub uploaded_meshes: u64,
 }
@@ -427,6 +432,8 @@ impl ViewportGpu {
             meshes: HashMap::new(),
             target: None,
             frame: 0,
+            last: None,
+            renders: 0,
             uploaded_meshes: 0,
         }
     }
@@ -571,6 +578,25 @@ impl ViewportGpu {
         });
     }
 
+    /// Render `f` unless the offscreen image already shows exactly it: a frame
+    /// that only changed the 2D UI (hover, tooltips, status) costs a blit.
+    pub fn render_cached(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        f: &Arc<Frame3D>,
+    ) {
+        let size = [f.size_px[0].max(1), f.size_px[1].max(1)];
+        let fresh = self.target.as_ref().is_some_and(|t| t.size == size)
+            && self.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, f) || same_image(l, f));
+        if fresh {
+            return;
+        }
+        self.render(device, queue, encoder, f);
+        self.last = Some(f.clone());
+    }
+
     /// Render one frame into the offscreen target.
     pub fn render(
         &mut self,
@@ -580,6 +606,8 @@ impl ViewportGpu {
         f: &Frame3D,
     ) {
         self.frame += 1;
+        self.renders += 1;
+        RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.ensure_target(device, f.size_px);
         for b in &f.bodies {
             self.upload(device, &b.mesh, b.colors.as_ref());
@@ -782,6 +810,21 @@ impl ViewportGpu {
     }
 }
 
+/// Set while the window cannot be seen (minimized or covered): the viewport
+/// then neither renders nor blits.
+static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Offscreen 3D renders so far, all viewports (for `EASYCAD_DEBUG_REPAINT`).
+pub static RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_hidden(hidden: bool) {
+    HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn hidden() -> bool {
+    HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The per-frame paint callback.
 pub struct ViewportCallback {
     pub frame: Arc<Frame3D>,
@@ -796,8 +839,11 @@ impl CallbackTrait for ViewportCallback {
         encoder: &mut wgpu::CommandEncoder,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        if hidden() {
+            return Vec::new();
+        }
         if let Some(gpu) = resources.get_mut::<ViewportGpu>() {
-            gpu.render(device, queue, encoder, &self.frame);
+            gpu.render_cached(device, queue, encoder, &self.frame);
         }
         Vec::new()
     }
@@ -808,10 +854,45 @@ impl CallbackTrait for ViewportCallback {
         pass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
+        if hidden() {
+            return;
+        }
         if let Some(gpu) = resources.get::<ViewportGpu>() {
             gpu.paint(pass);
         }
     }
+}
+
+/// Whether two frames draw the same pixels (meshes compared by identity).
+fn same_image(a: &Frame3D, b: &Frame3D) -> bool {
+    let body = |x: &DrawBody, y: &DrawBody| {
+        Arc::ptr_eq(&x.mesh, &y.mesh)
+            && x.color == y.color
+            && x.translucent == y.translucent
+            && x.model == y.model
+            && match (&x.colors, &y.colors) {
+                (None, None) => true,
+                (Some(p), Some(q)) => Arc::ptr_eq(p, q),
+                _ => false,
+            }
+    };
+    let hl = |x: &FaceHighlight, y: &FaceHighlight| {
+        Arc::ptr_eq(&x.mesh, &y.mesh) && x.face == y.face && x.color == y.color && x.xray == y.xray && x.model == y.model
+    };
+    a.size_px == b.size_px
+        && a.view_proj == b.view_proj
+        && a.eye == b.eye
+        && a.forward == b.forward
+        && a.ortho == b.ortho
+        && a.light == b.light
+        && a.background == b.background
+        && a.mode == b.mode
+        && a.edge_color == b.edge_color
+        && a.grid == b.grid
+        && a.bodies.len() == b.bodies.len()
+        && a.bodies.iter().zip(&b.bodies).all(|(x, y)| body(x, y))
+        && a.highlights.len() == b.highlights.len()
+        && a.highlights.iter().zip(&b.highlights).all(|(x, y)| hl(x, y))
 }
 
 pub fn srgba(c: egui::Color32) -> [f32; 4] {

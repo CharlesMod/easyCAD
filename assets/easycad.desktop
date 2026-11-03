@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=easyCAD
+GenericName=Enclosure CAD
+Comment=Parametric CAD for electronics enclosures
+Exec=easycad %F
+Icon=easycad
+Terminal=false
+Categories=Graphics;Engineering;3DGraphics;
+StartupWMClass=easycad

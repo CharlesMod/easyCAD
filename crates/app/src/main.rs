@@ -55,6 +55,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             let mut app = EasyCadApp::new(cc, doc);
             app.path = path;
+            app.cloud = easycad_app::cloud::Cloud::start(&cc.egui_ctx, easycad_app::settings::dir());
             Ok(Box::new(app))
         }),
     )

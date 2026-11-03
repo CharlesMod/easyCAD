@@ -22,6 +22,8 @@ pub struct Request {
     pub filters: Vec<(String, Vec<String>)>,
     /// Suggested file name (Save) or empty.
     pub file_name: String,
+    /// Folder to start in (else the last one used).
+    pub dir: Option<PathBuf>,
 }
 
 impl Request {
@@ -31,6 +33,7 @@ impl Request {
             kind: Kind::Save,
             filters: vec![(filter.into(), vec![ext.into()])],
             file_name: file_name.into(),
+            dir: None,
         }
     }
     pub fn open(title: &str, filter: &str, exts: &[&str]) -> Request {
@@ -39,6 +42,7 @@ impl Request {
             kind: Kind::OpenFile,
             filters: vec![(filter.into(), exts.iter().map(|e| e.to_string()).collect())],
             file_name: String::new(),
+            dir: None,
         }
     }
     pub fn folder(title: &str) -> Request {
@@ -47,6 +51,7 @@ impl Request {
             kind: Kind::OpenFolder,
             filters: Vec::new(),
             file_name: String::new(),
+            dir: None,
         }
     }
 }
@@ -82,7 +87,7 @@ pub fn native(req: &Request) -> Pick {
     for (label, exts) in &req.filters {
         d = d.add_filter(label, exts);
     }
-    if let Some(dir) = last_dir() {
+    if let Some(dir) = req.dir.clone().filter(|d| d.is_dir()).or_else(last_dir) {
         d = d.set_directory(dir);
     }
     if !req.file_name.is_empty() {
@@ -170,7 +175,7 @@ pub enum PromptEvent {
 
 impl PathPrompt {
     pub fn new(req: Request) -> PathPrompt {
-        let dir = last_dir().unwrap_or_default();
+        let dir = req.dir.clone().filter(|d| d.is_dir()).or_else(last_dir).unwrap_or_default();
         let text = if req.file_name.is_empty() {
             format!("{}/", dir.display())
         } else {

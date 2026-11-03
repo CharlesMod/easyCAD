@@ -1,0 +1,11 @@
+[package]
+name = "render-icon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Render assets/icon/easycad.svg to the PNG sizes the app, Linux desktops and the Google consent screen use"
+
+[workspace]
+
+[dependencies]
+resvg = "0.45"

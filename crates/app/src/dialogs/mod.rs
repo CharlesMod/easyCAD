@@ -1079,7 +1079,7 @@ impl Dialog {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if cx.regenerating {
-                            ui.add(egui::Spinner::new().size(12.0).color(theme::TEXT_MUTED));
+                            crate::widgets::spinner(ui, 12.0, Some(theme::TEXT_MUTED));
                             ui.label(widgets::muted("previewing…"));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

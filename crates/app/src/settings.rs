@@ -125,6 +125,11 @@ impl Default for Settings {
     }
 }
 
+/// The folder holding `settings.json` (also the Google client file).
+pub fn dir() -> Option<std::path::PathBuf> {
+    path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+}
+
 fn path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)

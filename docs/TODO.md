@@ -51,7 +51,11 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] Threads are cosmetic only.
 
 ## 6. After the MVP
-- [ ] Google Drive sync (`crates/sync`, tabled: scaffold + `TODO.md`).
+- [x] Google Drive sync (`crates/sync`; in the app: File ▸ Settings ▸ Google Drive, status bar, conflict notices).
+- [ ] Sync follow-ups: read the synced parts library folder (`library.json`) in the Parts screen; reload
+      `settings.json` when another computer changed it; offer "keep theirs / keep mine" for a conflict copy;
+      a per-root on/off switch and a custom Documents folder in Settings.
+- [ ] Publish the Google OAuth app (Testing mode refresh tokens expire after 7 days).
 - [ ] GitHub Actions with a cached OpenCascade build.
 - [ ] macOS notarization and Windows code signing; installers.
 - [ ] Quick-start guide and shortcut reference.

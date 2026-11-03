@@ -143,6 +143,8 @@ pub struct EasyCadApp {
     pub section: Option<SectionUi>,
     /// Bounds of the uncut model, for placing the section plane.
     pub section_bbox: Option<easycad_model::occt::BBox>,
+    /// Google Drive sync (inert unless the binary starts it).
+    pub cloud: crate::cloud::Cloud,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -238,6 +240,7 @@ impl EasyCadApp {
             asm_explode_rect: None,
             section: None,
             section_bbox: None,
+            cloud: crate::cloud::Cloud::disabled(),
         }
     }
 
@@ -969,10 +972,22 @@ impl EasyCadApp {
             (Some(p), false) => save(self, p.clone()),
             _ => {
                 let name = format!("{}.ecad", self.doc.data.name);
-                let req = crate::files::Request::save("Save document", "easyCAD", "ecad", &name);
+                let mut req = crate::files::Request::save("Save document", "easyCAD", "ecad", &name);
+                req.dir = Some(self.save_dir());
                 self.ask_path(req, save);
             }
         }
+    }
+
+    /// Where Save offers to put the document: the folder it is already in,
+    /// else the synced easyCAD Documents folder (created on demand).
+    pub fn save_dir(&self) -> PathBuf {
+        if let Some(d) = self.path.as_ref().and_then(|p| p.parent()).filter(|d| d.is_dir()) {
+            return d.to_path_buf();
+        }
+        let docs = crate::cloud::documents_dir();
+        let _ = std::fs::create_dir_all(&docs);
+        docs
     }
 
     /// Save to a `.ecad` folder (the path the Save dialogs use).
@@ -987,6 +1002,7 @@ impl EasyCadApp {
         self.autosave.saved_rev = Some(self.doc.data.revision);
         self.path = Some(p.clone());
         crate::settings::Settings::push_recent(&p);
+        self.cloud.sync_now();
         Ok(p)
     }
 
@@ -1055,7 +1071,14 @@ impl EasyCadApp {
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let t0 = std::time::Instant::now();
         self.now = ui.input(|i| i.time);
+        crate::viewport::gpu::set_hidden(!crate::widgets::window_visible(ui.ctx()));
         self.poll_worker();
+        for n in self.cloud.poll(self.path.as_deref()) {
+            match n {
+                crate::cloud::Notice::Info(t) => self.toast(t),
+                crate::cloud::Notice::Warn(t) => self.warn(t),
+            }
+        }
         if self.camera.tick(self.now) {
             ui.ctx().request_repaint();
         }
@@ -1442,6 +1465,9 @@ impl eframe::App for EasyCadApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if std::env::var_os("EASYCAD_DEBUG_REPAINT").is_some() {
+            debug_repaint(ui.ctx());
+        }
         self.frame(ui);
         if self.quit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1450,5 +1476,23 @@ impl eframe::App for EasyCadApp {
 
     fn on_exit(&mut self) {
         self.on_close();
+    }
+}
+
+/// `EASYCAD_DEBUG_REPAINT`: once a second, frames drawn and what asked for them.
+fn debug_repaint(ctx: &egui::Context) {
+    use std::sync::Mutex;
+    static LOG: Mutex<Option<(std::time::Instant, u32, std::collections::BTreeMap<String, u32>)>> = Mutex::new(None);
+    let mut g = LOG.lock().unwrap();
+    let (t0, n, causes) = g.get_or_insert_with(|| (std::time::Instant::now(), 0, Default::default()));
+    *n += 1;
+    for c in ctx.repaint_causes() {
+        *causes.entry(c.to_string()).or_default() += 1;
+    }
+    if t0.elapsed() >= std::time::Duration::from_secs(1) {
+        let r = crate::viewport::gpu::RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let (focused, visible) = (ctx.input(|i| i.focused), crate::widgets::window_visible(ctx));
+        eprintln!("repaint: {n} frames/s, {r} 3D renders, focused {focused}, visible {visible} {causes:?}");
+        *g = None;
     }
 }
