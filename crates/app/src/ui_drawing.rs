@@ -964,6 +964,7 @@ fn ink(style: LineStyle) -> (f32, Option<(f32, f32)>) {
         LineStyle::Center => (0.18, Some((6.0, 1.5))),
         LineStyle::Phantom => (0.25, Some((8.0, 1.5))),
         LineStyle::Frame => (0.5, None),
+        LineStyle::Hatch => (0.13, None),
     }
 }
 
@@ -995,6 +996,13 @@ fn draw_prim(p: &egui::Painter, x: &Xf, prim: &Prim, col: Color32) {
             let w = dir.perp() * *size * 0.3;
             p.add(egui::Shape::convex_polygon(
                 vec![x.p(*tip), x.p(back + w), x.p(back - w)],
+                col,
+                Stroke::NONE,
+            ));
+        }
+        Prim::Fill { pts } => {
+            p.add(egui::Shape::convex_polygon(
+                pts.iter().map(|q| x.p(*q)).collect(),
                 col,
                 Stroke::NONE,
             ));

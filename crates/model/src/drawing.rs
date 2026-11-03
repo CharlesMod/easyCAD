@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::{DQuat, DVec2, DVec3};
+use glam::{DMat3, DQuat, DVec2, DVec3};
 use occt::{CurveKind, EdgeInfo, HlrKind};
 use serde::{Deserialize, Serialize};
 
@@ -167,6 +167,25 @@ impl ViewOrientation {
         let x = up.cross(n).normalize();
         (n, x, n.cross(x))
     }
+    /// The model → view rotation (what `Rotation` holds) of any orientation.
+    pub fn quat(&self) -> DQuat {
+        let (n, x, up) = self.basis();
+        DQuat::from_mat3(&DMat3::from_cols(x, up, n)).inverse().normalize()
+    }
+}
+
+/// The cutting plane of a section view. The view keeps the material behind the
+/// plane (opposite `normal`) and looks at the cut along `-normal`; the parent
+/// view, which must see the plane edge-on, shows the cutting line with arrows
+/// and `label` at both ends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SectionCut {
+    pub parent: ViewId,
+    /// A point of the plane and its normal toward the viewer, in the view's scope
+    /// frame (model coordinates for root views).
+    pub origin: DVec3,
+    pub normal: DVec3,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -200,6 +219,9 @@ pub struct View {
     /// Non-root scopes: apply the occurrences' explode offsets.
     #[serde(default)]
     pub exploded: bool,
+    /// A section view: the bodies cut by this plane, cut faces hatched.
+    #[serde(default)]
+    pub section: Option<SectionCut>,
 }
 
 fn yes() -> bool {
@@ -279,6 +301,110 @@ pub enum AnnotationKind {
     /// flat BOM rows (the numbers `ItemBalloon`s show); `indented` lists the tree
     /// with per-parent quantities instead.
     BomTable { position: DVec2, indented: bool },
+    /// GD&T feature control frame (ASME Y14.5 / ISO 1101): the characteristic's
+    /// symbol, the tolerance (`{param}`s allowed, ⌀ and a material condition
+    /// optional) and the datum references, in boxes whose left middle is at
+    /// `position`; a leader runs to `target` when set.
+    FeatureControl {
+        view: ViewId,
+        target: Option<DimRef>,
+        position: DVec2,
+        symbol: GdtSymbol,
+        tolerance: String,
+        diameter: bool,
+        modifier: Option<MaterialCondition>,
+        datums: Vec<String>,
+    },
+    /// Datum feature symbol: `label` in a box centred at `position`, joined to a
+    /// filled triangle standing on `target`.
+    Datum { view: ViewId, target: DimRef, label: String, position: DVec2 },
+}
+
+/// The geometric characteristics of a feature control frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GdtSymbol {
+    Straightness,
+    Flatness,
+    Circularity,
+    Cylindricity,
+    ProfileOfLine,
+    ProfileOfSurface,
+    Angularity,
+    Perpendicularity,
+    Parallelism,
+    Position,
+    Concentricity,
+    Symmetry,
+    CircularRunout,
+    TotalRunout,
+}
+
+impl GdtSymbol {
+    pub const ALL: [GdtSymbol; 14] = [
+        GdtSymbol::Straightness,
+        GdtSymbol::Flatness,
+        GdtSymbol::Circularity,
+        GdtSymbol::Cylindricity,
+        GdtSymbol::ProfileOfLine,
+        GdtSymbol::ProfileOfSurface,
+        GdtSymbol::Angularity,
+        GdtSymbol::Perpendicularity,
+        GdtSymbol::Parallelism,
+        GdtSymbol::Position,
+        GdtSymbol::Concentricity,
+        GdtSymbol::Symmetry,
+        GdtSymbol::CircularRunout,
+        GdtSymbol::TotalRunout,
+    ];
+    /// The Unicode character (for lists and `AnnotationResult::text`; the sheet
+    /// draws the symbol as lines, which every export and font can show).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            GdtSymbol::Straightness => "⏤",
+            GdtSymbol::Flatness => "⏥",
+            GdtSymbol::Circularity => "○",
+            GdtSymbol::Cylindricity => "⌭",
+            GdtSymbol::ProfileOfLine => "⌒",
+            GdtSymbol::ProfileOfSurface => "⌓",
+            GdtSymbol::Angularity => "∠",
+            GdtSymbol::Perpendicularity => "⟂",
+            GdtSymbol::Parallelism => "∥",
+            GdtSymbol::Position => "⌖",
+            GdtSymbol::Concentricity => "◎",
+            GdtSymbol::Symmetry => "⌯",
+            GdtSymbol::CircularRunout => "↗",
+            GdtSymbol::TotalRunout => "⌰",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            GdtSymbol::Straightness => "Straightness",
+            GdtSymbol::Flatness => "Flatness",
+            GdtSymbol::Circularity => "Circularity",
+            GdtSymbol::Cylindricity => "Cylindricity",
+            GdtSymbol::ProfileOfLine => "Profile of a line",
+            GdtSymbol::ProfileOfSurface => "Profile of a surface",
+            GdtSymbol::Angularity => "Angularity",
+            GdtSymbol::Perpendicularity => "Perpendicularity",
+            GdtSymbol::Parallelism => "Parallelism",
+            GdtSymbol::Position => "Position",
+            GdtSymbol::Concentricity => "Concentricity",
+            GdtSymbol::Symmetry => "Symmetry",
+            GdtSymbol::CircularRunout => "Circular runout",
+            GdtSymbol::TotalRunout => "Total runout",
+        }
+    }
+    /// Form tolerances take no datum.
+    pub fn takes_datums(self) -> bool {
+        !matches!(self, GdtSymbol::Straightness | GdtSymbol::Flatness | GdtSymbol::Circularity | GdtSymbol::Cylindricity)
+    }
+}
+
+/// Material condition modifier after the tolerance: Ⓜ or Ⓛ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaterialCondition {
+    Maximum,
+    Least,
 }
 
 impl AnnotationKind {
@@ -296,7 +422,9 @@ impl AnnotationKind {
             | K::CenterMark { view, .. }
             | K::Centerline { view, .. }
             | K::PartingLine { view, .. }
-            | K::ItemBalloon { view, .. } => Some(*view),
+            | K::ItemBalloon { view, .. }
+            | K::FeatureControl { view, .. }
+            | K::Datum { view, .. } => Some(*view),
             K::Note { .. } | K::BomTable { .. } => None,
         }
     }
@@ -349,8 +477,59 @@ impl Drawing {
             smooth_edges: false,
             scope: Scope::Root,
             exploded: false,
+            section: None,
         });
         id
+    }
+    /// Add a section view cut along the sheet line `a`–`b` drawn across `parent`
+    /// (`frame` is its computed [`ViewResult::frame`]), placed at `position`.
+    /// The arrows point away from the side of the line the new view is placed on,
+    /// as with a projected view; the view copies the parent's scale and contents
+    /// and is labelled with the next free letter (A, B, …, no I, O or Q).
+    pub fn add_section_view(&mut self, parent: ViewId, frame: &ViewFrame, a: DVec2, b: DVec2, position: DVec2) -> Option<ViewId> {
+        let pv = self.views.iter().find(|v| v.id == parent)?.clone();
+        let s = b - a;
+        if s.length() < 1e-6 {
+            return None;
+        }
+        let inv = DVec2::from_angle(-frame.rot);
+        let model_dir = |v: DVec2| {
+            let l = inv.rotate(v);
+            frame.x * l.x + frame.up * l.y
+        };
+        let l = frame.center + inv.rotate(a - frame.position) / frame.scale;
+        let origin = frame.x * l.x + frame.up * l.y;
+        let mut p = s.perp().normalize();
+        if (position - a).dot(p) < 0.0 {
+            p = -p;
+        }
+        let normal = model_dir(p).normalize();
+        let m = model_dir(s).normalize();
+        // like a projected view: a vertical cut keeps the parent's up, a horizontal
+        // one looks down (placed above) or up (placed below) at it
+        let up = if s.y.abs() > s.x.abs() {
+            if s.y > 0.0 {
+                m
+            } else {
+                -m
+            }
+        } else if p.y > 0.0 {
+            -frame.n
+        } else {
+            frame.n
+        };
+        let q = DQuat::from_mat3(&DMat3::from_cols(up.cross(normal), up, normal)).inverse().normalize();
+        let used: Vec<&str> = self.views.iter().filter_map(|v| v.section.as_ref().map(|s| s.label.as_str())).collect();
+        let label = "ABCDEFGHJKLMNPRSTUVWXYZ".chars().map(String::from).find(|c| !used.contains(&c.as_str())).unwrap_or_else(|| "Z".into());
+        let id = self.add_view(&format!("Section {label}-{label}"), ViewOrientation::Rotation(q), position, pv.scale);
+        let v = self.view_mut(id)?;
+        v.bodies = pv.bodies;
+        v.scope = pv.scope;
+        v.exploded = pv.exploded;
+        v.exact = pv.exact;
+        v.smooth_edges = pv.smooth_edges;
+        v.section = Some(SectionCut { parent, origin, normal, label });
+        Some(id)
     }
     pub fn view_mut(&mut self, id: ViewId) -> Option<&mut View> {
         self.views.iter_mut().find(|v| v.id == id)
@@ -376,6 +555,8 @@ pub enum LineStyle {
     /// Parting line (phantom).
     Phantom,
     Frame,
+    /// Section hatching on cut faces.
+    Hatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -392,6 +573,8 @@ pub enum Prim {
     Text { pos: DVec2, height: f64, angle_deg: f64, text: String, anchor: Anchor },
     /// Filled arrow head with its tip at `tip`, pointing along `dir`.
     Arrow { tip: DVec2, dir: DVec2, size: f64 },
+    /// Filled convex polygon (datum triangles).
+    Fill { pts: Vec<DVec2> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -423,6 +606,13 @@ pub enum HlrKindS {
 pub struct ViewResult {
     pub id: ViewId,
     pub edges: Vec<ViewEdge>,
+    /// Model → sheet placement of this view.
+    pub frame: ViewFrame,
+    /// Section views: hatch lines on the cut faces (sheet mm).
+    pub hatch: Vec<Vec<DVec2>>,
+    /// Section views: the cutting line with arrows and letters on the parent view,
+    /// and the "SECTION A-A" caption.
+    pub marks: Vec<Prim>,
     /// Sheet-space bounding box of the drawn edges.
     pub min: DVec2,
     pub max: DVec2,
@@ -470,7 +660,7 @@ impl DrawingResult {
 // Computation
 
 /// Placement of one view: model → sheet.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ViewFrame {
     pub n: DVec3,
     pub x: DVec3,
@@ -519,19 +709,77 @@ struct HlrSet {
 pub struct DrawingCache {
     hlr: HashMap<(usize, [u64; 6], bool), Arc<HlrBody>>,
     sets: HashMap<u64, Arc<HlrSet>>,
+    /// Section face outlines per (body geometry, placement, plane).
+    cuts: HashMap<u64, Arc<Vec<Vec<DVec3>>>>,
 }
 
 impl DrawingCache {
     pub fn clear(&mut self) {
         self.hlr.clear();
         self.sets.clear();
+        self.cuts.clear();
     }
     pub fn len(&self) -> usize {
-        self.hlr.len() + self.sets.len()
+        self.hlr.len() + self.sets.len() + self.cuts.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.hlr.is_empty() && self.sets.is_empty()
+        self.hlr.is_empty() && self.sets.is_empty() && self.cuts.is_empty()
     }
+}
+
+fn placed_key(it: &ScopeItem, hs: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    (Arc::as_ptr(&it.body.geom) as usize).hash(hs);
+    it.transform.to_rows().iter().for_each(|v| v.to_bits().hash(hs));
+}
+
+/// The outline loops of one item's cut face (scope frame), cached.
+fn cut_outline(cache: &mut DrawingCache, it: &ScopeItem, origin: DVec3, normal: DVec3) -> Option<Arc<Vec<Vec<DVec3>>>> {
+    use std::hash::{Hash, Hasher};
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    placed_key(it, &mut hs);
+    [origin, normal].iter().flat_map(|v| v.to_array()).for_each(|v| v.to_bits().hash(&mut hs));
+    let key = hs.finish();
+    if let Some(c) = cache.cuts.get(&key) {
+        return Some(c.clone());
+    }
+    let face = it.placed_shape().ok()?.section(origin, normal).ok()?;
+    let infos = face.edges().ok()?;
+    let diag = face.bbox().map(|b| b.size().length()).unwrap_or(10.0).max(1.0);
+    let mesh = face.tessellate((diag * 1e-3).max(0.01), 10.0).ok();
+    let out = Arc::new(source_polylines(&infos, mesh.as_ref()));
+    cache.cuts.insert(key, out.clone());
+    Some(out)
+}
+
+/// Hatch lines (`angle_deg`, every `spacing` mm) filling the even-odd interior of
+/// closed sheet polylines.
+pub fn hatch_lines(loops: &[Vec<DVec2>], angle_deg: f64, spacing: f64) -> Vec<Vec<DVec2>> {
+    let r = DVec2::from_angle(angle_deg.to_radians());
+    // hatch frame: u along the lines, v across them
+    let to = |p: DVec2| DVec2::new(p.dot(r), p.dot(r.perp()));
+    let segs: Vec<(DVec2, DVec2)> = loops.iter().flat_map(|l| l.windows(2).map(|w| (to(w[0]), to(w[1])))).collect();
+    let (lo, hi) = segs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (a, b)| (lo.min(a.y).min(b.y), hi.max(a.y).max(b.y)));
+    let mut out = Vec::new();
+    if !lo.is_finite() || spacing <= 0.0 {
+        return out;
+    }
+    let mut v = (lo / spacing).floor() * spacing + spacing * 0.5;
+    while v < hi && out.len() < 20_000 {
+        let mut us: Vec<f64> = segs
+            .iter()
+            .filter(|(a, b)| (a.y <= v) != (b.y <= v))
+            .map(|(a, b)| a.x + (b.x - a.x) * (v - a.y) / (b.y - a.y))
+            .collect();
+        us.sort_by(f64::total_cmp);
+        for pair in us.as_chunks::<2>().0 {
+            if pair[1] - pair[0] > 1e-6 {
+                out.push(vec![r * pair[0] + r.perp() * v, r * pair[1] + r.perp() * v]);
+            }
+        }
+        v += spacing;
+    }
+    out
 }
 
 /// HLR of one body placed by `t`: computed in the body's frame (cached per body
@@ -544,20 +792,39 @@ fn hlr_placed(cache: &mut DrawingCache, body: &Body, t: Transform, n: DVec3, x: 
 }
 
 /// HLR of all items together (parts hide each other), sources matched per item.
-fn hlr_combined(cache: &mut DrawingCache, items: &[ScopeItem], n: DVec3, x: DVec3, exact: bool) -> Result<Arc<HlrSet>, String> {
+/// With `cut` (a plane point and normal), only what lies behind the plane is drawn.
+fn hlr_combined(cache: &mut DrawingCache, items: &[ScopeItem], n: DVec3, x: DVec3, exact: bool, cut: Option<(DVec3, DVec3)>) -> Result<Arc<HlrSet>, String> {
     use std::hash::{Hash, Hasher};
     let mut hs = std::collections::hash_map::DefaultHasher::new();
     for it in items {
-        (Arc::as_ptr(&it.body.geom) as usize).hash(&mut hs);
-        it.transform.to_rows().iter().for_each(|v| v.to_bits().hash(&mut hs));
+        placed_key(it, &mut hs);
     }
     [n.x, n.y, n.z, x.x, x.y, x.z].iter().for_each(|v| v.to_bits().hash(&mut hs));
     exact.hash(&mut hs);
+    if let Some((o, nn)) = cut {
+        [o, nn].iter().flat_map(|v| v.to_array()).for_each(|v| v.to_bits().hash(&mut hs));
+    }
     let key = hs.finish();
     if let Some(h) = cache.sets.get(&key) {
         return Ok(h.clone());
     }
-    let shapes: Vec<occt::Shape> = items.iter().map(|i| i.placed_shape()).collect::<Result<_, _>>().map_err(|e| e.0)?;
+    let mut shapes: Vec<occt::Shape> = Vec::new();
+    for it in items {
+        let s = it.placed_shape().map_err(|e| e.0)?;
+        match cut {
+            None => shapes.push(s),
+            Some((o, nn)) => match s.split(o, nn) {
+                Ok((Some(behind), _)) => shapes.push(behind),
+                Ok((None, _)) => {} // wholly in front of the plane: cut away
+                Err(_) => shapes.push(s),
+            },
+        }
+    }
+    if shapes.is_empty() {
+        let h = Arc::new(HlrSet { _geoms: Vec::new(), edges: Vec::new(), poly: false });
+        cache.sets.insert(key, h.clone());
+        return Ok(h);
+    }
     let refs: Vec<&occt::Shape> = shapes.iter().collect();
     let comp = occt::Shape::compound(&refs).map_err(|e| e.0)?;
     let diag = comp.bbox().map_err(|e| e.0)?.size().length().max(1.0);
@@ -874,6 +1141,50 @@ impl Ctx<'_> {
 const TEXT_H: f64 = 3.5;
 const ARROW: f64 = 2.5;
 
+/// Font size per unit of text height: a `Prim::Text` height is the cap height, and
+/// Helvetica's cap height is 0.718 em, so the em is 1.4 × the height.
+pub const FONT_EM: f64 = 1.4;
+
+/// Helvetica advance widths (1/1000 em, from the base-14 AFM) for ' '..='~'.
+const HELVETICA: [u16; 95] = [
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, // ' '..'/'
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, // '0'..'?'
+    1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, // '@'..'O'
+    667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, // 'P'..'_'
+    333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, // '`'..'o'
+    556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584, // 'p'..'~'
+];
+
+/// Width (sheet mm) of `s` at cap height `height` in Helvetica, the font the PDF
+/// uses and the SVG asks for: what centring, boxes and collision tests measure.
+pub fn text_width(s: &str, height: f64) -> f64 {
+    let em: u32 = s
+        .chars()
+        .map(|c| match c {
+            ' '..='~' => HELVETICA[c as usize - 32] as u32,
+            '⌀' | 'Ø' => 778,
+            '°' => 400,
+            '×' | '±' => 584,
+            _ => 556, // shown as '?' in the PDF
+        })
+        .sum();
+    em as f64 / 1000.0 * height * FONT_EM
+}
+
+/// The corners of a text's box on the sheet (counter-clockwise from bottom-left),
+/// from a little below the baseline to a little above the cap height.
+pub fn text_quad(pos: DVec2, height: f64, angle_deg: f64, s: &str, anchor: Anchor) -> [DVec2; 4] {
+    let w = text_width(s, height);
+    let x0 = match anchor {
+        Anchor::Start => 0.0,
+        Anchor::Middle => -w / 2.0,
+        Anchor::End => -w,
+    };
+    let (lo, hi) = (DVec2::new(x0 - 0.3, -0.25 * height), DVec2::new(x0 + w + 0.3, 1.15 * height));
+    let r = DVec2::from_angle(angle_deg.to_radians());
+    [DVec2::new(lo.x, lo.y), DVec2::new(hi.x, lo.y), DVec2::new(hi.x, hi.y), DVec2::new(lo.x, hi.y)].map(|c| pos + r.rotate(c))
+}
+
 fn line(a: DVec2, b: DVec2, style: LineStyle) -> Prim {
     Prim::Polyline { pts: vec![a, b], style }
 }
@@ -952,10 +1263,11 @@ pub fn compute_with(data: &DocData, src: &DrawingSources, drawing: &Drawing, cac
             },
         };
         let mut local: Vec<PlacedEdge> = Vec::new();
-        let poly = if v.scope == Scope::Root || items.len() <= 1 {
+        let cut = v.section.as_ref().map(|s| (s.origin, s.normal.normalize_or_zero()));
+        let poly = if cut.is_none() && (v.scope == Scope::Root || items.len() <= 1) {
             hlr_each(cache, &items, n, x, v.exact, &mut local, &mut err)
         } else {
-            match hlr_combined(cache, &items, n, x, v.exact) {
+            match hlr_combined(cache, &items, n, x, v.exact, cut) {
                 Ok(h) => {
                     local.extend(h.edges.iter().cloned());
                     h.poly
@@ -999,12 +1311,45 @@ pub fn compute_with(data: &DocData, src: &DrawingSources, drawing: &Drawing, cac
             }
         }
         ctx.view_sources.insert(v.id, edges.iter().filter_map(|e| e.source.map(|(b, i)| (e.path.clone(), b, i))).collect());
+        // cut faces, hatched per part (alternating direction between parts)
+        let mut hatch = Vec::new();
+        if let Some((o, nn)) = cut {
+            for (k, it) in items.iter().enumerate() {
+                if let Some(loops) = cut_outline(cache, it, o, nn) {
+                    let sheet: Vec<Vec<DVec2>> = loops.iter().map(|l| l.iter().map(|p| frame.sheet(*p)).collect()).collect();
+                    for l in &sheet {
+                        for p in l {
+                            smin = smin.min(*p);
+                            smax = smax.max(*p);
+                        }
+                    }
+                    hatch.extend(hatch_lines(&sheet, if k % 2 == 0 { 45.0 } else { 135.0 }, 2.0 + 0.5 * (k % 3) as f64));
+                }
+            }
+        }
+        ctx.view_sources.insert(v.id, edges.iter().filter_map(|e| e.source.map(|(b, i)| (e.path.clone(), b, i))).collect());
         ctx.views.insert(v.id, ViewCtx { frame, items, view: v });
-        views.push(ViewResult { id: v.id, edges, min: smin, max: smax, poly_fallback: poly, error: err });
+        views.push(ViewResult { id: v.id, edges, frame, hatch, marks: Vec::new(), min: smin, max: smax, poly_fallback: poly, error: err });
+    }
+    for (i, v) in drawing.views.iter().enumerate() {
+        if let Some(sc) = &v.section {
+            match section_marks(&ctx, &views, sc) {
+                Ok(m) => views[i].marks = m,
+                Err(e) => {
+                    views[i].error.get_or_insert(e);
+                }
+            }
+            let vr = &views[i];
+            if vr.min.x.is_finite() {
+                let c = DVec2::new((vr.min.x + vr.max.x) / 2.0, vr.min.y - 9.0);
+                let cap = format!("SECTION {0}-{0}", sc.label);
+                views[i].marks.push(text(c, &cap, 0.0, Anchor::Middle));
+            }
+        }
     }
 
     let first_scale = drawing.views.first().map(|v| v.scale).unwrap_or(1.0);
-    let annotations = drawing.annotations.iter().map(|a| annotate(&ctx, a, &vals, src.bom, first_scale)).collect();
+    let (mut annotations, slots): (Vec<AnnotationResult>, Vec<Option<TextSlot>>) = drawing.annotations.iter().map(|a| annotate(&ctx, a, &vals, src.bom, first_scale)).unzip();
 
     // frame and title block
     let m = drawing.sheet.margin;
@@ -1026,14 +1371,208 @@ pub fn compute_with(data: &DocData, src: &DrawingSources, drawing: &Drawing, cac
         frame.push(Prim::Text { pos: DVec2::new(x0 + 2.0, y + 2.0), height: 2.5, angle_deg: 0.0, text: l.clone(), anchor: Anchor::Start });
         frame.push(Prim::Text { pos: DVec2::new(x0 + 37.0, y + 2.0), height: 3.5, angle_deg: 0.0, text: t.clone(), anchor: Anchor::Start });
     }
+    declutter(&mut annotations, &slots, &views, drawing, &frame);
     DrawingResult { size, views, annotations, frame, title }
 }
 
-fn annotate(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], scale0: f64) -> AnnotationResult {
+/// How a dimension's text may move to clear other text and the view geometry.
+struct TextSlot {
+    /// Index of the text in the annotation's prims.
+    idx: usize,
+    /// Unit direction it slides along.
+    dir: DVec2,
+    mode: SlotMode,
+}
+
+enum SlotMode {
+    /// Along the dimension line `a`–`b` either way (the line is extended under
+    /// text moved past its ends), or by `flip` to the other side of the line.
+    Line { a: DVec2, b: DVec2, flip: DVec2 },
+    /// Outward along a leader, which is extended from `end`.
+    Leader { end: DVec2 },
+    /// Outward, nothing to extend.
+    Free,
+}
+
+fn quad_aabb(q: &[DVec2; 4]) -> (DVec2, DVec2) {
+    (q.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p)), q.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p)))
+}
+
+/// Separating-axis test of two convex quads.
+fn quads_overlap(a: &[DVec2; 4], b: &[DVec2; 4]) -> bool {
+    for q in [a, b] {
+        for i in 0..4 {
+            let ax = (q[(i + 1) % 4] - q[i]).perp();
+            let (amin, amax) = a.iter().map(|p| p.dot(ax)).fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(v), h.max(v)));
+            let (bmin, bmax) = b.iter().map(|p| p.dot(ax)).fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(v), h.max(v)));
+            if amax < bmin || bmax < amin {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A segment crosses or lies in a convex quad (corners counter-clockwise).
+fn segment_hits_quad(p: DVec2, q: DVec2, quad: &[DVec2; 4]) -> bool {
+    let inside = |x: DVec2| (0..4).all(|i| (quad[(i + 1) % 4] - quad[i]).perp_dot(x - quad[i]) >= 0.0);
+    if inside(p) || inside(q) {
+        return true;
+    }
+    let cross = |a: DVec2, b: DVec2, c: DVec2, d: DVec2| {
+        let (r, s) = (b - a, d - c);
+        let den = r.perp_dot(s);
+        if den.abs() < 1e-15 {
+            return false;
+        }
+        let t = (c - a).perp_dot(s) / den;
+        let u = (c - a).perp_dot(r) / den;
+        (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+    };
+    (0..4).any(|i| cross(p, q, quad[i], quad[(i + 1) % 4]))
+}
+
+fn prim_quad(p: &Prim) -> Option<[DVec2; 4]> {
+    match p {
+        Prim::Text { pos, height, angle_deg, text, anchor } if !text.is_empty() => Some(text_quad(*pos, *height, *angle_deg, text, *anchor)),
+        _ => None,
+    }
+}
+
+/// Move dimension text that would overlap other text or the drawn view geometry:
+/// along its dimension line or leader (extending the line), then to the line's
+/// other side; text with no free spot stays where it was.
+fn declutter(anns: &mut [AnnotationResult], slots: &[Option<TextSlot>], views: &[ViewResult], drawing: &Drawing, frame: &[Prim]) {
+    if slots.iter().all(|s| s.is_none()) {
+        return;
+    }
+    // view geometry as segments with their bounding boxes
+    let mut segs: Vec<(DVec2, DVec2, DVec2, DVec2)> = Vec::new();
+    for vr in views {
+        let v = drawing.views.iter().find(|x| x.id == vr.id);
+        let hidden = v.is_some_and(|x| x.hidden_lines);
+        let smooth = v.is_some_and(|x| x.smooth_edges);
+        let shown = vr.edges.iter().filter(|e| (e.visible || hidden) && (e.kind != HlrKindS::Smooth || smooth)).map(|e| &e.points);
+        for pts in shown.chain(vr.hatch.iter()) {
+            for w in pts.windows(2) {
+                segs.push((w[0], w[1], w[0].min(w[1]), w[0].max(w[1])));
+            }
+        }
+    }
+    let mut texts: Vec<[DVec2; 4]> = frame.iter().filter_map(prim_quad).collect();
+    for (a, s) in anns.iter().zip(slots) {
+        for (i, p) in a.prims.iter().enumerate() {
+            if s.as_ref().is_none_or(|s| s.idx != i) {
+                texts.extend(prim_quad(p));
+            }
+        }
+    }
+    let free = |q: &[DVec2; 4], texts: &[[DVec2; 4]]| {
+        let (lo, hi) = quad_aabb(q);
+        !texts.iter().any(|t| quads_overlap(q, t))
+            && !segs.iter().any(|(p0, p1, slo, shi)| slo.x <= hi.x && shi.x >= lo.x && slo.y <= hi.y && shi.y >= lo.y && segment_hits_quad(*p0, *p1, q))
+    };
+    for (a, s) in anns.iter_mut().zip(slots) {
+        let Some(s) = s else { continue };
+        let Some(Prim::Text { pos, height, angle_deg, text, anchor }) = a.prims.get(s.idx).cloned() else { continue };
+        let quad_at = |d: DVec2| text_quad(pos + d, height, angle_deg, &text, anchor);
+        let w = text_width(&text, height);
+        let mut cands = vec![DVec2::ZERO];
+        match &s.mode {
+            SlotMode::Line { flip, .. } => {
+                let step = (w * 0.6).max(3.0);
+                for side in [DVec2::ZERO, *flip] {
+                    for k in 0..=8 {
+                        for sg in [1.0, -1.0] {
+                            if k > 0 || side != DVec2::ZERO {
+                                cands.push(side + s.dir * (sg * step * k as f64));
+                            }
+                            if k == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            SlotMode::Leader { .. } | SlotMode::Free => cands.extend((1..=12).map(|k| s.dir * (2.5 * k as f64))),
+        }
+        let Some(d) = cands.into_iter().find(|d| free(&quad_at(*d), &texts)) else {
+            texts.push(quad_at(DVec2::ZERO));
+            continue;
+        };
+        texts.push(quad_at(d));
+        if d == DVec2::ZERO {
+            continue;
+        }
+        if let Some(Prim::Text { pos: p, .. }) = a.prims.get_mut(s.idx) {
+            *p += d;
+        }
+        match &s.mode {
+            SlotMode::Line { a: d1, b: d2, .. } => {
+                let (len, mid) = (d1.distance(*d2), (*d1 + *d2) / 2.0);
+                let t = d.dot(s.dir);
+                if t + w / 2.0 + 1.0 > len / 2.0 {
+                    a.prims.push(line(*d2, mid + s.dir * (t + w / 2.0 + 1.0), LineStyle::Thin));
+                }
+                if t - w / 2.0 - 1.0 < -len / 2.0 {
+                    a.prims.push(line(*d1, mid + s.dir * (t - w / 2.0 - 1.0), LineStyle::Thin));
+                }
+            }
+            SlotMode::Leader { end } => a.prims.push(line(*end, *end + d, LineStyle::Thin)),
+            SlotMode::Free => {}
+        }
+    }
+}
+
+/// The cutting line of a section on its parent view: chain line with thick ends,
+/// arrows in the viewing direction and the letter at each end.
+fn section_marks(ctx: &Ctx, views: &[ViewResult], sc: &SectionCut) -> Result<Vec<Prim>, String> {
+    let pf = ctx.frame(sc.parent).map_err(|_| "the parent view of this section no longer exists".to_string())?;
+    let nn = sc.normal.normalize_or_zero();
+    if nn.dot(pf.n).abs() > 1e-3 {
+        return Err("the cutting plane is not edge-on in the parent view any more".into());
+    }
+    let o = pf.sheet(sc.origin);
+    let d = pf.sheet_dir(nn.cross(pf.n)).normalize_or_zero();
+    let toward = pf.sheet_dir(nn).normalize_or_zero();
+    // across the parent's extents plus a margin
+    let (mut t0, mut t1) = (-20.0f64, 20.0f64);
+    if let Some(pr) = views.iter().find(|r| r.id == sc.parent).filter(|r| r.min.x.is_finite()) {
+        let (lo, hi) = (pr.min - DVec2::splat(6.0), pr.max + DVec2::splat(6.0));
+        let (mut a, mut b) = (f64::NEG_INFINITY, f64::INFINITY);
+        for k in 0..2 {
+            if d[k].abs() < 1e-12 {
+                if o[k] < lo[k] || o[k] > hi[k] {
+                    a = f64::INFINITY;
+                }
+            } else {
+                let (u, w) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+                a = a.max(u.min(w));
+                b = b.min(u.max(w));
+            }
+        }
+        if a < b {
+            (t0, t1) = (a, b);
+        }
+    }
+    let (s, e) = (o + d * t0, o + d * t1);
+    let mut out = vec![line(s, e, LineStyle::Center), line(s, s + d * 5.0, LineStyle::Visible), line(e - d * 5.0, e, LineStyle::Visible)];
+    for q in [s, e] {
+        let tip = q - toward * 7.0;
+        out.push(line(q, tip, LineStyle::Thin));
+        out.push(arrow(tip, -toward));
+        out.push(text(tip - toward * 2.5 - DVec2::new(0.0, TEXT_H / 2.0) - toward * (TEXT_H / 2.0), &sc.label, 0.0, Anchor::Middle));
+    }
+    Ok(out)
+}
+
+fn annotate(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], scale0: f64) -> (AnnotationResult, Option<TextSlot>) {
     let mut res = AnnotationResult { id: a.id, status: AnnotationStatus::Ok, value: None, text: String::new(), prims: Vec::new() };
-    if let Err(e) = annotate_inner(ctx, a, vals, bom, scale0, &mut res) {
+    let mut slot = None;
+    if let Err(e) = annotate_inner(ctx, a, vals, bom, scale0, &mut res, &mut slot) {
         res.status = AnnotationStatus::Dangling(e);
         res.prims.clear();
+        slot = None;
     }
     if let (Some(t), AnnotationStatus::Ok) = (&a.text_override, &res.status) {
         let t = substitute(t, ctx.data, vals, scale0);
@@ -1046,10 +1585,10 @@ fn annotate(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], scale0: f
         }
         res.text = t;
     }
-    res
+    (res, slot)
 }
 
-fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], scale0: f64, res: &mut AnnotationResult) -> Result<(), String> {
+fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], scale0: f64, res: &mut AnnotationResult, slot: &mut Option<TextSlot>) -> Result<(), String> {
     use AnnotationKind as K;
     let push_text = |res: &mut AnnotationResult, pos: DVec2, s: String, angle: f64| {
         res.prims.push(text(pos, &s, angle, Anchor::Middle));
@@ -1091,6 +1630,8 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.prims.push(arrow(d2, d2 - mid));
             let up = DVec2::from_angle(angle.to_radians()).perp();
             push_text(res, mid + up * 1.5, fmt_value(value), angle);
+            let dir = (d2 - d1).try_normalize().unwrap_or(DVec2::from_angle(angle.to_radians()));
+            *slot = Some(TextSlot { idx: res.prims.len() - 1, dir, mode: SlotMode::Line { a: d1, b: d2, flip: -up * (3.0 + TEXT_H) } });
         }
         K::Ordinate { view, origin, target, axis, offset } => {
             let f = ctx.frame(*view)?;
@@ -1104,6 +1645,9 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.prims.push(line(t, end, LineStyle::Thin));
             let dir = (end - t).normalize_or_zero();
             push_text(res, end + dir * 1.5, fmt_value(value), ang);
+            if dir != DVec2::ZERO {
+                *slot = Some(TextSlot { idx: res.prims.len() - 1, dir, mode: SlotMode::Leader { end } });
+            }
         }
         K::Radius { view, circle, diameter, leader_deg } => {
             let f = ctx.frame(*view)?;
@@ -1125,6 +1669,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             }
             let s = if *diameter { format!("⌀{}", fmt_value(value)) } else { format!("R{}", fmt_value(value)) };
             push_text(res, out + d * 4.0, s, 0.0);
+            *slot = Some(TextSlot { idx: res.prims.len() - 1, dir: d, mode: SlotMode::Leader { end: out } });
         }
         K::Angle { view, a: ra, b: rb, radius } => {
             let (Resolved::Line { a: a1, b: a2 }, Resolved::Line { a: b1, b: b2 }) = (ctx.resolve(*view, ra)?, ctx.resolve(*view, rb)?) else {
@@ -1150,6 +1695,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.prims.push(arrow(s, DVec2::from_angle(a0).perp() * -sgn));
             res.prims.push(arrow(e, DVec2::from_angle(a0 + sgn * ang).perp() * sgn));
             push_text(res, x + DVec2::from_angle(a0 + sgn * ang / 2.0) * (radius + 3.0), format!("{}°", fmt_value(ang.to_degrees())), 0.0);
+            *slot = Some(TextSlot { idx: res.prims.len() - 1, dir: DVec2::from_angle(a0 + sgn * ang / 2.0), mode: SlotMode::Free });
         }
         K::Chamfer { view, edge, offset } => {
             let f = ctx.frame(*view)?;
@@ -1165,6 +1711,9 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.prims.push(line(mid, tp, LineStyle::Thin));
             res.prims.push(arrow(mid, mid - tp));
             push_text(res, tp + DVec2::new(0.0, 1.5), format!("{} × {}°", fmt_value(leg), fmt_value(ang.to_degrees())), 0.0);
+            if let Some(dir) = (tp - mid).try_normalize() {
+                *slot = Some(TextSlot { idx: res.prims.len() - 1, dir, mode: SlotMode::Leader { end: tp } });
+            }
         }
         K::Note { position, text: t, height } => {
             let s = substitute(t, ctx.data, vals, scale0);
@@ -1233,7 +1782,8 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
                     rows.push([(i + 1).to_string(), r.total.to_string(), r.name.clone(), kind_text(&r.kind)]);
                 }
             }
-            let cols = [12.0, 12.0, 70.0, 55.0];
+            // columns fit their widest cell (Helvetica metrics), never narrower than the header
+            let cols: Vec<f64> = (0..4).map(|ci| rows.iter().map(|r| text_width(&r[ci], 2.5)).fold(8.0, f64::max) + 3.0).collect();
             let (w, rh): (f64, f64) = (cols.iter().sum(), 6.0);
             let p0 = *position;
             let h = rh * rows.len() as f64;
@@ -1255,6 +1805,76 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             }
             res.value = Some((rows.len() - 1) as f64);
             res.text = format!("BOM ({} rows)", rows.len() - 1);
+        }
+        K::FeatureControl { view, target, position, symbol, tolerance, diameter, modifier, datums } => {
+            let (h, th) = (FCF_H, FCF_TEXT);
+            let p0 = *position;
+            if let Some(t) = target {
+                let tp = nearest_on(&ctx.resolve(*view, t)?, p0);
+                res.prims.push(line(p0, tp, LineStyle::Thin));
+                res.prims.push(arrow(tp, tp - p0));
+            }
+            let tol = format!("{}{}", if *diameter { "⌀" } else { "" }, substitute(tolerance, ctx.data, vals, scale0).trim());
+            let mc = modifier.map(|m| if m == MaterialCondition::Maximum { "M" } else { "L" });
+            let datums: Vec<&String> = if symbol.takes_datums() { datums.iter().filter(|d| !d.trim().is_empty()).collect() } else { Vec::new() };
+            let (y0, y1) = (p0.y - h / 2.0, p0.y + h / 2.0);
+            let base = p0.y - th / 2.0;
+            let mut x = p0.x;
+            // symbol cell
+            gdt_symbol(&mut res.prims, *symbol, DVec2::new(x + h / 2.0, p0.y), h * 0.32);
+            x += h;
+            let mut seps = vec![x];
+            // tolerance cell, with the circled modifier after the value
+            let tw = text_width(&tol, th);
+            res.prims.push(Prim::Text { pos: DVec2::new(x + 1.5, base), height: th, angle_deg: 0.0, text: tol.clone(), anchor: Anchor::Start });
+            x += tw + 3.0;
+            if let Some(m) = mc {
+                let r = th * 0.62;
+                res.prims.push(Prim::Circle { c: DVec2::new(x + r - 0.5, p0.y), r, style: LineStyle::Thin });
+                res.prims.push(Prim::Text { pos: DVec2::new(x + r - 0.5, p0.y - th * 0.35), height: th * 0.7, angle_deg: 0.0, text: m.into(), anchor: Anchor::Middle });
+                x += 2.0 * r + 1.0;
+            }
+            for d in &datums {
+                seps.push(x);
+                let w = (text_width(d, th) + 3.0).max(h);
+                res.prims.push(Prim::Text { pos: DVec2::new(x + w / 2.0, base), height: th, angle_deg: 0.0, text: d.trim().to_string(), anchor: Anchor::Middle });
+                x += w;
+            }
+            res.prims.push(Prim::Polyline { pts: vec![DVec2::new(p0.x, y0), DVec2::new(x, y0), DVec2::new(x, y1), DVec2::new(p0.x, y1), DVec2::new(p0.x, y0)], style: LineStyle::Thin });
+            for sx in seps {
+                res.prims.push(line(DVec2::new(sx, y0), DVec2::new(sx, y1), LineStyle::Thin));
+            }
+            res.value = tol.trim_start_matches('⌀').parse().ok();
+            let mut t = format!("{} {tol}", symbol.glyph());
+            if let Some(m) = mc {
+                t += &format!("({m})");
+            }
+            for d in &datums {
+                t += &format!(" | {}", d.trim());
+            }
+            res.text = t;
+        }
+        K::Datum { view, target, label, position } => {
+            let foot = nearest_on(&ctx.resolve(*view, target)?, *position);
+            let mut dir = (*position - foot).normalize_or_zero();
+            if dir == DVec2::ZERO {
+                dir = DVec2::Y;
+            }
+            // filled triangle standing on the feature, apex toward the box
+            let (half, tall) = (1.6, 2.8);
+            let apex = foot + dir * tall;
+            res.prims.push(Prim::Fill { pts: vec![foot + dir.perp() * half, foot - dir.perp() * half, apex] });
+            let s = 7.0;
+            // where the leader from the triangle meets the square
+            let edge = *position - dir * (s / 2.0 / dir.x.abs().max(dir.y.abs()));
+            if (edge - foot).dot(dir) > tall {
+                res.prims.push(line(apex, edge, LineStyle::Thin));
+            }
+            let (lo, hi) = (*position - DVec2::splat(s / 2.0), *position + DVec2::splat(s / 2.0));
+            res.prims.push(Prim::Polyline { pts: vec![lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y), lo], style: LineStyle::Thin });
+            let l = label.trim().to_string();
+            res.prims.push(text(*position - DVec2::new(0.0, TEXT_H / 2.0), &l, 0.0, Anchor::Middle));
+            res.text = l;
         }
         K::CenterMark { view, circle } => {
             let Resolved::Circle { c, r, face_on } = ctx.resolve(*view, circle)? else {
@@ -1307,6 +1927,87 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
     Ok(())
 }
 
+const FCF_H: f64 = 6.0;
+const FCF_TEXT: f64 = 3.0;
+
+/// The point of a resolved reference nearest `p` (a line's foot, a circle's rim).
+fn nearest_on(r: &Resolved, p: DVec2) -> DVec2 {
+    match r {
+        Resolved::Line { a, b } => {
+            let ab = *b - *a;
+            let t = if ab.length_squared() > 1e-18 { ((p - *a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            *a + ab * t
+        }
+        Resolved::Circle { c, r, .. } => {
+            let d = (p - *c).normalize_or_zero();
+            *c + if d == DVec2::ZERO { DVec2::X } else { d } * *r
+        }
+        other => other.point(),
+    }
+}
+
+/// A characteristic symbol drawn as lines, centred at `c`, about `2a` across.
+fn gdt_symbol(out: &mut Vec<Prim>, sym: GdtSymbol, c: DVec2, a: f64) {
+    let p = |x: f64, y: f64| c + DVec2::new(x, y) * a;
+    let pl = |out: &mut Vec<Prim>, pts: Vec<DVec2>| out.push(Prim::Polyline { pts, style: LineStyle::Thin });
+    let arc = |cx: f64, cy: f64, r: f64, a0: f64, a1: f64| -> Vec<DVec2> { (0..=20).map(|i| p(cx, cy) + DVec2::from_angle(a0 + (a1 - a0) * i as f64 / 20.0) * r * a).collect() };
+    let circle = |out: &mut Vec<Prim>, r: f64| out.push(Prim::Circle { c, r: r * a, style: LineStyle::Thin });
+    let pi = std::f64::consts::PI;
+    match sym {
+        GdtSymbol::Straightness => pl(out, vec![p(-1.0, 0.0), p(1.0, 0.0)]),
+        GdtSymbol::Flatness => pl(out, vec![p(-1.0, -0.5), p(0.55, -0.5), p(1.0, 0.5), p(-0.55, 0.5), p(-1.0, -0.5)]),
+        GdtSymbol::Circularity => circle(out, 0.85),
+        GdtSymbol::Cylindricity => {
+            circle(out, 0.6);
+            let (u, n) = (DVec2::from_angle(pi / 3.0), DVec2::from_angle(pi / 3.0).perp());
+            for s in [-1.0, 1.0] {
+                let m = n * 0.6 * s;
+                pl(out, vec![p(m.x - u.x * 1.1, m.y - u.y * 1.1), p(m.x + u.x * 1.1, m.y + u.y * 1.1)]);
+            }
+        }
+        GdtSymbol::ProfileOfLine => pl(out, arc(0.0, -0.45, 0.95, 0.0, pi)),
+        GdtSymbol::ProfileOfSurface => {
+            let mut v = arc(0.0, -0.45, 0.95, 0.0, pi);
+            v.push(v[0]);
+            pl(out, v);
+        }
+        GdtSymbol::Angularity => pl(out, vec![p(0.9, 0.85), p(-1.0, -0.7), p(1.0, -0.7)]),
+        GdtSymbol::Perpendicularity => {
+            pl(out, vec![p(-1.0, -0.8), p(1.0, -0.8)]);
+            pl(out, vec![p(0.0, -0.8), p(0.0, 1.0)]);
+        }
+        GdtSymbol::Parallelism => {
+            pl(out, vec![p(-0.8, -1.0), p(-0.1, 1.0)]);
+            pl(out, vec![p(0.1, -1.0), p(0.8, 1.0)]);
+        }
+        GdtSymbol::Position => {
+            circle(out, 0.6);
+            pl(out, vec![p(-1.0, 0.0), p(1.0, 0.0)]);
+            pl(out, vec![p(0.0, -1.0), p(0.0, 1.0)]);
+        }
+        GdtSymbol::Concentricity => {
+            circle(out, 0.45);
+            circle(out, 0.9);
+        }
+        GdtSymbol::Symmetry => {
+            pl(out, vec![p(-0.6, 0.5), p(0.6, 0.5)]);
+            pl(out, vec![p(-1.0, 0.0), p(1.0, 0.0)]);
+            pl(out, vec![p(-0.6, -0.5), p(0.6, -0.5)]);
+        }
+        GdtSymbol::CircularRunout => {
+            pl(out, vec![p(-0.6, -1.0), p(0.6, 1.0)]);
+            out.push(Prim::Arrow { tip: p(0.6, 1.0), dir: DVec2::new(0.6, 1.0).normalize(), size: a * 0.9 });
+        }
+        GdtSymbol::TotalRunout => {
+            pl(out, vec![p(-1.0, -0.7), p(0.35, -0.7)]);
+            for x in [-1.0, -0.15] {
+                pl(out, vec![p(x, -0.7), p(x + 0.65, 1.0)]);
+                out.push(Prim::Arrow { tip: p(x + 0.65, 1.0), dir: DVec2::new(0.65, 1.7).normalize(), size: a * 0.8 });
+            }
+        }
+    }
+}
+
 fn balloon(res: &mut AnnotationResult, anchor: DVec2, position: DVec2, n: usize) {
     let r = 4.0;
     let d = (position - anchor).normalize_or_zero();
@@ -1337,6 +2038,8 @@ pub fn primitives(r: &DrawingResult, d: &Drawing) -> Vec<Prim> {
             }
             v.push(Prim::Polyline { pts: e.points.clone(), style: if e.visible { LineStyle::Visible } else { LineStyle::Hidden } });
         }
+        v.extend(vr.hatch.iter().map(|h| Prim::Polyline { pts: h.clone(), style: LineStyle::Hatch }));
+        v.extend(vr.marks.iter().cloned());
     }
     for a in &r.annotations {
         v.extend(a.prims.iter().cloned());
@@ -1352,6 +2055,7 @@ fn style_svg(s: LineStyle) -> (&'static str, f64, &'static str) {
         LineStyle::Center => ("#000", 0.18, "6 1.5 1 1.5"),
         LineStyle::Phantom => ("#000", 0.25, "8 1.5 1 1.5 1 1.5"),
         LineStyle::Frame => ("#000", 0.5, ""),
+        LineStyle::Hatch => ("#000", 0.13, ""),
     }
 }
 
@@ -1394,9 +2098,10 @@ pub fn to_svg(r: &DrawingResult, d: &Drawing) -> String {
                     Anchor::End => "end",
                 };
                 s += &format!(
-                    "<text x=\"{:.3}\" y=\"{:.3}\" font-family=\"sans-serif\" font-size=\"{height}\" text-anchor=\"{a}\" transform=\"rotate({:.3} {:.3} {:.3})\">{}</text>\n",
+                    "<text x=\"{:.3}\" y=\"{:.3}\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"{:.3}\" text-anchor=\"{a}\" transform=\"rotate({:.3} {:.3} {:.3})\">{}</text>\n",
                     pos.x,
                     h - pos.y,
+                    height * FONT_EM,
                     -angle_deg,
                     pos.x,
                     h - pos.y,
@@ -1405,6 +2110,10 @@ pub fn to_svg(r: &DrawingResult, d: &Drawing) -> String {
             }
             Prim::Arrow { tip, dir, size } => {
                 let pts: Vec<String> = arrow_pts(tip, dir, size).iter().map(|p| f(*p)).collect();
+                s += &format!("<polygon points=\"{}\" fill=\"#000\"/>\n", pts.join(" "));
+            }
+            Prim::Fill { pts } => {
+                let pts: Vec<String> = pts.iter().map(|p| f(*p)).collect();
                 s += &format!("<polygon points=\"{}\" fill=\"#000\"/>\n", pts.join(" "));
             }
         }
@@ -1420,6 +2129,7 @@ fn layer(s: LineStyle) -> &'static str {
         LineStyle::Center => "CENTER",
         LineStyle::Phantom => "PARTING",
         LineStyle::Frame => "FRAME",
+        LineStyle::Hatch => "HATCH",
     }
 }
 
@@ -1457,6 +2167,16 @@ pub fn to_dxf(r: &DrawingResult, d: &Drawing) -> String {
                     "0\nSOLID\n8\nDIM\n10\n{:.4}\n20\n{:.4}\n30\n0\n11\n{:.4}\n21\n{:.4}\n31\n0\n12\n{:.4}\n22\n{:.4}\n32\n0\n13\n{:.4}\n23\n{:.4}\n33\n0\n",
                     a.x, a.y, b.x, b.y, c.x, c.y, c.x, c.y
                 );
+            }
+            Prim::Fill { pts } => {
+                // SOLID takes 3 or 4 corners (in Z order); fan larger polygons
+                for i in 1..pts.len().saturating_sub(1) {
+                    let (a, b, c) = (pts[0], pts[i], pts[i + 1]);
+                    s += &format!(
+                        "0\nSOLID\n8\nDIM\n10\n{:.4}\n20\n{:.4}\n30\n0\n11\n{:.4}\n21\n{:.4}\n31\n0\n12\n{:.4}\n22\n{:.4}\n32\n0\n13\n{:.4}\n23\n{:.4}\n33\n0\n",
+                        a.x, a.y, b.x, b.y, c.x, c.y, c.x, c.y
+                    );
+                }
             }
         }
     }
@@ -1528,8 +2248,8 @@ pub fn to_pdf(r: &DrawingResult, d: &Drawing) -> Vec<u8> {
                 c.stroke();
             }
             Prim::Text { pos, height, angle_deg, text, anchor } => {
-                let size = (height * k * 1.4) as f32;
-                let width = 0.5 * size * text.chars().count() as f32;
+                let size = (height * k * FONT_EM) as f32;
+                let width = (text_width(&text, height) * k) as f32;
                 let shift = match anchor {
                     Anchor::Start => 0.0,
                     Anchor::Middle => -width / 2.0,
@@ -1553,6 +2273,20 @@ pub fn to_pdf(r: &DrawingResult, d: &Drawing) -> Vec<u8> {
                 c.line_to(ex, ey);
                 c.close_path();
                 c.fill_nonzero();
+            }
+            Prim::Fill { pts } => {
+                for (i, q) in pts.iter().enumerate() {
+                    let (x, y) = pt(*q);
+                    if i == 0 {
+                        c.move_to(x, y);
+                    } else {
+                        c.line_to(x, y);
+                    }
+                }
+                if !pts.is_empty() {
+                    c.close_path();
+                    c.fill_nonzero();
+                }
             }
         }
     }
