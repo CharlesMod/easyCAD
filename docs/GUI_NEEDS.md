@@ -78,8 +78,8 @@ today (adapter or limitation) and what would replace it.
 
 ## Drawings
 
-15. **View orbit.** "Drag inside the view with Shift+MMB" from the mock is not
-    wired; the custom rotation fields build a `ViewOrientation::Rotation`.
+15. ~~View orbit~~ — done: Shift+MMB drag inside a drawing view orbits it
+    (`ui_drawing::orbit`, about the view's up and right axes, 0.3°/px).
 16. ~~DimRef from HLR output~~ — done by the engine: `ViewEdge.reference` /
     `DimRef::from_view_edge(&edge)` (also `Placed` for assembly views).
 

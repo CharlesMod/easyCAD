@@ -778,3 +778,83 @@ fn section_view_and_sketch_slice() {
     }
     save(&mut h, "sketch_slice");
 }
+
+/// The wizard assembly's first sheet: assembly-scoped views with a BOM table,
+/// then an item balloon, a section view, a datum and a feature control frame.
+#[test]
+fn drawing_of_an_assembly_with_bom_section_and_gdt() {
+    let _serial = serial();
+    use easycad_model::assembly::Scope;
+    use easycad_model::drawing::*;
+    let mut h = harness(wizard_assembly());
+    h.state_mut().mode = easycad_app::app::Mode::Drawing(Box::default());
+    settle(&mut h);
+    let (front, lid_edge) = {
+        let app = h.state();
+        let easycad_app::app::Mode::Drawing(d) = &app.mode else { panic!() };
+        let dr = d.draft.as_ref().expect("a default sheet");
+        assert!(dr.views.iter().all(|v| v.scope == Scope::Assembly), "the root has no solids: the views show the assembly");
+        let r = d.result.as_ref().expect("drawing computed");
+        assert!(r.views.iter().all(|v| !v.edges.is_empty() && v.error.is_none()), "{:?}", r.views.iter().map(|v| &v.error).collect::<Vec<_>>());
+        let table = dr.annotations.iter().find(|a| matches!(a.kind, AnnotationKind::BomTable { .. })).expect("BOM table on the sheet");
+        let tr = r.annotation(table.id).unwrap();
+        assert_eq!(tr.status, AnnotationStatus::Ok, "{:?}", tr.status);
+        assert!(tr.value.unwrap() >= 2.0, "Base and Lid at least: {}", tr.text);
+        // a visible straight edge of the Lid in the front view
+        let lid = occ_path(app, "Lid:1");
+        let front = dr.views[1].id;
+        let fv = r.view(front).unwrap();
+        let e = fv.edges.iter().filter(|e| e.visible && e.path == lid && e.points.len() == 2 && e.reference.is_some()).max_by(|a, b| a.points[0].distance(a.points[1]).total_cmp(&b.points[0].distance(b.points[1]))).expect("a Lid edge");
+        (front, (e.reference.clone().unwrap(), lid, (e.points[0] + e.points[1]) / 2.0))
+    };
+    {
+        let app = h.state_mut();
+        let now = app.now;
+        let easycad_app::app::Mode::Drawing(d) = &mut app.mode else { panic!() };
+        let r = d.result.clone().unwrap();
+        let fv = r.view(front).unwrap();
+        let dr = d.draft.as_mut().unwrap();
+        let (rf, lid, at) = lid_edge;
+        dr.annotate(AnnotationKind::ItemBalloon { view: front, path: lid, body: None, position: at + glam::DVec2::new(-20.0, 25.0) });
+        dr.annotate(AnnotationKind::Datum { view: front, target: rf.clone(), label: "A".into(), position: at + glam::DVec2::new(10.0, 18.0) });
+        dr.annotate(AnnotationKind::FeatureControl {
+            view: front,
+            target: Some(rf),
+            position: at + glam::DVec2::new(25.0, 30.0),
+            symbol: GdtSymbol::Flatness,
+            tolerance: "0.2".into(),
+            diameter: false,
+            modifier: None,
+            datums: Vec::new(),
+        });
+        // a vertical cut through the middle of the front view, placed on the free
+        // paper to the right (top right of the sheet)
+        let c = (fv.min + fv.max) / 2.0;
+        let sec = dr
+            .add_section_view(front, &fv.frame, glam::DVec2::new(c.x, fv.min.y - 5.0), glam::DVec2::new(c.x, fv.max.y + 5.0), glam::DVec2::new(340.0, 255.0))
+            .unwrap();
+        d.selected = Some(sec);
+        d.dirty_at = Some(now);
+        d.edit_gen += 1;
+    }
+    settle(&mut h);
+    {
+        let app = h.state();
+        let easycad_app::app::Mode::Drawing(d) = &app.mode else { panic!() };
+        let r = d.result.as_ref().unwrap();
+        let bad: Vec<_> = r.annotations.iter().filter(|a| a.status != AnnotationStatus::Ok).map(|a| (&a.text, &a.status)).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        let sec = r.views.last().unwrap();
+        assert!(sec.error.is_none(), "{:?}", sec.error);
+        assert!(!sec.hatch.is_empty(), "cut walls hatched");
+        assert!(sec.marks.iter().any(|m| matches!(m, Prim::Text { text, .. } if text == "SECTION A-A")));
+        // the exports carry the BOM table, the hatch and the frames
+        let dr = d.draft.as_ref().unwrap();
+        let svg = String::from_utf8(easycad_app::ui_drawing::export_bytes(r, dr, "svg")).unwrap();
+        assert!(svg.contains(">Lid<") && svg.contains("SECTION A-A"));
+        let dxf = String::from_utf8(easycad_app::ui_drawing::export_bytes(r, dr, "dxf")).unwrap();
+        assert!(dxf.contains("\nHATCH\n"));
+        assert!(easycad_app::ui_drawing::export_bytes(r, dr, "pdf").starts_with(b"%PDF-"));
+    }
+    save(&mut h, "drawing_assembly");
+}

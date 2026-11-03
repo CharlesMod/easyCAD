@@ -33,7 +33,10 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
 
 ## 4. App work still open
-- [ ] **[ui]** Assemblies in drawings: scope picker (assembly / component / occurrence), BOM table, balloons.
+- [x] **[ui]** Assemblies in drawings: scope picker (assembly / component / occurrence), BOM table, balloons.
+      Done: "Shows" picker + Exploded per view, BOM table tool, the Balloon tool numbers
+      assembly views by the flat BOM; an assembly whose root has no solids gets assembly
+      views and a BOM table on its first sheet. On screen and in SVG / DXF / PDF.
 - [ ] **[ui]** "Output as components" on the Split and Parting-joint dialogs.
 - [ ] **[ui]** Click-test linked-file Update/Break, drag-to-reparent, and one alternate navigation preset.
 - [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
@@ -42,7 +45,12 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
-- [ ] Drawings: GD&T frames, section views, hatching, collision-free dimension text, real PDF text widths.
+- [x] Drawings: GD&T frames, section views, hatching, collision-free dimension text, real PDF text widths.
+      Done: feature control frames (14 symbols, ⌀, Ⓜ/Ⓛ, datums) and datum symbols; section
+      views from a cutting line on a parent (hatched per part, arrows and letters); dimension
+      text moves off other text and view lines; Helvetica AFM widths for PDF centring and
+      table / frame cells. Not done: editing an existing annotation's GD&T fields (the tool
+      settings apply to new frames), offset / aligned sections, hatching patterns per material.
 - [ ] Parts library rows marked TODO (imperial inserts/standoffs, thread-forming heads, some button-head
       lengths, M2/M2.5 counterbores, inch loose-fit clearance): verify against ISO 4762/7380/10642/273 and ASME B18.3.
 - [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).

@@ -30,7 +30,7 @@ mode a bare number means inches.
 | `dialogs/` | Feature dialogs (fillet/chamfer with self-heal report, extrude, revolve, shell, draft, split, boss, rib, pattern, mirror, standoffs, parting joint, export). |
 | `sketch_mode.rs` | 2D sketch editor with tools, constraints, live solver, DXF layers. |
 | `ui_parts.rs` | Parts library, placement on hole edges, BOM. |
-| `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module. |
+| `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module: views (face / iso / custom, Shift+MMB orbit inside a view, "Shows" part bodies / whole assembly / a component / an occurrence, exploded), dimensions, notes, balloons (BOM item numbers in assembly views), BOM table, section views (two clicks for the cutting line, one to place), datums and feature control frames (symbol, ⌀, Ⓜ/Ⓛ, datums in the right panel), SVG / DXF / PDF export. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
 | `units.rs` | mm / in display and input normalization. |
 | `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `EASYCAD_FILE_DIALOG=builtin` forces the prompt. |

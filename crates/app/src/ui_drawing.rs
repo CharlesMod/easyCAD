@@ -21,7 +21,7 @@ use crate::app::EasyCadApp;
 use crate::theme;
 use crate::widgets;
 
-pub const TOOLS: [(&str, &str, &str); 11] = [
+pub const TOOLS: [(&str, &str, &str); 15] = [
     ("Place view", "▣", "Place view: click on the sheet to drop a copy of the selected view (Iso by default)"),
     ("Dimension", "↔", "Dimension: pick a straight edge then empty paper (length), or two edges (distance) · Shift: vertical"),
     ("Ordinate", "⊢", "Ordinate: pick the zero edge, then a feature · Shift: Y axis"),
@@ -33,7 +33,41 @@ pub const TOOLS: [(&str, &str, &str); 11] = [
     ("Center mark", "+", "Center mark: pick circles"),
     ("Centerline", "—", "Centerline: pick two parallel edges"),
     ("Parting line", "PL", "Parting line: click a view to show the split / joint plane edge-on"),
+    ("BOM table", "BOM", "BOM table: click to place its top-left corner · items match the balloons"),
+    ("Section", "A-A", "Section: click two points across a view for the cutting line (snaps level / plumb · Shift: free), then where the section goes"),
+    ("Datum", "[A]", "Datum: pick an edge, then click where the letter box goes"),
+    ("GD&T", "[⌀|A]", "Feature control frame: pick an edge (or empty paper in a view), then click where the frame goes · settings on the right"),
 ];
+
+/// Tool indices with settings or special clicks.
+const T_BALLOON: usize = 7;
+const T_BOM: usize = 11;
+const T_SECTION: usize = 12;
+const T_DATUM: usize = 13;
+const T_GDT: usize = 14;
+
+/// Settings of the next feature control frame.
+#[derive(Clone)]
+pub struct GdtDraft {
+    pub symbol: GdtSymbol,
+    pub tolerance: String,
+    pub diameter: bool,
+    pub modifier: Option<MaterialCondition>,
+    /// Datum letters separated by spaces or `|`.
+    pub datums: String,
+}
+
+impl Default for GdtDraft {
+    fn default() -> Self {
+        GdtDraft {
+            symbol: GdtSymbol::Position,
+            tolerance: "0.1".into(),
+            diameter: true,
+            modifier: None,
+            datums: "A B".into(),
+        }
+    }
+}
 
 pub struct DrawingUi {
     pub id: Option<DrawingId>,
@@ -48,6 +82,12 @@ pub struct DrawingUi {
     pub zoom: f32,
     pub pan: egui::Vec2,
     pub rot: [f64; 3],
+    /// Section tool: the cutting line's points so far (view, sheet mm).
+    pub sec_pts: Vec<(ViewId, DVec2)>,
+    pub gdt: GdtDraft,
+    pub bom_indented: bool,
+    /// Shift+MMB drag: the view being orbited.
+    pub orbit: Option<ViewId>,
 }
 
 impl Default for DrawingUi {
@@ -65,6 +105,10 @@ impl Default for DrawingUi {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             rot: [35.26, 0.0, 45.0],
+            sec_pts: Vec::new(),
+            gdt: GdtDraft::default(),
+            bom_indented: false,
+            orbit: None,
         }
     }
 }
@@ -151,6 +195,16 @@ pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
             bb.map(|b| b.size())
         })
         .unwrap_or(glam::DVec3::new(100.0, 60.0, 40.0));
+    // an assembly whose root has no solids of its own: draw the whole assembly
+    let asm_rows = model.as_ref().and_then(|m| {
+        let a = m.asm.as_ref()?;
+        let root_solids = m.bodies.iter().any(|b| !b.body.reference);
+        (!root_solids).then(|| easycad_model::assembly::bom(&m.data, &a.result).flat.len())
+    });
+    let ext = match (asm_rows, model.as_ref().and_then(|m| m.bbox.as_ref())) {
+        (Some(_), Some(bb)) => bb.size(),
+        _ => ext,
+    };
     let sheet_size = Sheet::new(PaperSize::A3, PaperOrientation::Landscape).size_mm();
     let layout = layout_for(ext, sheet_size);
     // the revision is a user field, not the internal save counter
@@ -168,6 +222,15 @@ pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
         }
         let s = layout.scale;
         let top = dr.add_view("Top", ViewOrientation::Face(CubeFace::PosZ), layout.top, s);
+        if let Some(rows) = asm_rows {
+            // the BOM table sits on the title block, its items numbered like the balloons
+            let m = dr.sheet.margin;
+            let title_h = 7.0 * dr.sheet.title_block.fields.len() as f64;
+            dr.annotate(AnnotationKind::BomTable {
+                position: DVec2::new(sheet_size.x * 0.57, m + title_h + 6.0 + 6.0 * (rows + 1) as f64),
+                indented: false,
+            });
+        }
         let front = dr.add_view(
             "Front",
             ViewOrientation::Face(CubeFace::NegY),
@@ -201,6 +264,11 @@ pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
                 text: (*line).into(),
                 height: if i == 0 { 4.0 } else { 3.2 },
             });
+        }
+        if asm_rows.is_some() {
+            for v in &mut dr.views {
+                v.scope = easycad_model::assembly::Scope::Assembly;
+            }
         }
         let Some(m) = &model else { return };
         let Some(base) = m.bodies.iter().find(|b| !b.body.reference) else {
@@ -417,6 +485,7 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                     if resp.on_hover_text(*hint).clicked() {
                         d.tool = i;
                         d.picks.clear();
+                        d.sec_pts.clear();
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -471,7 +540,7 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new("Pan MMB · Zoom wheel · Delete removes the selected view")
+                        RichText::new("Pan MMB · Zoom wheel · Shift+MMB in a view orbits it · Delete removes the selected view")
                             .size(11.0)
                             .color(theme::TEXT_MUTED),
                     )
@@ -500,7 +569,7 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                 .inner_margin(Margin::symmetric(14, 12)),
         )
         .show(ui, |ui| {
-            props(d, ui, now);
+            props(d, ui, &app.doc.data, now);
         });
     egui::CentralPanel::default()
         .frame(
@@ -609,14 +678,14 @@ fn left_panel(
             theme::mono(12.0),
             theme::TEXT,
         );
+        let base = match &v.section {
+            Some(_) => v.name.clone(),
+            None => orientation_label(&v.orientation),
+        };
         let label = if v.rotation_deg != 0.0 {
-            format!(
-                "{} · {}°",
-                orientation_label(&v.orientation),
-                v.rotation_deg
-            )
+            format!("{base} · {}°", v.rotation_deg)
         } else {
-            orientation_label(&v.orientation)
+            base
         };
         ui.painter().text(
             rect.left_center() + vec2(36.0, 0.0),
@@ -716,7 +785,79 @@ fn scale_label(s: f64) -> String {
     }
 }
 
-fn props(d: &mut DrawingUi, ui: &mut Ui, now: f64) {
+/// Settings of the BOM table and feature control frame tools.
+fn tool_settings(d: &mut DrawingUi, ui: &mut Ui) {
+    match d.tool {
+        T_BOM => {
+            theme::section_label(ui, "BOM table");
+            ui.checkbox(&mut d.bom_indented, "Indented (per parent)");
+            ui.label(widgets::muted("Flat lists the item numbers the balloons show."));
+        }
+        T_GDT => {
+            theme::section_label(ui, "Feature control frame");
+            let g = &mut d.gdt;
+            egui::ComboBox::from_id_salt("gdt_symbol")
+                .selected_text(format!("{}  {}", g.symbol.glyph(), g.symbol.name()))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for sym in GdtSymbol::ALL {
+                        ui.selectable_value(&mut g.symbol, sym, format!("{}  {}", sym.glyph(), sym.name()));
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut g.diameter, "⌀");
+                ui.add(egui::TextEdit::singleline(&mut g.tolerance).desired_width(70.0).hint_text("0.1 or {param}"));
+                egui::ComboBox::from_id_salt("gdt_mc")
+                    .selected_text(match g.modifier {
+                        None => "—",
+                        Some(MaterialCondition::Maximum) => "Ⓜ MMC",
+                        Some(MaterialCondition::Least) => "Ⓛ LMC",
+                    })
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut g.modifier, None, "—");
+                        ui.selectable_value(&mut g.modifier, Some(MaterialCondition::Maximum), "Ⓜ MMC");
+                        ui.selectable_value(&mut g.modifier, Some(MaterialCondition::Least), "Ⓛ LMC");
+                    });
+            });
+            if g.symbol.takes_datums() {
+                ui.horizontal(|ui| {
+                    ui.label(widgets::muted("Datums"));
+                    ui.add(egui::TextEdit::singleline(&mut g.datums).desired_width(120.0).hint_text("A B C"));
+                });
+            } else {
+                ui.label(widgets::muted("A form tolerance: no datums."));
+            }
+        }
+        _ => return,
+    }
+    ui.add_space(12.0);
+}
+
+/// The view's scope choices: (label, scope).
+fn scope_choices(data: &easycad_model::document::DocData) -> Vec<(String, easycad_model::assembly::Scope)> {
+    use easycad_model::assembly::Scope;
+    let mut v = vec![("Part bodies".to_string(), Scope::Root)];
+    if data.occurrences.is_empty() {
+        return v;
+    }
+    v.push(("Whole assembly".into(), Scope::Assembly));
+    for c in &data.components {
+        v.push((format!("Component · {}", c.name), Scope::Component(c.id)));
+    }
+    let all = data.all_occurrences();
+    for (path, o, _) in &all {
+        let names: Vec<String> = (1..=path.len())
+            .map(|i| all.iter().find(|(p, ..)| p[..] == path[..i]).map(|(_, o, _)| o.name.clone()).unwrap_or_default())
+            .collect();
+        let _ = o;
+        v.push((format!("Occurrence · {}", names.join(" / ")), Scope::Occurrence(path.clone())));
+    }
+    v
+}
+
+fn props(d: &mut DrawingUi, ui: &mut Ui, data: &easycad_model::document::DocData, now: f64) {
+    tool_settings(d, ui);
     let Some(draft) = &mut d.draft else { return };
     let idx = d
         .selected
@@ -873,7 +1014,7 @@ fn props(d: &mut DrawingUi, ui: &mut Ui, now: f64) {
         ch = true;
     }
     ui.label(widgets::muted(
-        "Or pick a face / iso above. Drag-orbit inside the view is not wired yet.",
+        "Or pick a face / iso above, or drag inside the view with Shift+MMB.",
     ));
     ui.horizontal(|ui| {
         ui.label(
@@ -923,6 +1064,46 @@ fn props(d: &mut DrawingUi, ui: &mut Ui, now: f64) {
                 });
         });
     });
+    let choices = scope_choices(data);
+    if choices.len() > 1 {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Shows").size(12.0).color(theme::TEXT_DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let cur = choices
+                    .iter()
+                    .find(|c| c.1 == v.scope)
+                    .map(|c| c.0.clone())
+                    .unwrap_or_else(|| "(removed)".into());
+                egui::ComboBox::from_id_salt("scope")
+                    .selected_text(cur)
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for (label, sc) in &choices {
+                            if ui.selectable_label(v.scope == *sc, label).clicked() && v.scope != *sc {
+                                v.scope = sc.clone();
+                                v.bodies.clear();
+                                ch = true;
+                            }
+                        }
+                    });
+            });
+        });
+        if v.scope != easycad_model::assembly::Scope::Root {
+            ch |= ui.checkbox(&mut v.exploded, "Exploded").changed();
+        }
+    }
+    if let Some(sc) = &mut v.section {
+        ui.horizontal(|ui| {
+            ui.label(widgets::muted(format!("Section {0}-{0}", sc.label)));
+            if widgets::button(ui, "Flip direction").clicked() {
+                let (n, x, up) = v.orientation.basis();
+                sc.normal = -sc.normal;
+                let q = glam::DQuat::from_mat3(&glam::DMat3::from_cols(-x, up, -n)).inverse();
+                v.orientation = ViewOrientation::Rotation(q.normalize());
+                ch = true;
+            }
+        });
+    }
     ch |= ui.checkbox(&mut v.hidden_lines, "Hidden lines").changed();
     ch |= ui.checkbox(&mut v.smooth_edges, "Tangent edges").changed();
     ch |= ui
@@ -1078,8 +1259,37 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
         );
         return;
     };
+    let shift = ui.input(|i| i.modifiers.shift);
+    if resp.drag_started_by(egui::PointerButton::Middle) {
+        // Shift+MMB on a view orbits it (GUI_NEEDS #15); elsewhere MMB pans
+        d.orbit = None;
+        if shift {
+            if let (Some(r), Some(p)) = (&d.result, ui.input(|i| i.pointer.press_origin())) {
+                let size = draft.sheet.size_mm();
+                let k = (avail.width() / size.x as f32).min(avail.height() / size.y as f32) * 0.98 * d.zoom;
+                let paper = Rect::from_center_size(avail.center() + d.pan, vec2(size.x as f32 * k, size.y as f32 * k));
+                let q = Xf { origin: paper.left_bottom(), k }.inv(p);
+                d.orbit = view_under(r, q);
+            }
+        }
+    }
     if resp.dragged_by(egui::PointerButton::Middle) {
-        d.pan += resp.drag_delta();
+        match d.orbit {
+            Some(vid) => {
+                let dl = resp.drag_delta();
+                if dl != egui::Vec2::ZERO {
+                    if let Some(v) = d.draft.as_mut().and_then(|dr| dr.view_mut(vid)) {
+                        v.orientation = orbit(&v.orientation, dl.x as f64, dl.y as f64);
+                        d.selected = Some(vid);
+                        d.changed(now);
+                    }
+                }
+            }
+            None => d.pan += resp.drag_delta(),
+        }
+    }
+    if resp.drag_stopped() {
+        d.orbit = None;
     }
     if resp.hovered() {
         let s = ui.input(|i| i.smooth_scroll_delta.y);
@@ -1143,6 +1353,12 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
                 col,
             );
         }
+        for h in &vr.hatch {
+            draw_prim(&p, &x, &Prim::Polyline { pts: h.clone(), style: LineStyle::Hatch }, col);
+        }
+        for m in &vr.marks {
+            draw_prim(&p, &x, m, black);
+        }
         if let Some(err) = &vr.error {
             p.text(
                 x.p((vr.min + vr.max) / 2.0),
@@ -1152,7 +1368,7 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
                 theme::ORANGE,
             );
         }
-        if let Some(v) = view {
+        if let Some(v) = view.filter(|v| v.section.is_none()) {
             let label = format!(
                 "{} · {}{}",
                 v.name.to_uppercase(),
@@ -1238,9 +1454,20 @@ fn sheet(d: &mut DrawingUi, ui: &mut Ui, model: Option<&crate::worker::Output>, 
     for (_, _, at) in &d.picks {
         p.circle_stroke(x.p(*at), 5.0, Stroke::new(1.5, theme::ACCENT));
     }
+    // the cutting line being drawn
+    if let Some(&(_, a)) = d.sec_pts.first() {
+        let b = match d.sec_pts.get(1) {
+            Some(&(_, b)) => Some(b),
+            None => resp.hover_pos().map(|h| snap_cut(a, x.inv(h), shift)),
+        };
+        if let Some(b) = b {
+            p.extend(egui::Shape::dashed_line(&[x.p(a), x.p(b)], Stroke::new(1.5, theme::ACCENT), 8.0, 3.0));
+        }
+        p.circle_filled(x.p(a), 3.0, theme::ACCENT);
+    }
     let tol = (6.0 / k) as f64;
     if let Some(q) = resp.hover_pos().map(|h| x.inv(h)) {
-        if d.tool != 0 && d.tool != 5 {
+        if ![0, 5, T_BOM, T_SECTION].contains(&d.tool) {
             if let Some((_, e, _)) = nearest_edge(&r, q, tol) {
                 let pts: Vec<Pos2> = e.points.iter().map(|s| x.p(*s)).collect();
                 p.add(egui::Shape::line(pts, Stroke::new(2.0, theme::ORANGE)));
@@ -1283,16 +1510,7 @@ fn click(
     shift: bool,
     now: f64,
 ) {
-    let view_at = r
-        .views
-        .iter()
-        .find(|v| {
-            q.x >= v.min.x - 3.0
-                && q.x <= v.max.x + 3.0
-                && q.y >= v.min.y - 3.0
-                && q.y <= v.max.y + 3.0
-        })
-        .map(|v| v.id);
+    let view_at = view_under(r, q);
     // the engine's reference for the picked view edge (GUI_NEEDS #16: works on
     // placed instances of assembly views too); the curve kind when the model has it
     let hit = nearest_edge(r, q, tol).and_then(|(vid, e, _)| {
@@ -1300,7 +1518,7 @@ fn click(
         let kind = e.source.and_then(|(body, idx)| {
             Some(model?.meshed(body)?.edges.get(idx as usize)?.kind)
         });
-        Some(Hit { vid, rf, kind, body: e.source.map(|s| s.0) })
+        Some(Hit { vid, rf, kind, body: e.source.map(|s| s.0), path: e.path.clone() })
     });
     let had_hit = hit.is_some();
     let mut add: Option<AnnotationKind> = None;
@@ -1429,15 +1647,69 @@ fn click(
             (_, Some(Hit { vid, rf, .. })) => d.picks.push((vid, rf.clone(), q)),
             _ => {}
         },
-        7 => {
-            if let Some(Hit { vid, body: Some(body), .. }) = hit {
-                add = Some(AnnotationKind::Balloon {
-                    view: vid,
-                    body,
-                    position: q + DVec2::new(15.0, 15.0),
+        T_BALLOON => {
+            if let Some(Hit { vid, body: Some(body), path, .. }) = hit {
+                let position = q + DVec2::new(15.0, 15.0);
+                let root = draft
+                    .views
+                    .iter()
+                    .find(|v| v.id == vid)
+                    .is_none_or(|v| v.scope == easycad_model::assembly::Scope::Root);
+                add = Some(if root {
+                    AnnotationKind::Balloon { view: vid, body, position }
+                } else {
+                    // assembly views: the BOM item of the picked occurrence, or of the
+                    // library part when the body is one (and the root's own bodies)
+                    let part = path.is_empty()
+                        || model.is_some_and(|m| {
+                            m.ctx
+                                .iter()
+                                .any(|c| c.path == path && c.mb.body.id == body && c.mb.body.part.is_some())
+                        });
+                    AnnotationKind::ItemBalloon { view: vid, path, body: part.then_some(body), position }
                 });
             }
         }
+        T_BOM => {
+            add = Some(AnnotationKind::BomTable { position: q, indented: d.bom_indented });
+        }
+        T_SECTION => match d.sec_pts.len() {
+            0 => {
+                if let Some(v) = view_at {
+                    d.sec_pts.push((v, q));
+                }
+                return;
+            }
+            1 => {
+                let (v, a) = d.sec_pts[0];
+                let b = snap_cut(a, q, shift);
+                if b.distance(a) > 2.0 {
+                    d.sec_pts.push((v, b));
+                }
+                return;
+            }
+            _ => {
+                let ((parent, a), (_, b)) = (d.sec_pts[0], d.sec_pts[1]);
+                d.sec_pts.clear();
+                if let (Some(vr), Some(dr)) = (r.view(parent), &mut d.draft) {
+                    if let Some(id) = dr.add_section_view(parent, &vr.frame, a, b, q) {
+                        d.selected = Some(id);
+                        d.changed(now);
+                    }
+                }
+                return;
+            }
+        },
+        T_DATUM | T_GDT => match (d.picks.pop(), hit) {
+            (Some((vid, target, _)), None) => add = gdt_annotation(d, draft, vid, Some(target), q),
+            (_, Some(Hit { vid, rf, .. })) => d.picks.push((vid, rf.clone(), q)),
+            (None, None) if d.tool == T_GDT => {
+                if let Some(vid) = view_at.or(d.selected) {
+                    add = gdt_annotation(d, draft, vid, None, q);
+                }
+            }
+            _ => {}
+        },
         10 => {
             let f = model.and_then(|m| {
                 m.data
@@ -1495,6 +1767,73 @@ struct Hit {
     rf: DimRef,
     kind: Option<CurveKind>,
     body: Option<BodyId>,
+    /// Occurrence path of the edge's body in the view's scope.
+    path: easycad_model::assembly::OccPath,
+}
+
+/// The view whose drawn extents (plus a small margin) contain `q`.
+fn view_under(r: &DrawingResult, q: DVec2) -> Option<ViewId> {
+    r.views
+        .iter()
+        .find(|v| q.x >= v.min.x - 3.0 && q.x <= v.max.x + 3.0 && q.y >= v.min.y - 3.0 && q.y <= v.max.y + 3.0)
+        .map(|v| v.id)
+}
+
+/// The second point of a cutting line: level or plumb within 10° unless `free`.
+fn snap_cut(a: DVec2, b: DVec2, free: bool) -> DVec2 {
+    let d = b - a;
+    if free || d.length() < 1e-9 {
+        return b;
+    }
+    let ang = d.y.atan2(d.x).to_degrees().rem_euclid(90.0);
+    if ang < 10.0 || ang > 80.0 {
+        if d.x.abs() >= d.y.abs() {
+            DVec2::new(b.x, a.y)
+        } else {
+            DVec2::new(a.x, b.y)
+        }
+    } else {
+        b
+    }
+}
+
+/// Orbit a view by a screen drag (pixels): right turns the model about the view's
+/// up axis, down tips its top toward the viewer.
+pub fn orbit(o: &ViewOrientation, dx: f64, dy: f64) -> ViewOrientation {
+    let k = 0.3f64.to_radians();
+    let turn = DQuat::from_rotation_y(dx * k) * DQuat::from_rotation_x(dy * k);
+    ViewOrientation::Rotation((turn * o.quat()).normalize())
+}
+
+/// A datum (next free letter) or a feature control frame (the tool settings).
+fn gdt_annotation(d: &DrawingUi, draft: &Drawing, view: ViewId, target: Option<DimRef>, q: DVec2) -> Option<AnnotationKind> {
+    if d.tool == T_DATUM {
+        let used: Vec<&str> = draft
+            .annotations
+            .iter()
+            .filter_map(|a| match &a.kind {
+                AnnotationKind::Datum { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        let label = "ABCDEFGHJKLMNPRSTUVWXYZ"
+            .chars()
+            .map(String::from)
+            .find(|c| !used.contains(&c.as_str()))
+            .unwrap_or_else(|| "A".into());
+        return Some(AnnotationKind::Datum { view, target: target?, label, position: q });
+    }
+    let g = &d.gdt;
+    Some(AnnotationKind::FeatureControl {
+        view,
+        target,
+        position: q,
+        symbol: g.symbol,
+        tolerance: g.tolerance.clone(),
+        diameter: g.diameter,
+        modifier: g.modifier,
+        datums: g.datums.split([' ', '|', ',']).filter(|s| !s.is_empty()).map(String::from).collect(),
+    })
 }
 
 /// Standard-scale third-angle layout for model extents on a sheet.
@@ -1560,6 +1899,30 @@ mod tests {
         assert!(matches!(k, super::LinearKind::Aligned) && (o - 5.0).abs() < 1e-9);
     }
     use super::*;
+
+    #[test]
+    fn cut_lines_snap_level_and_plumb() {
+        let a = DVec2::new(10.0, 10.0);
+        assert_eq!(snap_cut(a, DVec2::new(50.0, 14.0), false), DVec2::new(50.0, 10.0));
+        assert_eq!(snap_cut(a, DVec2::new(13.0, -40.0), false), DVec2::new(10.0, -40.0));
+        assert_eq!(snap_cut(a, DVec2::new(40.0, 30.0), false), DVec2::new(40.0, 30.0), "a real slant stays");
+        assert_eq!(snap_cut(a, DVec2::new(50.0, 14.0), true), DVec2::new(50.0, 14.0), "Shift: free");
+    }
+
+    #[test]
+    fn orbit_turns_about_the_view_axes() {
+        let front = ViewOrientation::Face(CubeFace::NegY);
+        // dragging 300 px right turns 90°: the front view becomes the left one
+        let (n, _, up) = orbit(&front, 300.0, 0.0).basis();
+        assert!((n - glam::DVec3::NEG_X).length() < 1e-9 && (up - glam::DVec3::Z).length() < 1e-9, "{n} {up}");
+        // dragging down tips the top toward the viewer: towards the top view
+        let (n, ..) = orbit(&front, 0.0, 300.0).basis();
+        assert!((n - glam::DVec3::Z).length() < 1e-9, "{n}");
+        // no drag, no change
+        let (n0, x0, _) = front.basis();
+        let (n, x, _) = orbit(&front, 0.0, 0.0).basis();
+        assert!((n - n0).length() < 1e-9 && (x - x0).length() < 1e-9);
+    }
 
     #[test]
     fn layout_picks_a_standard_scale_that_fits() {
