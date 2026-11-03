@@ -47,7 +47,13 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21).
 
 ## 5. Known gaps (fix, or consciously drop)
-- [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
+- [x] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
+      Removed (the `setback` field, its warning and the dialog's disabled toggle; old files load).
+      Why: OCCT 7.8's `BRepFilletAPI_MakeFillet` / `ChFi3d` has no setback option (corners
+      are a rolling ball for three edges, a `GeomPlate` filling for more), so it would mean
+      trimming every fillet back at the vertex and fitting our own G1 N-sided patch, then
+      sewing it in: a second blend engine, fragile on mixed convex/concave corners. For the
+      FDM/SLA enclosures this targets, the rolling-ball corner prints the same at these radii.
 - [ ] Drawings: GD&T frames, section views, hatching, collision-free dimension text, real PDF text widths.
 - [ ] Parts library rows marked TODO (imperial inserts/standoffs, thread-forming heads, some button-head
       lengths, M2/M2.5 counterbores, inch loose-fit clearance): verify against ISO 4762/7380/10642/273 and ASME B18.3.

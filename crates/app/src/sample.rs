@@ -214,7 +214,6 @@ pub fn sensor_node() -> Document {
             auto_reduce: false,
             sets: Vec::new(),
             skipped: Vec::new(),
-            setback: false,
         },
     );
     doc.add_feature(

@@ -79,7 +79,6 @@ fn fillet_sets_skipped_edges_and_request_mapping() {
             auto_reduce: false,
             sets: vec![EdgeSet { edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], size: 1.0.into(), auto_reduce: true }],
             skipped: vec![skip],
-            setback: false,
         },
     );
     let out = doc.regenerate().clone();

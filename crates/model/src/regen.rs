@@ -938,11 +938,6 @@ impl Ctx<'_> {
                 if !all {
                     warn.push(summary);
                 }
-                if matches!(kind, FeatureKind::Fillet { setback: true, .. }) {
-                    // TODO: setback vertex blends (OCCT's MakeFillet has no setback corner
-                    // option; would need a custom corner patch).
-                    warn.push("setback corners are not supported yet; corners use the kernel's rolling-ball blend".into());
-                }
                 if !warn.is_empty() {
                     self.warning = Some(warn.join("; "));
                 }

@@ -122,7 +122,6 @@ pub struct FilletD {
     pub sets: Vec<EdgeSet>,
     pub active: usize,
     pub tangent_chains: bool,
-    pub setback: bool,
     pub auto_heal: bool,
     /// Feature report says a stored edge reference no longer matches.
     pub unresolved: Option<(Selector, Option<Selector>, f64)>,
@@ -146,7 +145,6 @@ impl FilletD {
             sets: vec![set],
             active: 0,
             tangent_chains: true,
-            setback: false,
             auto_heal: true,
             unresolved: None,
             keep_failing: false,
@@ -154,9 +152,9 @@ impl FilletD {
     }
 
     pub fn from_feature(f: &Feature) -> Self {
-        let (chamfer, body, skipped, setback) = match &f.kind {
-            FeatureKind::Fillet { body, skipped, setback, .. } => (false, *body, skipped, *setback),
-            FeatureKind::Chamfer { body, skipped, .. } => (true, *body, skipped, false),
+        let (chamfer, body, skipped) = match &f.kind {
+            FeatureKind::Fillet { body, skipped, .. } => (false, *body, skipped),
+            FeatureKind::Chamfer { body, skipped, .. } => (true, *body, skipped),
             _ => unreachable!(),
         };
         let eref = |s: &EdgeSelector| EdgeRef {
@@ -188,7 +186,6 @@ impl FilletD {
             sets,
             active: 0,
             tangent_chains: true,
-            setback,
             auto_heal: true,
             unresolved: None,
             keep_failing: false,
@@ -279,7 +276,6 @@ impl FilletD {
                 auto_reduce: first.auto_reduce,
                 sets: more,
                 skipped,
-                setback: self.setback,
             }
         };
         Ok(vec![Feature {
@@ -461,18 +457,6 @@ impl FilletD {
             self.sets.push(EdgeSet::new(&r));
             self.active = self.sets.len() - 1;
         }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Corner type").color(theme::TEXT_DIM));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(RichText::new("Setback").size(12.0)).frame(false),
-                )
-                .on_disabled_hover_text("Setback corners need engine support (GUI_NEEDS).");
-                widgets::seg(ui, "Rolling ball", true);
-            });
-        });
-
         // unresolved reference
         if let Some((_, best, score)) = self.unresolved.clone() {
             egui::Frame::new()

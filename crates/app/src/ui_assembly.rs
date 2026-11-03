@@ -1097,7 +1097,6 @@ mod tests {
                 auto_reduce: false,
                 sets: Vec::new(),
                 skipped: Vec::new(),
-                setback: false,
             },
         };
         a.commit_features("Fillet Round", vec![f], None);

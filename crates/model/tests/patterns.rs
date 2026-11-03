@@ -104,7 +104,7 @@ fn patterned_holes_get_fits_and_teardrops() {
     assert!(out.errors().is_empty(), "{:?}", out.errors());
     assert_eq!(out.process.teardropped.len(), 3, "{:?}", out.process);
     // non-patternable sources give a clear error
-    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![easycad_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
+    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![easycad_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() });
     let bad = doc.add_feature("Bad", FeatureKind::Pattern { source: PatternSource::Features(vec![fillet]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 5.0.into(), count: Expr::from(2) } });
     assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("cannot be patterned")));
 }

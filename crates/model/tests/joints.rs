@@ -497,7 +497,7 @@ fn wizard_box(w: f64, d: f64, corner_r: f64, kind: JointKind) -> (easycad_model:
     ));
     doc.add_feature(
         "Top edges",
-        FeatureKind::Fillet { body: Some(b), edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 3.0.into(), auto_reduce: false, sets: vec![], skipped: vec![], setback: false },
+        FeatureKind::Fillet { body: Some(b), edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 3.0.into(), auto_reduce: false, sets: vec![], skipped: vec![] },
     );
     doc.add_feature("Shell", FeatureKind::Shell { body: Some(b), open_faces: vec![], thickness: 2.0.into(), outward: false });
     let j = doc.add_feature(

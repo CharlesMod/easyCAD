@@ -11,7 +11,7 @@ today (adapter or limitation) and what would replace it.
    `Document::set_rollback`, `FeatureReport.rolled_back`; new features insert at it.
 3. ~~Several radii in one fillet~~ — done by the engine: `Fillet/Chamfer.sets`
    (`EdgeSet { edges, size, auto_reduce }`), `skipped` (+ `FeatureReport.skipped_edges`).
-   `setback` is accepted with a warning (kernel TODO).
+   Setback corners were dropped (OpenCascade has no setback vertex blend; see TODO.md).
 4. ~~Report edges in request terms~~ — done by the engine:
    `FeatureReport.edge_requests[outcome.request] = EdgeRequest { set, selector }`.
 5. ~~Shell with no open faces~~ — done by the engine; the "New enclosure from PCB"

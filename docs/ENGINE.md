@@ -105,17 +105,18 @@ doc.bom(); doc.blob_refs();
     `StandoffsFromPcb` have `offset: Expr` (default `"0"`) moving their plane along
     its normal, like `PartingJoint.offset` (`"lid_split"`).
   - **Fillet / chamfer edge sets.** `Fillet { body, edges, radius, auto_reduce,
-    sets: Vec<EdgeSet { edges, size, auto_reduce }>, skipped, setback }` (Chamfer
-    the same without `setback`): `kind.edge_sets()` lists `(edges, radius,
-    auto_reduce)` (when `edges` is not empty) then `sets`, all dressed in one
+    sets: Vec<EdgeSet { edges, size, auto_reduce }>, skipped }` (Chamfer the
+    same): `kind.edge_sets()` lists `(edges, radius, auto_reduce)` (when
+    `edges` is not empty) then `sets`, all dressed in one
     pipeline run (`occt::dressup::dress` takes a per-edge auto-reduce; a tangent
     chain is reduced as a whole only if every edge in it allows it). An edge in two
     sets takes the later set. `skipped` edge selectors are left sharp
     (`FeatureReport.skipped_edges`, " · 1 skipped" in the summary; everything
     skipped is an error). `FeatureReport.edge_requests[outcome.request] =
     EdgeRequest { set, selector }` maps each `DressUpReport` outcome back to the
-    request. `setback: true` is accepted but gives a warning (TODO: OCCT has no
-    setback vertex blend).
+    request. Corners where three or more filleted edges meet get OCCT's own blend
+    (rolling ball / filling patch); there is no setback corner (the old `setback`
+    flag was removed and is ignored when an old document loads; see TODO.md).
   - **Standoffs.** `StandoffsFromPcb` gained `exclude: Vec<DVec2>` (hole centres in
     plane coordinates, 0.5 mm match), `gussets: Option<Gussets { thickness, height
     (default 60 % of the standoff), max_length (25) }>` (one rib per standoff to the
@@ -497,7 +498,6 @@ What changed for it:
   - Messages: kernel offset failures say "2D offset failed" (they used to read like
     "does not fit" or "passes through the floor or lid"); "the rim fills the whole
     cavity at the plane" is its own infeasible message.
-
 - `crates/model/tests/fillet_fuzz.rs` throws random edge sets (a few edges, every
   edge of a face, every edge at a vertex) × sizes (0.25–6 mm, fillet or chamfer,
   auto-reduce on or off) at the wizard's bodies (after the shell, after the
@@ -851,10 +851,15 @@ verified on load.
 - `BRepOffsetAPI_DraftAngle` (drafted extrusions, `Draft`) can loop forever on some
   sections; it hung the joint fuzz on a tongue lead-in, which now uses
   `Shape::taper` instead. User drafts still go through it.
+- No setback fillet corners: OpenCascade blends three or more filleted edges with a
+  rolling ball (three edges) or a filling patch (more); there is no setback option.
 
 ## Changelog for GUI
 
 - **Speed, fillet fuzz, setback (TODO §3/§5).**
+  - `FeatureKind::Fillet` lost `setback` (BREAKING for struct literals; I removed
+    it from `sample.rs`, `wizard.rs`, `ui_assembly.rs` and the fillet dialog, whose
+    disabled "Setback" / "Rolling ball" row is gone). Old files still load.
   - New `EdgeStatus::Smooth` (an exhaustive match needs an arm): the edge's faces
     already meet tangentially, nothing was done; not a failure (`all_applied()`
     is true), not applied (`applied_count()`). The fillet dialog maps it to
