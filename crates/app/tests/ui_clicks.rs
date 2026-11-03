@@ -1,5 +1,5 @@
 //! Click tests on the real app (worker thread, GPU viewport) with egui_kittest:
-//! the overhang heat map, linked-file Update / Break, drag-to-reparent in the
+//! the overhang heat map, placing a part with modeled threads, linked-file Update / Break, drag-to-reparent in the
 //! assembly tree, the alternate navigation presets, "Output as components", mate
 //! free-motion glyphs and the interference overlap solid. Snapshots land in
 //! `tests/snapshots/` (written, not compared).
@@ -523,4 +523,26 @@ fn mate_free_motion_and_interference_overlap() {
     let vp = h.state().viewport_rect.shrink(40.0);
     let img = save(&mut h, "interference_overlap");
     assert!(reddish(&img, vp) > 20, "the overlap and the pair show red");
+}
+
+#[test]
+fn place_a_part_with_modeled_threads() {
+    use easycad_model::feature::{FeatureKind, Threads};
+    let _serial = serial();
+    let mut h = harness(easycad_app::sample::sensor_node());
+    {
+        let app = h.state_mut();
+        app.mode = easycad_app::app::Mode::Parts(Box::new(easycad_app::ui_parts::PartsUi::new(&app.doc)));
+    }
+    h.run_steps(4);
+    h.get_by_label("Modeled threads").click();
+    h.run_steps(2);
+    h.get_by_label("Place at origin").click();
+    h.run_steps(2);
+    settle(&mut h);
+    let app = h.state();
+    let last = app.doc.data.features.last().expect("a feature was placed");
+    let FeatureKind::InsertPart { threads, .. } = &last.kind else { panic!("placed {:?}", last.kind) };
+    assert_eq!(*threads, Threads::Modeled);
+    save(&mut h, "parts_modeled_threads");
 }

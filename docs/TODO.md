@@ -54,7 +54,8 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [x] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21): each offset
       joint gets two equations (tangent joints pinned on the source joint's normal); 0 DOF, no
       redundancy on the board outline, S-curves, sharp corners, circles. The GUI's own offset is gone.
-- [ ] **[ui]** "Modeled threads" toggle when placing a part (`FeatureKind::InsertPart.threads`).
+- [x] **[ui]** "Modeled threads" toggle when placing a part (`FeatureKind::InsertPart.threads`): a checkbox
+      in the Parts placement banner (`ui_clicks::place_a_part_with_modeled_threads`).
 
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.

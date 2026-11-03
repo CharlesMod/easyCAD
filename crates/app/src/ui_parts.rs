@@ -31,6 +31,8 @@ pub struct PartsUi {
     pub tab: Tab,
     pub picked: Vec<PickKey>,
     pub last_placed: Option<FeatureId>,
+    /// Place parts with real helical threads (`Threads::Modeled`) instead of cosmetic ones.
+    pub modeled_threads: bool,
 }
 
 pub fn categories() -> [(Category, &'static str); 7] {
@@ -68,6 +70,7 @@ impl PartsUi {
             tab: Tab::Bom,
             picked: Vec::new(),
             last_placed: None,
+            modeled_threads: false,
         }
     }
 
@@ -232,6 +235,7 @@ fn place(app: &mut EasyCadApp, keys: &[PickKey]) {
         return;
     };
     let size = p.size();
+    let threads = if p.modeled_threads { Threads::Modeled } else { Threads::Cosmetic };
     let model = app.model.clone();
     let mut placements = Vec::new();
     let mut target = None;
@@ -281,7 +285,7 @@ fn place(app: &mut EasyCadApp, keys: &[PickKey]) {
             offset: "0".into(),
             auto_hole,
             target,
-            threads: Default::default(),
+            threads,
         },
     };
     app.commit_features(&format!("Insert {size} ×{n}"), vec![feat], None);
@@ -381,6 +385,12 @@ fn banner(app: &mut EasyCadApp, ui: &mut Ui, rect: egui::Rect) {
                 })
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        if let crate::app::Mode::Parts(p) = &mut app.mode {
+                            ui.checkbox(&mut p.modeled_threads, RichText::new("Modeled threads").size(12.0)).on_hover_text(
+                                "Real helical threads (ISO 68-1 / UN) on the part and a tapped auto-hole, for printing large threads; \
+                                 slower to rebuild (about 1 s and 16 k triangles per M3×10). Off: cosmetic threads",
+                            );
+                        }
                         if sel.is_empty() {
                             ui.label(
                                 RichText::new(format!(
