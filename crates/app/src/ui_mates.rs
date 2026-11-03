@@ -367,8 +367,10 @@ pub fn mate_card(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                     if let Some((what, lo, hi, unit)) = mu.jog_range() {
                         ui.label(RichText::new(format!("JOG · {what}")).size(11.0).color(theme::TEXT_LABEL));
                         let v = if mu.kind == MateKind::Revolute { &mut mu.angle } else { &mut mu.distance };
+                        ui.spacing_mut().slider_width = 200.0;
                         let r = ui.add(egui::Slider::new(v, lo..=hi).suffix(unit).step_by(if unit == "°" { 1.0 } else { 0.5 }));
-                        mu.jog_rect = Some(r.rect);
+                        // the rail (E2E drags along it)
+                        mu.jog_rect = Some(Rect::from_min_max(r.rect.min, pos2(r.rect.left() + 200.0, r.rect.bottom())));
                         if r.changed() {
                             changed = true;
                         }
@@ -433,7 +435,7 @@ pub fn glyphs(app: &CaseworkApp, ui: &Ui, rect: Rect) {
     let p = ui.painter_at(rect);
     let proj = |q: Vec3| app.camera.project(q, size).map(|s| pos2(rect.left() + s.x, rect.top() + s.y));
     let len = app.camera.world_per_point(size.y).max(1e-4) * 40.0;
-    let draw = |s: &Snap, col: Color32, label: Option<&str>| {
+    let draw = |s: &Snap, col: Color32, label: Option<&str>, below: bool| {
         // the stored connector is in its occurrence's frame; re-place it
         let (at, axis) = match m.ctx.iter().find(|c| c.path == s.conn.occurrence) {
             Some(c) => (
@@ -447,19 +449,20 @@ pub fn glyphs(app: &CaseworkApp, ui: &Ui, rect: Rect) {
         p.circle_filled(a, 2.0, col);
         p.arrow(a, b - a, Stroke::new(1.8, col));
         if let Some(t) = label {
-            p.text(a + vec2(10.0, -12.0), egui::Align2::LEFT_BOTTOM, t, theme::prop(11.0), col);
+            let (off, al) = if below { (vec2(10.0, 10.0), egui::Align2::LEFT_TOP) } else { (vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM) };
+            p.text(a + off, al, t, theme::prop(11.0), col);
         }
     };
     if let Some(a) = &mu.a {
-        draw(a, theme::GREEN, Some("stays"));
+        draw(a, theme::GREEN, Some("stays"), false);
     }
     if let Some(b) = &mu.b {
-        draw(b, theme::ACCENT, Some("moves"));
+        draw(b, theme::ACCENT, Some("moves"), true);
     }
     if mu.picking().is_some() {
         if let Some(c) = app.stack.current() {
             if let Some(s) = snap_of(m, &c.key) {
-                draw(&s, theme::ORANGE, Some(&s.label));
+                draw(&s, theme::ORANGE, Some(&s.label), false);
             }
         }
     }

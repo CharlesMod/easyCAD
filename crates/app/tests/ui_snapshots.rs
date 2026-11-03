@@ -635,6 +635,24 @@ fn assembly_tree_active_mates_explode() {
     h.state_mut().activate(Vec::new());
     settle(&mut h);
 
+    // the move gizmo on the (unmated) Lid; a committed 10 mm lift and its undo
+    h.state_mut().select_occurrence(Some(lid.clone()), false);
+    h.state_mut().toggle_gizmo();
+    assert!(h.state().asm.gizmo, "the Lid is free to move");
+    h.run_steps(3);
+    save(&mut h, "assembly_gizmo");
+    let before = h.state().doc.data.occurrence(lid[0]).unwrap().transform;
+    casework_app::ui_gizmo::commit(h.state_mut(), &lid, glam::DAffine3::from_translation(glam::DVec3::Z * 10.0));
+    let after = h.state().doc.data.occurrence(lid[0]).unwrap().transform;
+    assert!((after.translation.z - before.translation.z - 10.0).abs() < 1e-6, "{before:?} -> {after:?}");
+    assert_eq!(h.state().doc.undo_label(), Some("Move Lid:1"));
+    h.state_mut().undo();
+    h.state_mut().asm.gizmo = false;
+    settle(&mut h);
+    // grounded parts refuse the gizmo with a reason
+    let base_path = occ_path(h.state(), "Base:1");
+    assert!(casework_app::ui_gizmo::blocked(h.state(), &base_path).is_some());
+
     // a revolute hinge along the front seam: Base stays, Lid swings open
     h.state_mut().open_mate(None);
     let a = front_edge(h.state(), "Base:1", true);

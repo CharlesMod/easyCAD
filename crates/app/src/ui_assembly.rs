@@ -33,6 +33,8 @@ pub struct AsmUi {
     /// Move gizmo shown on the selected occurrence.
     pub gizmo: bool,
     pub gdrag: Option<crate::ui_gizmo::GizmoDrag>,
+    /// Gizmo centre and arrow tips on screen (E2E state dump).
+    pub gizmo_screen: Option<(egui::Pos2, [egui::Pos2; 3])>,
     pub mates_collapsed: bool,
     /// Occurrence row being dragged onto another (reparent).
     pub tree_drag: Option<OccPath>,
@@ -71,7 +73,8 @@ pub fn display_xf(app: &CaseworkApp, c: &CtxBody) -> DAffine3 {
 /// Interference highlight: the pair shown in the report is drawn red.
 pub fn body_tint(app: &CaseworkApp, c: &CtxBody) -> Option<[f32; 4]> {
     let i = app.asm.interference.as_ref()?;
-    i.highlighted(c).then_some([0.86, 0.22, 0.18, 1.0])
+    // translucent so the overlap inside shows through
+    i.highlighted(c).then_some([0.86, 0.22, 0.18, 0.55])
 }
 
 pub fn occ_name(d: &DocData, path: &[OccurrenceId]) -> String {

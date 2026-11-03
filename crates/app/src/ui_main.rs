@@ -1422,7 +1422,13 @@ pub fn status_text(app: &CaseworkApp) -> String {
     let errs = m.result.errors().len();
     let n = app.view().features.len();
     if let Some(a) = &m.asm {
-        let occ = app.doc.data.all_occurrences().len();
+        let occ = app
+            .doc
+            .data
+            .all_occurrences()
+            .iter()
+            .filter(|(_, o, _)| !crate::adapters::is_anchor(&app.doc.data, o.id))
+            .count();
         let issues = a.result.issues.len();
         let mut s = match crate::ui_assembly::active_label(app) {
             Some(l) => format!("{l} · {n} feature{}", if n == 1 { "" } else { "s" }),

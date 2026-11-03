@@ -72,7 +72,22 @@ pub fn pick_label(m: &Output, k: &PickKey) -> (String, String) {
     let Some(b) = m.meshed(k.body) else {
         return ("?".into(), String::new());
     };
-    match k.kind {
+    // a placed body of another occurrence: say which one
+    if let Some(c) = m.ctx_body(k.body) {
+        let (label, _) = pick_label_local(b, k.kind);
+        let occ = c
+            .path
+            .last()
+            .and_then(|o| m.data.occurrence(*o))
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+        return (label, occ);
+    }
+    pick_label_local(b, k.kind)
+}
+
+fn pick_label_local(b: &crate::worker::MeshedBody, kind: PickKind) -> (String, String) {
+    match kind {
         PickKind::Body => (
             b.body.name.clone(),
             if b.body.reference {
@@ -203,15 +218,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         }
     }
 
-    // ------------------------------------------------ move gizmo
-    let gizmo_owns = crate::ui_gizmo::gizmo(app, ui, rect, &resp);
-
-    // ------------------------------------------------ click selection
     let mut popover_click = None;
-    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns {
-        let cur = app.stack.current().map(|c| c.key);
-        select(app, cur, mods.command || mods.shift);
-    }
     resp.context_menu(|ui| context_menu(app, ui));
 
     // ------------------------------------------------ GPU frame
@@ -251,6 +258,15 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
             theme::prop(13.0),
             theme::TEXT_MUTED,
         );
+    }
+
+    // ------------------------------------------------ move gizmo (over the image)
+    let gizmo_owns = crate::ui_gizmo::gizmo(app, ui, rect, &resp);
+
+    // ------------------------------------------------ click selection
+    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns {
+        let cur = app.stack.current().map(|c| c.key);
+        select(app, cur, mods.command || mods.shift);
     }
 
     // edge highlights (thick lines over the image)
@@ -526,10 +542,11 @@ fn build_frame(
         if dim {
             color[3] = if b.reference { 0.12 } else { 0.3 };
         }
+        let tinted = color[3] < 1.0 && !b.reference && !dim;
         bodies.push(DrawBody {
             mesh: m.clone(),
             color,
-            translucent: b.reference || dim,
+            translucent: b.reference || dim || tinted,
             colors: c.mb.colors.clone(),
             model: to_mat4(crate::ui_assembly::display_xf(app, c)),
         });
@@ -868,7 +885,7 @@ fn cube(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
 /// The "UNDER CURSOR" popover. Returns a clicked row.
 fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> Option<usize> {
     let p = app.hover_pos?;
-    if app.stack.len() < 2 || !rect.contains(p) {
+    if app.stack.len() < 2 || !rect.contains(p) || app.asm.gizmo_screen.is_some() {
         return None;
     }
     // appear after a short rest so plain moves stay uncluttered
@@ -882,7 +899,9 @@ fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> O
     let n = app.stack.len().min(8);
     let h = 52.0 + n as f32 * 34.0;
     // stay clear of the floating dialog card on the right
-    let right = if app.dialog.is_some() {
+    let right = if app.asm.mate.is_some() {
+        rect.right() - 16.0 - 340.0 - 8.0
+    } else if app.dialog.is_some() {
         rect.right() - 16.0 - app.dialog_card_w.max(300.0) - 8.0
     } else {
         rect.right()

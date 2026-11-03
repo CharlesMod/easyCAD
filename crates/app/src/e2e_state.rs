@@ -290,6 +290,7 @@ fn assembly(app: &CaseworkApp) -> Value {
         "mate_dialog": dialog,
         "selected": app.asm.sel.as_ref().map(|p| crate::ui_assembly::occ_name(d, p)),
         "gizmo": app.asm.gizmo,
+        "gizmo_screen": app.asm.gizmo_screen.map(|(o, t)| json!({ "origin": [o.x.round(), o.y.round()], "tips": t.iter().map(|p| [p.x.round(), p.y.round()]).collect::<Vec<_>>() })),
         "explode": app.explode,
         "explode_rect": rect_json(app.asm_explode_rect),
         "interference": interference,

@@ -98,6 +98,7 @@ fn delta(h: Handle, origin: Vec3, amount: f64) -> DAffine3 {
 
 /// Draw the gizmo and run its drags. Returns true while it owns the pointer.
 pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) -> bool {
+    app.asm.gizmo_screen = None;
     if !app.asm.gizmo || app.asm.mate.is_some() || app.dialog.is_some() {
         app.asm.gdrag = None;
         return false;
@@ -159,6 +160,7 @@ pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) 
         }
     }
     let active = app.asm.gdrag.as_ref().map(|g| g.handle);
+    app.asm.gizmo_screen = Some((o2, tips));
     // drag
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if let (Some(h), Some(p)) = (hot, resp.interact_pointer_pos()) {

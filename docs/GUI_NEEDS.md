@@ -71,6 +71,10 @@ today (adapter or limitation) and what would replace it.
     `solve_mates` to report per-mate the remaining free DOF direction (axis / plane)
     so the jog control can show it on the model.
 
+19. **Interference volume for display.** `Interference` has the volume but not the
+    common solid, so the GUI tints the whole pair red (translucent). *Want:*
+    `Interference.common: Option<Shape>` (world frame) to draw the overlap itself.
+
 ## Sketch
 
 12. **Offset constraint.** The GUI's offset makes new geometry pinned by
