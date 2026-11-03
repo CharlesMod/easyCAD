@@ -153,8 +153,73 @@ pub struct ViewportGpu {
     pub renders: u64,
     /// Draw calls in the last render (bodies outside the view add none).
     pub last_draws: usize,
+    /// Triangles in the last render.
+    pub last_tris: u64,
     /// Bytes uploaded for meshes so far (for the status bar / tests).
     pub uploaded_meshes: u64,
+    /// GPU timestamps around the 3D pass, when the device has them.
+    timer: Option<Timer>,
+}
+
+/// Timestamp queries at the start and end of the 3D pass, read back through a
+/// small ring of buffers (mapped a frame later, after egui submitted the work).
+struct Timer {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// 0 free, 1 written this frame, 2 mapping, 3 mapped
+    ring: Vec<(wgpu::Buffer, Arc<std::sync::atomic::AtomicU8>)>,
+    period_ns: f32,
+}
+
+impl Timer {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Timer> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("viewport timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let buf = |label, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: 16, usage, mapped_at_creation: false })
+        };
+        let resolve = buf("timestamp resolve", wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+        let ring = (0..4)
+            .map(|_| (buf("timestamp read", wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), Arc::default()))
+            .collect();
+        Some(Timer { queries, resolve, ring, period_ns: queue.get_timestamp_period() })
+    }
+
+    /// Collect finished readings and start mapping last frame's.
+    fn poll(&mut self, device: &wgpu::Device) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _ = device.poll(wgpu::PollType::Poll);
+        for (b, st) in &self.ring {
+            match st.load(SeqCst) {
+                1 => {
+                    st.store(2, SeqCst);
+                    let st = st.clone();
+                    b.slice(..).map_async(wgpu::MapMode::Read, move |r| st.store(if r.is_ok() { 3 } else { 0 }, SeqCst));
+                }
+                3 => {
+                    let t: Option<[u64; 2]> =
+                        b.slice(..).get_mapped_range().ok().map(|v| bytemuck::pod_read_unaligned(&v[..16]));
+                    b.unmap();
+                    st.store(0, SeqCst);
+                    if let Some([a, b]) = t.filter(|t| t[1] > t[0]) {
+                        crate::profiler::gpu_ms((b - a) as f32 * self.period_ns / 1e6);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A free readback slot for this frame's pass.
+    fn slot(&self) -> Option<usize> {
+        self.ring.iter().position(|(_, st)| st.load(std::sync::atomic::Ordering::SeqCst) == 0)
+    }
 }
 
 fn key(m: &Arc<Mesh>) -> usize {
@@ -164,7 +229,9 @@ fn key(m: &Arc<Mesh>) -> usize {
 impl ViewportGpu {
     /// Create the pipelines and register them with egui's renderer.
     pub fn install(rs: &egui_wgpu::RenderState) {
-        let gpu = ViewportGpu::new(&rs.device, &rs.adapter, rs.target_format);
+        let mut gpu = ViewportGpu::new(&rs.device, &rs.adapter, rs.target_format);
+        gpu.timer = Timer::new(&rs.device, &rs.queue);
+        crate::profiler::set_adapter(&rs.adapter.get_info(), gpu.timer.is_some());
         rs.renderer.write().callback_resources.insert(gpu);
     }
 
@@ -456,8 +523,10 @@ impl ViewportGpu {
             target: None,
             frame: 0,
             last: None,
+            timer: None,
             renders: 0,
             last_draws: 0,
+            last_tris: 0,
             uploaded_meshes: 0,
         }
     }
@@ -645,11 +714,17 @@ impl ViewportGpu {
         let size = [f.size_px[0].max(1), f.size_px[1].max(1)];
         let fresh = self.target.as_ref().is_some_and(|t| t.size == size)
             && self.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, f) || same_image(l, f));
+        if let Some(t) = self.timer.as_mut() {
+            t.poll(device);
+        }
         if fresh {
+            crate::profiler::viewport(None, 0, 0);
             return;
         }
+        let t0 = std::time::Instant::now();
         self.render(device, queue, encoder, f);
         self.last = Some(f.clone());
+        crate::profiler::viewport(Some(t0.elapsed().as_secs_f32() * 1000.0), self.last_draws, self.last_tris);
     }
 
     /// Render one frame into the offscreen target.
@@ -788,6 +863,7 @@ impl ViewportGpu {
         }
         queue.write_buffer(&self.draws, 0, &bytes);
 
+        let timing = self.timer.as_ref().and_then(|t| t.slot().map(|i| (t, i)));
         let t = self.target.as_ref().expect("target");
         let bg = f.background;
         let (view, resolve) = match &t.msaa_color {
@@ -818,11 +894,16 @@ impl ViewportGpu {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: timing.map(|(t, _)| wgpu::RenderPassTimestampWrites {
+                query_set: &t.queries,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         });
         pass.set_viewport(0.0, 0.0, t.size[0] as f32, t.size[1] as f32, 0.0, 1.0);
+        let mut tris = 0u64;
         pass.set_bind_group(0, &self.globals_bind, &[]);
         for (i, (p, k, what, _)) in list.iter().enumerate() {
             let pipe = match p {
@@ -859,8 +940,16 @@ impl ViewportGpu {
                     pass.set_vertex_buffer(0, g.vbuf.slice(..));
                     pass.set_index_buffer(g.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(s..s + n, 0, 0..1);
+                    tris += n as u64 / 3;
                 }
             }
+        }
+        drop(pass);
+        self.last_tris = tris;
+        if let Some((t, i)) = timing {
+            encoder.resolve_query_set(&t.queries, 0..2, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.ring[i].0, 0, 16);
+            t.ring[i].1.store(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 

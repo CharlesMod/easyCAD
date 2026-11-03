@@ -3,8 +3,54 @@
 use easycad_app::{native_options, EasyCadApp};
 use easycad_model::document::Document;
 
+/// Inside a distrobox/toolbox container that has no GPU Vulkan driver while the
+/// host has one, wgpu falls back to llvmpipe (software rendering on the CPU).
+/// Run the same binary on the host instead, with the same arguments and the
+/// easyCAD / XDG settings. `EASYCAD_NO_HOST=1` keeps it in the container.
+#[cfg(target_os = "linux")]
+fn relaunch_on_host() {
+    use std::path::Path;
+    let in_container = Path::new("/run/.containerenv").exists() || Path::new("/.dockerenv").exists();
+    if !in_container || std::env::var_os("EASYCAD_NO_HOST").is_some() || std::env::var_os("EASYCAD_ON_HOST").is_some() {
+        return;
+    }
+    let gpu_icd = |dir: &str| {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n.starts_with("nvidia") || n.starts_with("radeon") || n.starts_with("intel") && !n.contains("hasvk")
+        })
+    };
+    let host_has = ["/run/host/usr/share/vulkan/icd.d", "/run/host/etc/vulkan/icd.d"].iter().any(|d| gpu_icd(d));
+    let here_has = Path::new("/proc/driver/nvidia").exists()
+        && ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"].iter().any(|d| {
+            std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("nvidia"))
+        });
+    let exec = Path::new("/usr/bin/distrobox-host-exec");
+    if !host_has || here_has || !exec.exists() {
+        return;
+    }
+    let Ok(me) = std::env::current_exe() else { return };
+    let mut cmd = std::process::Command::new(exec);
+    cmd.arg("env").arg("EASYCAD_ON_HOST=1");
+    for (k, v) in std::env::vars() {
+        if k.starts_with("EASYCAD_") || k.starts_with("XDG_") || k.starts_with("RUST_") || k == "LP_NUM_THREADS" {
+            cmd.arg(format!("{k}={v}"));
+        }
+    }
+    cmd.arg(me).args(std::env::args().skip(1));
+    eprintln!("easycad: no GPU driver in this container; starting on the host (EASYCAD_NO_HOST=1 to stay)");
+    match cmd.status() {
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => eprintln!("easycad: could not start on the host ({e}); continuing here"),
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let arg = std::env::args().nth(1);
+    #[cfg(target_os = "linux")]
+    if !matches!(arg.as_deref(), Some("--smoke") | Some("--sample-board")) {
+        relaunch_on_host();
+    }
     if arg.as_deref() == Some("--smoke") {
         let dir = std::env::args()
             .nth(2)

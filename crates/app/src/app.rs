@@ -145,6 +145,8 @@ pub struct EasyCadApp {
     pub section_bbox: Option<easycad_model::occt::BBox>,
     /// Google Drive sync (inert unless the binary starts it).
     pub cloud: crate::cloud::Cloud,
+    /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
+    pub show_perf: bool,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -241,6 +243,7 @@ impl EasyCadApp {
             section: None,
             section_bbox: None,
             cloud: crate::cloud::Cloud::disabled(),
+            show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
         }
     }
 
@@ -1070,7 +1073,11 @@ impl EasyCadApp {
 
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let t0 = std::time::Instant::now();
+        crate::profiler::frame_start();
         self.now = ui.input(|i| i.time);
+        if ui.input(|i| i.key_pressed(egui::Key::F12)) {
+            self.show_perf = !self.show_perf;
+        }
         crate::viewport::gpu::set_hidden(!crate::widgets::window_visible(ui.ctx()));
         self.poll_worker();
         for n in self.cloud.poll(self.path.as_deref()) {
@@ -1464,11 +1471,16 @@ impl eframe::App for EasyCadApp {
         self.intercept_keys(ctx, raw_input);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if std::env::var_os("EASYCAD_DEBUG_REPAINT").is_some() {
             debug_repaint(ui.ctx());
         }
         self.frame(ui);
+        crate::profiler::app_ms(self.frame_ms, frame.info().cpu_usage.map(|s| s * 1000.0));
+        if self.show_perf {
+            let area = if self.viewport_rect.is_positive() { self.viewport_rect } else { ui.ctx().content_rect() };
+            crate::profiler::ui(ui.ctx(), area);
+        }
         if self.quit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }

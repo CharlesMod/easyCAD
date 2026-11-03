@@ -77,6 +77,22 @@ rewritten only when it changed; recovery copies hard-link the previous copy's bl
 `EASYCAD_DEBUG_REPAINT=1` prints frames per second, 3D renders and what requested
 each frame.
 
+## Performance overlay
+
+F12 (or `EASYCAD_PROFILE=1`) shows, top left of the viewport: the GPU adapter and API
+(an orange "software rendering" line means llvmpipe, not the GPU), the present mode, frames in
+the last second, a graph of frame gaps against 144 Hz and 60 Hz, and per frame: UI logic
+(`EasyCadApp::frame`), eframe's whole update, the 3D pass's CPU encode and its GPU time
+(timestamp queries, requested at device creation when the adapter has them), 3D renders vs
+image-cache hits, draws and triangles of the last render (`profiler.rs`). The overlay itself
+never asks for frames. `EASYCAD_PRESENT=immediate|mailbox|fifo` overrides vsync to see
+uncapped frame times. `tests/pan_perf.rs` times a pan of the sample at 2560×1440.
+
+Started inside a distrobox/toolbox container without a GPU Vulkan driver (wgpu would
+fall back to llvmpipe), the binary re-runs itself on the host through
+`distrobox-host-exec`, passing `EASYCAD_*`, `XDG_*` and `RUST_*`; `EASYCAD_NO_HOST=1`
+keeps it in the container.
+
 ## Google Drive sync
 
 File ▸ Settings ▸ Google Drive has **Sign in with Google**. It opens the browser

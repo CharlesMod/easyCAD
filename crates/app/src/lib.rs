@@ -8,6 +8,7 @@ pub mod dialogs;
 pub mod e2e_state;
 pub mod files;
 pub mod pickstack;
+pub mod profiler;
 pub mod recovery;
 pub mod sample;
 pub mod scope;
@@ -36,6 +37,32 @@ pub mod worker;
 
 pub use app::EasyCadApp;
 
+/// egui's default device setup, plus GPU timestamp queries when the adapter has
+/// them (the performance overlay's GPU times).
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    let base = setup.device_descriptor.clone();
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let mut d = base(adapter);
+        if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            d.required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        d
+    });
+    let mut cfg = eframe::egui_wgpu::WgpuConfiguration { wgpu_setup: WgpuSetup::CreateNew(setup), ..Default::default() };
+    // EASYCAD_PRESENT=immediate|mailbox|fifo, to see uncapped frame times
+    let mode = std::env::var("EASYCAD_PRESENT").ok();
+    cfg.surface.present_mode = match mode.as_deref() {
+        Some("immediate") => wgpu::PresentMode::AutoNoVsync,
+        Some("mailbox") => wgpu::PresentMode::Mailbox,
+        Some("fifo") => wgpu::PresentMode::Fifo,
+        _ => cfg.surface.present_mode,
+    };
+    crate::profiler::set_present(&format!("{:?}", cfg.surface.present_mode));
+    cfg
+}
+
 /// Native options used by the binary (wgpu, no depth in egui's pass, no MSAA: the
 /// viewport renders its own 4×MSAA target).
 pub fn native_options() -> eframe::NativeOptions {
@@ -52,6 +79,7 @@ pub fn native_options() -> eframe::NativeOptions {
             .with_min_inner_size([960.0, 600.0]),
         depth_buffer: 0,
         multisampling: 1,
+        wgpu_options: wgpu_options(),
         ..Default::default()
     }
 }
