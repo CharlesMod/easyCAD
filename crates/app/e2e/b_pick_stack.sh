@@ -12,19 +12,19 @@ check "pick stack lists several hits" '.stack.items | length >= 4'
 check "frontmost hit is the lid" '.stack.items[0] | test("@ Lid")'
 shot 00_hover
 
-# Tab until the current candidate is a face on Base facing up (the standoff top)
+# Tab until the current candidate is the standoff top (face provenance label)
 for i in $(seq 1 10); do
-    [ "$(st '.stack.items[.stack.index] | test("facing up @ Base")')" = true ] && break
+    [ "$(st '.stack.items[.stack.index] | test("Boss top · Standoffs @ Base")')" = true ] && break
     key Tab
 done
-check "Tab reaches the hidden standoff top" '.stack.index > 0 and (.stack.items[.stack.index] | test("facing up @ Base"))'
+check "Tab reaches the hidden standoff top" '.stack.index > 0 and (.stack.items[.stack.index] | test("Boss top · Standoffs @ Base"))'
 shot 01_tabbed
 
 key shift+Tab
-check "Shift+Tab steps back" '.stack.items[.stack.index] | test("facing up @ Base") | not'
+check "Shift+Tab steps back" '.stack.items[.stack.index] | test("Boss top · Standoffs @ Base") | not'
 key Tab
 click $X $Y
-check "click selects the hidden face" '.selection == ["Planar face · facing up @ Base"]'
+check "click selects the hidden face" '.selection == ["Boss top · Standoffs @ Base"]'
 move 330 760 0.5
 shot 02_selected
 

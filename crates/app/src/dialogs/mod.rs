@@ -345,9 +345,12 @@ fn sel_body(sel: &[PickKey], m: Option<&Output>) -> Option<BodyId> {
 pub fn face_label(m: Option<&Output>, k: &PickKey) -> String {
     match k.kind {
         PickKind::Face(f) => m
-            .and_then(|m| m.meshed(k.body))
-            .and_then(|b| b.faces.get(f as usize))
-            .map(crate::ui_viewport::face_desc)
+            .and_then(|m| crate::ui_viewport::provenance_label(m, k.body, f))
+            .or_else(|| {
+                m.and_then(|m| m.meshed(k.body))
+                    .and_then(|b| b.faces.get(f as usize))
+                    .map(crate::ui_viewport::face_desc)
+            })
             .unwrap_or_else(|| format!("face {f}")),
         _ => "face".into(),
     }

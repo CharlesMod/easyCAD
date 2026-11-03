@@ -68,10 +68,49 @@ pub fn edge_label(e: &EdgeInfo) -> (String, String) {
     }
 }
 
+/// What made a face, from the engine's provenance (GUI_NEEDS #8): "Boss top ·
+/// Standoffs", "Floor · Shell". `None` when the engine has no record.
+pub fn provenance_label(m: &Output, key: casework_model::feature::BodyId, f: u32) -> Option<String> {
+    use casework_model::assembly::ComponentId;
+    use casework_model::provenance::FaceRole;
+    let (regen, local, comp) = match m.ctx_body(key) {
+        Some(c) => (&m.asm.as_ref()?.result.component(c.component)?.regen, c.mb.body.id, c.component),
+        None => (&m.result, key, m.asm.as_ref().map(|a| a.active_comp).unwrap_or(ComponentId::ROOT)),
+    };
+    let o = regen.face_origin(local, f)?;
+    let info = m.meshed(key).and_then(|b| b.faces.get(f as usize));
+    let role = match (o.role, info) {
+        (FaceRole::Inner, Some(i)) if i.kind == SurfaceKind::Plane && i.normal.z > 0.99 => "floor",
+        (FaceRole::Inner, Some(i)) if i.kind == SurfaceKind::Plane && i.normal.z < -0.99 => "ceiling",
+        (r, _) => r.label(),
+    };
+    let mut c = role.chars();
+    let role: String = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    let feat = o
+        .feature
+        .and_then(|id| crate::scope::features(&m.data, comp).iter().find(|x| x.id == id))
+        .map(|f| f.name.clone());
+    Some(match feat {
+        Some(n) => format!("{role} · {n}"),
+        None => role,
+    })
+}
+
 pub fn pick_label(m: &Output, k: &PickKey) -> (String, String) {
     let Some(b) = m.meshed(k.body) else {
         return ("?".into(), String::new());
     };
+    // faces say what made them; the geometry goes in the right column
+    if let PickKind::Face(f) = k.kind {
+        if let Some(l) = provenance_label(m, k.body, f) {
+            let geo = b.faces.get(f as usize).map(face_label).map(|(g, _)| g).unwrap_or_default();
+            let right = match m.ctx_body(k.body) {
+                Some(c) => c.path.last().and_then(|o| m.data.occurrence(*o)).map(|o| o.name.clone()).unwrap_or_default(),
+                None => geo.split(" · ").last().unwrap_or("").to_string(),
+            };
+            return (l, right);
+        }
+    }
     // a placed body of another occurrence: say which one
     if let Some(c) = m.ctx_body(k.body) {
         let (label, _) = pick_label_local(b, k.kind);

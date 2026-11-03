@@ -11,11 +11,11 @@ check "lid hidden" '.hidden == ["Lid"]'
 # the floor is under the PCB reference: Tab to it
 move 705 525 0.8
 for i in $(seq 1 8); do
-    [ "$(st '.stack.items[.stack.index] | test("facing up @ Base")')" = true ] && break
+    [ "$(st '.stack.items[.stack.index] | test("(End face|Floor) · Floor @ Base")')" = true ] && break
     key Tab
 done
 click 705 525
-check "floor face selected" '.selection == ["Planar face · facing up @ Base"]'
+check "floor face selected" '(.selection | length) == 1 and (.selection[0] | test("(End face|Floor) · Floor @ Base"))'
 shot 00_floor
 
 key s

@@ -455,6 +455,10 @@ fn process(
         };
         Arc::new(casework_model::drawing::compute_with(&r.data, &src, d, dcache))
     });
+    // face provenance is lazy: fill it here, off the UI thread (pick-stack labels)
+    for b in &result.bodies {
+        let _ = result.face_origins.of(b.id);
+    }
     let mut prefix_bodies = HashMap::new();
     let active_comp = asm_out.as_ref().map(|a| a.2).unwrap_or(ComponentId::ROOT);
     for n in std::mem::take(&mut r.prefixes) {
