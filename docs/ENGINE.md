@@ -770,9 +770,13 @@ verified on load.
   and all countersinks are derived from head dimensions (`derived: true`).
 - STEP import goes through XCAF and keeps per-solid names and colours. A reference
   import is one locked body whose `Body::appearance()` lists sub-parts with their
-  names and colours. Non-reference imports give one named body per solid. STEP
-  export writes body and sub-part names and colours. Layers, face-level colours and
-  PMI are not read.
+  names and colours. Non-reference imports give one named body per solid. Face
+  colours (AP214 `STYLED_ITEM` / `OVER_RIDING_STYLED_ITEM` on a face) are read too
+  (`Shape::read_step_styled`). They land in `Appearance::face_color`, override the
+  part colour in `Body::face_colors` / `mesh_colors`, and are written back by STEP
+  export (`Shape::to_step_string_styled`). The fixture is
+  `crates/model/tests/data/face_colors.step`. Layers and PMI are not read, and
+  assembly imports (`StepTree`) keep part colours only.
 - The DXF reader has no SPLINE, ELLIPSE, blocks/INSERT or binary DXF; skipped
   entities are counted in `DxfDrawing::skipped`.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.

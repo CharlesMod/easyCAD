@@ -163,6 +163,15 @@ pub struct StepPart {
     pub color: Option<[f32; 3]>,
 }
 
+/// A STEP read through XCAF: leaf solids (direct children of `shape`, following
+/// `parts`) and each face's own colour (MapShapes face order of `shape`).
+#[derive(Clone, Debug)]
+pub struct StyledStep {
+    pub shape: Shape,
+    pub parts: Vec<StepPart>,
+    pub face_colors: Vec<Option<[f32; 3]>>,
+}
+
 /// An XCAF product structure (STEP assembly): parts carry a shape, assemblies carry
 /// placed instances of other nodes.
 #[derive(Clone, Debug, Default)]
@@ -686,12 +695,26 @@ impl Shape {
     /// Read a STEP with its assembly tree flattened to leaf solids, keeping each
     /// solid's name and colour. The compound's children follow `parts`.
     pub fn read_step_xcaf(data: &str) -> Result<(Shape, Vec<StepPart>)> {
-        let mut parts = Vec::new();
-        let s = wrap(raw::read_step_xcaf(data, &mut parts))?;
-        Ok((s, parts.into_iter().map(|p| StepPart { name: p.name, color: p.has_color.then_some([p.r, p.g, p.b]) }).collect()))
+        Shape::read_step_styled(data).map(|s| (s.shape, s.parts))
+    }
+    /// [`Shape::read_step_xcaf`] plus the colour each face carries of its own
+    /// (AP214 `STYLED_ITEM` on an `ADVANCED_FACE`), which overrides its part's.
+    pub fn read_step_styled(data: &str) -> Result<StyledStep> {
+        let (mut parts, mut rgba) = (Vec::new(), Vec::new());
+        let shape = wrap(raw::read_step_xcaf(data, &mut parts, &mut rgba))?;
+        Ok(StyledStep {
+            shape,
+            parts: parts.into_iter().map(|p| StepPart { name: p.name, color: p.has_color.then_some([p.r, p.g, p.b]) }).collect(),
+            face_colors: rgba.chunks_exact(4).map(|c| (c[3] > 0.0).then_some([c[0], c[1], c[2]])).collect(),
+        })
     }
     /// Write the direct children of this compound as named, coloured STEP parts.
     pub fn to_step_string_named(&self, parts: &[StepPart]) -> Result<String> {
+        self.to_step_string_styled(parts, &[])
+    }
+    /// As [`Shape::to_step_string_named`], also writing a colour on each face that has
+    /// one (`face_colors` follows the compound's face order; empty = none).
+    pub fn to_step_string_styled(&self, parts: &[StepPart], face_colors: &[Option<[f32; 3]>]) -> Result<String> {
         let raw_parts: Vec<raw::XcafPart> = parts
             .iter()
             .map(|p| {
@@ -699,7 +722,12 @@ impl Shape {
                 raw::XcafPart { name: p.name.clone(), r: c[0], g: c[1], b: c[2], has_color: p.color.is_some() }
             })
             .collect();
-        Ok(raw::write_step_xcaf(self.r(), &raw_parts)?)
+        let rgba: Vec<f32> = if face_colors.iter().any(|c| c.is_some()) {
+            face_colors.iter().flat_map(|c| c.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0])).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(raw::write_step_xcaf(self.r(), &raw_parts, &rgba)?)
     }
     /// Owning direct child of every face (MapShapes face order).
     pub fn face_owners(&self) -> Result<Vec<u32>> {

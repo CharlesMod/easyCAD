@@ -1770,8 +1770,19 @@ struct XcafCollect {
   BRep_Builder bb;
   TopoDS_Compound comp;
   rust::Vec<XcafPart> *parts;
+  // faces (placed) with a colour of their own (AP214 STYLED_ITEM on the face)
+  std::vector<std::pair<TopoDS_Shape, Quantity_Color>> faceColors;
 
-  void leaf(const TopoDS_Shape &shape, const std::string &name, bool hasC, const Quantity_Color &c) {
+  // `label`'s own shape `own` placed by `loc`: one part per solid
+  void leaf(const TDF_Label &label, const TopoDS_Shape &own, const TopLoc_Location &loc, const std::string &name, bool hasC,
+            const Quantity_Color &c) {
+    // per-face colours are sub-shape labels of the part, in its own frame
+    for (TopExp_Explorer fx(own, TopAbs_FACE); fx.More(); fx.Next()) {
+      TDF_Label fl;
+      Quantity_Color fc;
+      if (st->FindSubShape(label, fx.Current(), fl) && labelColor(ct, fl, fc)) faceColors.emplace_back(fx.Current().Moved(loc), fc);
+    }
+    TopoDS_Shape shape = own.Moved(loc);
     int k = 0;
     for (TopExp_Explorer ex(shape, TopAbs_SOLID); ex.More(); ex.Next()) {
       Quantity_Color sc = c;
@@ -1830,13 +1841,13 @@ struct XcafCollect {
     } else {
       TopoDS_Shape s = XCAFDoc_ShapeTool::GetShape(label);
       if (s.IsNull()) return;
-      leaf(s.Moved(loc), name, myHas, myC);
+      leaf(label, s, loc, name, myHas, myC);
     }
   }
 };
 } // namespace
 
-std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts) {
+std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts, rust::Vec<float> &face_rgba) {
   return withStepLock([&] {
     Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
     Handle(TDocStd_Document) doc;
@@ -1859,11 +1870,25 @@ std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts
     for (int i = 1; i <= roots.Length(); ++i) col.visit(roots.Value(i), TopLoc_Location(), "", false, grey, 0);
     app->Close(doc);
     if (parts.empty()) fail("STEP file contains no solids");
+    auto fm = mapOf(col.comp, TopAbs_FACE);
+    std::vector<float> rgba(static_cast<size_t>(4 * fm.Extent()), 0.0f);
+    for (const auto &fc : col.faceColors) {
+      int idx = fm.FindIndex(fc.first);
+      if (idx <= 0) continue;
+      double r, g, b;
+      fc.second.Values(r, g, b, Quantity_TOC_sRGB);
+      float *o = &rgba[static_cast<size_t>(4 * (idx - 1))];
+      o[0] = static_cast<float>(r);
+      o[1] = static_cast<float>(g);
+      o[2] = static_cast<float>(b);
+      o[3] = 1.0f;
+    }
+    for (float v : rgba) face_rgba.push_back(v);
     return wrap(col.comp);
   });
 }
 
-rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts) {
+rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts, rust::Slice<const float> face_rgba) {
   return withStepLock([&] {
     requireShape(c, "write_step_xcaf");
     Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
@@ -1872,12 +1897,32 @@ rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts) 
     Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     size_t i = 0;
+    std::vector<TDF_Label> partLabels;
     for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++i) {
       TDF_Label l = st->AddShape(it.Value(), Standard_False);
+      partLabels.push_back(l);
       if (i < parts.size()) {
         const XcafPart &p = parts[i];
         TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(p.name).c_str()));
         if (p.has_color) ct->SetColor(l, Quantity_Color(p.r, p.g, p.b, Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+      }
+    }
+    // face colours (4 floats per face of `c` in MapShapes order, alpha 0 = none),
+    // written as STYLED_ITEMs on the faces
+    if (!face_rgba.empty()) {
+      auto fm = mapOf(c.s, TopAbs_FACE);
+      if (face_rgba.size() != static_cast<size_t>(4 * fm.Extent())) fail("write_step_xcaf: face colours do not match the face count");
+      size_t k = 0;
+      for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++k) {
+        const TDF_Label &l = partLabels[k];
+        for (TopExp_Explorer fx(it.Value(), TopAbs_FACE); fx.More(); fx.Next()) {
+          int idx = fm.FindIndex(fx.Current());
+          if (idx <= 0) continue;
+          const float *v = &face_rgba[static_cast<size_t>(4 * (idx - 1))];
+          if (v[3] <= 0.0f) continue;
+          TDF_Label fl = st->AddSubShape(l, fx.Current());
+          if (!fl.IsNull()) ct->SetColor(fl, Quantity_Color(v[0], v[1], v[2], Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+        }
       }
     }
     Interface_Static::SetCVal("write.step.unit", "MM");

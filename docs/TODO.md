@@ -46,7 +46,8 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [x] Parts library rows marked TODO: verified against ISO 4762/7380-1/10642/273, ASME B18.3/B18.22.1/B18.2.8
       and vendor tables (ruthex inserts, EJOT PT); #2-56 rows and the B18.2.8 inch close/normal/loose classes added.
       Still marked: shortest ISO 7380-1 lengths, #6-32/#10-32 inch inserts, M2/M2.5 counterbore depths (no source).
-- [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).
+- [x] Per-face STEP colours: read, shown and re-exported; fixture `crates/model/tests/data/face_colors.step`
+      (OCCT XCAF; the test also reads a plain-`STYLED_ITEM` variant). Assembly imports keep part colours only.
 - [ ] Closed loops of mates are checked, not solved.
 - [x] Pattern/mirror of whole-body features: fillets, chamfers and drafts follow the copies (selectors moved
       onto each instance); whole-body selectors, shell, split and joints get a precise "why not" error.
