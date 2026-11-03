@@ -168,7 +168,7 @@ pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) 
         }
     }
     let mut owns = app.asm.gdrag.is_some() || (hot.is_some() && pointer.is_some_and(|p| rect.contains(p)));
-    if let Some(g) = app.asm.gdrag.clone() {
+    if let Some(mut g) = app.asm.gdrag.clone() {
         if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
             let raw = match g.handle {
                 Handle::Move(i) => {
@@ -196,6 +196,7 @@ pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) 
                 Handle::Turn(_) => 15.0,
             };
             let amount = if shift { (raw * 10.0).round() / 10.0 } else { (raw / step).round() * step };
+            g.amount = amount;
             if let Some(gd) = app.asm.gdrag.as_mut() {
                 gd.amount = amount;
             }
