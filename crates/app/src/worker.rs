@@ -50,6 +50,9 @@ pub struct Request {
     pub active: OccPath,
     /// Assemblies: explode amount 0..1 (display only).
     pub explode: f32,
+    /// Section view: (point, normal) in the view frame; bodies keep what is behind
+    /// the plane and get cap faces.
+    pub cut: Option<(DVec3, DVec3)>,
 }
 
 /// One solid's cut at the section plane, as triangles in plane coordinates.
@@ -116,6 +119,8 @@ pub struct Output {
     pub asm: Option<AsmView>,
     /// Context bodies can be picked (the root is active).
     pub ctx_pickable: bool,
+    /// Section view caps: (mesh, mesh frame -> view frame).
+    pub caps: Vec<(Arc<Mesh>, DAffine3)>,
 }
 
 impl Output {
@@ -263,6 +268,7 @@ impl Worker {
             section: None,
             active: Vec::new(),
             explode: 0.0,
+            cut: None,
         })
     }
 
@@ -588,6 +594,35 @@ fn process(
             explode: r.explode,
         });
     }
+    let mut caps = Vec::new();
+    let (mut bodies, mut picker) = (bodies, picker);
+    let mut ctx = ctx;
+    if let Some((o, n)) = r.cut {
+        // section view (GUI_NEEDS #9): keep what is behind the plane, add the caps
+        for b in &mut bodies {
+            if let Some((mb, cap)) = cut_body(&b.body, o, n, r.quality) {
+                *b = mb;
+                if let Some(c) = cap {
+                    // a hair towards the viewer: the kept half has its own face there
+                    caps.push((c, DAffine3::from_translation(n * 0.05)));
+                }
+            }
+        }
+        picker = Arc::new(Picker::new(
+            bodies.iter().filter_map(|b| b.mesh.as_ref().map(|m| (b.body.id, &**m))),
+        ));
+        for c in &mut ctx {
+            let inv = c.xf.inverse();
+            let (lo, ln) = (inv.transform_point3(o), inv.transform_vector3(n));
+            if let Some((mb, cap)) = cut_body(&c.mb.body, lo, ln, r.quality) {
+                c.picker = mb.mesh.as_ref().map(|m| Arc::new(BodyPicker::new(mb.body.id, m)));
+                c.mb = mb;
+                if let Some(cm) = cap {
+                    caps.push((cm, DAffine3::from_translation(n * 0.05) * c.xf));
+                }
+            }
+        }
+    }
     Output {
         id: r.id,
         purpose: r.purpose,
@@ -604,7 +639,36 @@ fn process(
         ctx,
         asm,
         ctx_pickable,
+        caps,
     }
+}
+
+/// One body cut at a plane: the kept half (meshed, with its topology) and the cap.
+fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
+    let sv = b.section_view(o, n, q).ok()?;
+    let kept = match sv.kept {
+        Some(k) => k,
+        // all of it is in front of the plane: nothing left to show
+        None => {
+            return Some((
+                MeshedBody { body: b.clone(), mesh: None, error: None, colors: None, faces: Vec::new(), edges: Vec::new() },
+                None,
+            ))
+        }
+    };
+    let mesh = kept.mesh_quality(q).ok();
+    Some((
+        MeshedBody {
+            faces: kept.shape().faces().unwrap_or_default(),
+            edges: kept.shape().edges().unwrap_or_default(),
+            mesh,
+            error: None,
+            colors: None,
+            body: kept,
+        },
+        // references (a PCB) are cut but get no cap: they draw translucent
+        if b.reference { None } else { sv.cap_mesh },
+    ))
 }
 
 /// The other occurrences' bodies, placed in the view frame (with the explode).

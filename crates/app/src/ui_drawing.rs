@@ -342,6 +342,7 @@ pub fn sync(app: &mut CaseworkApp) {
                 section: None,
                 active: Vec::new(),
                 explode: 0.0,
+                cut: None,
             });
         }
     }

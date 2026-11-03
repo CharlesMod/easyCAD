@@ -109,6 +109,12 @@ pub struct SketchSession {
     pub drag: Option<PointId>,
     pub cursor: DVec2,
     pub projected: Vec<Vec<DVec2>>,
+    /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
+    /// sketch coordinates; `projected` then holds the kept half's edges only.
+    pub slice_caps: Vec<[DVec2; 3]>,
+    pub slice_outline: Vec<Vec<DVec2>>,
+    /// The state `projected` was computed for (slice on / off).
+    pub projected_slice: Option<bool>,
     pub dirty: bool,
 }
 
@@ -149,6 +155,9 @@ impl SketchSession {
             drag: None,
             cursor: DVec2::ZERO,
             projected: Vec::new(),
+            slice_caps: Vec::new(),
+            slice_outline: Vec::new(),
+            projected_slice: None,
             dirty: false,
         };
         s.resolve();
@@ -1367,9 +1376,19 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
     let crate::app::Mode::Sketch(s) = &mut app.mode else {
         return;
     };
-    if s.projected.is_empty() {
+    if s.projected_slice != Some(s.slice) {
         if let Some(m) = &model {
-            s.projected = project_edges(m, &s.sketch.plane);
+            if s.slice {
+                let (proj, caps, outline) = slice_model(m, &s.sketch.plane);
+                s.projected = proj;
+                s.slice_caps = caps;
+                s.slice_outline = outline;
+            } else {
+                s.projected = project_edges(m, &s.sketch.plane);
+                s.slice_caps.clear();
+                s.slice_outline.clear();
+            }
+            s.projected_slice = Some(s.slice);
         }
     }
     let mut finish = false;
@@ -1439,6 +1458,32 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
     } else if cancel {
         app.cancel_sketch();
     }
+}
+
+type Slice = (Vec<Vec<DVec2>>, Vec<[DVec2; 3]>, Vec<Vec<DVec2>>);
+
+/// The bodies cut at the sketch plane (GUI_NEEDS #9): the kept half's edges, the
+/// cut faces as triangles and their outlines, all in sketch coordinates.
+fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
+    use casework_model::regen::MeshQuality;
+    let (mut edges, mut caps, mut outline) = (Vec::new(), Vec::new(), Vec::new());
+    let loc = |p: glam::DVec3| plane.to_local(p);
+    for b in m.bodies.iter().filter(|b| !b.body.reference) {
+        let Ok(sv) = b.body.section_view(plane.origin, plane.normal, MeshQuality::Preview) else {
+            continue;
+        };
+        if let Some(mesh) = sv.kept.as_ref().and_then(|k| k.mesh_quality(MeshQuality::Preview).ok()) {
+            for e in &mesh.edges {
+                edges.push(e.points.iter().map(|p| loc(glam::Vec3::from_array(*p).as_dvec3())).collect());
+            }
+        }
+        if let Some(cm) = &sv.cap_mesh {
+            let p = |i: u32| loc(glam::Vec3::from_array(cm.positions[i as usize]).as_dvec3());
+            caps.extend(cm.indices.iter().map(|t| [p(t[0]), p(t[1]), p(t[2])]));
+        }
+        outline.extend(sv.outline.iter().map(|l| l.iter().map(|q| loc(*q)).collect()));
+    }
+    (edges, caps, outline)
 }
 
 fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Vec<Vec<DVec2>> {
@@ -1643,11 +1688,8 @@ fn right_panel(s: &mut SketchSession, ui: &mut Ui) -> bool {
     theme::section_label(ui, "Options");
     ui.checkbox(&mut s.show_constraints, "Show constraints");
     ui.checkbox(&mut s.snap, "Snap to grid and geometry");
-    ui.add_enabled(
-        false,
-        egui::Checkbox::new(&mut s.slice, "Slice body at sketch plane"),
-    )
-    .on_disabled_hover_text("Needs a section API in the engine (GUI_NEEDS)");
+    ui.checkbox(&mut s.slice, "Slice body at sketch plane")
+        .on_hover_text("Show the bodies cut at this plane: the cut faces filled, the half behind the plane in outline");
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         let r = ui.add_sized(
             vec2(ui.available_width(), 40.0),
@@ -2263,9 +2305,26 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     } else {
         theme::hex(0x3a3f47)
     };
+    // the cut faces when sliced (under the edges)
+    if !s.slice_caps.is_empty() {
+        let mut mesh = egui::Mesh::default();
+        let col = Color32::from_rgba_unmultiplied(240, 136, 62, 46);
+        for t in &s.slice_caps {
+            let i = mesh.vertices.len() as u32;
+            for q in t {
+                mesh.colored_vertex(to(*q), col);
+            }
+            mesh.add_triangle(i, i + 1, i + 2);
+        }
+        p.add(egui::Shape::mesh(mesh));
+    }
     for pl in &s.projected {
         let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
         p.add(egui::Shape::line(pts, Stroke::new(1.0, proj_col)));
+    }
+    for pl in &s.slice_outline {
+        let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.4, theme::ORANGE_SOFT)));
     }
     // profile fill
     for pr in s.sketch.profiles().profiles {

@@ -142,6 +142,21 @@ pub struct CaseworkApp {
     pub asm: crate::ui_assembly::AsmUi,
     /// Explode slider rect (E2E state dump).
     pub asm_explode_rect: Option<egui::Rect>,
+    /// Section view (view toolbar).
+    pub section: Option<SectionUi>,
+    /// Bounds of the uncut model, for placing the section plane.
+    pub section_bbox: Option<casework_model::occt::BBox>,
+}
+
+/// Section view settings: a plane across the model along one axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SectionUi {
+    /// 0 = X, 1 = Y, 2 = Z.
+    pub axis: usize,
+    /// Position across the model's bounds, 0..1.
+    pub at: f32,
+    /// Keep the other half.
+    pub flip: bool,
 }
 
 /// What a file chooser does with the chosen path.
@@ -225,6 +240,8 @@ impl CaseworkApp {
             explode: 0.0,
             asm: Default::default(),
             asm_explode_rect: None,
+            section: None,
+            section_bbox: None,
         }
     }
 
@@ -261,6 +278,31 @@ impl CaseworkApp {
 
     pub fn request_model(&mut self) {
         self.model_dirty = true;
+    }
+
+    /// The section plane (point, normal) in the view frame, when on.
+    pub fn section_cut(&self) -> Option<(glam::DVec3, glam::DVec3)> {
+        let s = self.section?;
+        let bb = self.section_bbox.or_else(|| self.model.as_ref()?.bbox)?;
+        let mut n = glam::DVec3::ZERO;
+        n[s.axis] = if s.flip { -1.0 } else { 1.0 };
+        let mut p = bb.center();
+        p[s.axis] = bb.min[s.axis] + (bb.max[s.axis] - bb.min[s.axis]) * s.at as f64;
+        Some((p, n))
+    }
+
+    /// Section on / off; it starts across the middle, the kept half away from the
+    /// viewer, on the horizontal axis most along the view.
+    pub fn toggle_section(&mut self) {
+        if self.section.take().is_none() {
+            let f = self.camera.forward();
+            // a vertical cut shows the wall profile; Z only when looking straight down
+            let axis = if f.z.abs() > 0.95 { 2 } else if f.x.abs() > f.y.abs() { 0 } else { 1 };
+            self.section_bbox = self.model.as_ref().and_then(|m| m.bbox);
+            // normal towards the viewer: what stays is behind the plane
+            self.section = Some(SectionUi { axis, at: 0.5, flip: f[axis] > 0.0 });
+        }
+        self.request_model();
     }
 
     /// The component being edited (`ROOT` unless a component is active).
@@ -310,6 +352,7 @@ impl CaseworkApp {
             section: None,
             active: self.active.clone(),
             explode: self.explode,
+            cut: self.section_cut(),
         });
         self.model_dirty = false;
     }
@@ -362,6 +405,7 @@ impl CaseworkApp {
                     section,
                     active: self.active.clone(),
                     explode: self.explode,
+                    cut: self.section_cut(),
                 });
             }
             None => {
@@ -887,6 +931,7 @@ impl CaseworkApp {
         self.fit_pending = true;
         self.active = Vec::new();
         self.explode = 0.0;
+        self.section = None;
         self.asm = Default::default();
         self.request_model();
     }

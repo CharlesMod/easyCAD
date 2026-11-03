@@ -100,6 +100,8 @@ impl MateUi {
             angle: casework_model::params::Expr::new(crate::dialogs::fmt((self.angle * 10.0).round() / 10.0)),
             distance: casework_model::params::Expr::new(crate::dialogs::fmt((self.distance * 100.0).round() / 100.0)),
             suppressed: false,
+            angle_limits: None,
+            distance_limits: None,
         })
     }
 

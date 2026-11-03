@@ -746,3 +746,35 @@ fn assembly_tree_active_mates_explode() {
     h.run_steps(4);
     save(&mut h, "assembly_bom");
 }
+
+#[test]
+fn section_view_and_sketch_slice() {
+    let _serial = serial();
+    let mut h = harness(casework_app::sample::sensor_node());
+    h.state_mut().toggle_section();
+    settle(&mut h);
+    {
+        let app = h.state();
+        let m = app.model.as_ref().unwrap();
+        assert!(!m.caps.is_empty(), "cut faces");
+        assert!(app.section_cut().is_some());
+    }
+    let img = save(&mut h, "section_view");
+    assert_viewport_rendered(&img, h.state().viewport_rect.shrink(60.0));
+    h.state_mut().toggle_section();
+    settle(&mut h);
+    assert!(h.state().model.as_ref().unwrap().caps.is_empty());
+    // a sketch half way up the walls, sliced
+    {
+        let app = h.state_mut();
+        let plane = casework_model::geom::Plane::XY.offset(12.0);
+        let mut s = casework_app::sketch_mode::SketchSession::new_on(plane, &app.doc.data);
+        s.slice = true;
+        app.mode = casework_app::app::Mode::Sketch(Box::new(s));
+    }
+    h.run_steps(4);
+    if let casework_app::app::Mode::Sketch(s) = &h.state().mode {
+        assert!(!s.slice_caps.is_empty() && !s.slice_outline.is_empty(), "the walls cut at z 12");
+    }
+    save(&mut h, "sketch_slice");
+}

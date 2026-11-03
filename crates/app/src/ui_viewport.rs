@@ -562,6 +562,16 @@ fn build_frame(
             });
         }
     }
+    // section caps (the cut faces)
+    for (cap, xf) in &shown.caps {
+        bodies.push(DrawBody {
+            mesh: cap.clone(),
+            color: srgba(theme::ORANGE_SOFT),
+            translucent: false,
+            colors: None,
+            model: to_mat4(*xf),
+        });
+    }
     // assemblies: the other occurrences (dimmed while a component is being edited)
     let dim = shown.asm.as_ref().is_some_and(|a| !a.active.is_empty());
     for c in &shown.ctx {
@@ -813,7 +823,40 @@ fn filter_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
         });
 }
 
+/// Section controls above the view toolbar: axis, position, flip.
+fn section_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+    let Some(mut s) = app.section else { return };
+    let w = 330.0;
+    let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 100.0);
+    egui::Area::new(egui::Id::unique("section_bar"))
+        .order(egui::Order::Middle)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            overlay_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
+                    for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
+                        if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() {
+                            s.axis = i;
+                        }
+                    }
+                    ui.add_sized(vec2(130.0, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
+                        .on_hover_text("Where the plane cuts, across the model");
+                    if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
+                        s.flip = !s.flip;
+                    }
+                });
+            });
+        });
+    if app.section != Some(s) {
+        app.section = Some(s);
+        app.request_model();
+    }
+}
+
 fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+    section_bar(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
     let w = if asm { 560.0 } else { 380.0 };
     let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 54.0);
@@ -827,13 +870,14 @@ fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                     if widgets::icon_button(ui, Icon::Fit, 30.0, "Fit all (F)", true).clicked() {
                         app.fit_all();
                     }
-                    widgets::icon_button(
-                        ui,
-                        Icon::Section,
-                        30.0,
-                        "Section view (needs engine section API)",
-                        false,
-                    );
+                    let on = app.section.is_some();
+                    let r = widgets::icon_button(ui, Icon::Section, 30.0, "Section view: cut the model at a plane", true);
+                    if on {
+                        ui.painter().rect_stroke(r.rect, 6.0, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
+                    }
+                    if r.clicked() {
+                        app.toggle_section();
+                    }
                     let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
                     ui.painter().vline(
                         r.center().x,
