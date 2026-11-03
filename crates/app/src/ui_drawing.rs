@@ -1284,15 +1284,15 @@ fn click(
                 && q.y <= v.max.y + 3.0
         })
         .map(|v| v.id);
+    // the engine's reference for the picked view edge (GUI_NEEDS #16: works on
+    // placed instances of assembly views too); the curve kind when the model has it
     let hit = nearest_edge(r, q, tol).and_then(|(vid, e, _)| {
-        let (body, idx) = e.source?;
-        let info = model?.meshed(body)?.edges.get(idx as usize)?.clone();
-        Some((vid, body, info))
+        let rf = DimRef::from_view_edge(e)?;
+        let kind = e.source.and_then(|(body, idx)| {
+            Some(model?.meshed(body)?.edges.get(idx as usize)?.kind)
+        });
+        Some(Hit { vid, rf, kind, body: e.source.map(|s| s.0) })
     });
-    let to_ref = |body: BodyId, info: &casework_model::occt::EdgeInfo| DimRef::Edge {
-        body,
-        edge: EdgeSelector::from_pick(info),
-    };
     let had_hit = hit.is_some();
     let mut add: Option<AnnotationKind> = None;
     match d.tool {
@@ -1310,7 +1310,7 @@ fn click(
             return;
         }
         1 => match (d.picks.pop(), hit) {
-            (Some((pv, a, at)), Some((vid, body, info))) if pv == vid => {
+            (Some((pv, a, at)), Some(Hit { vid, rf, .. })) if pv == vid => {
                 let dx = (q - at).abs();
                 let kind = if shift || dx.y > dx.x {
                     LinearKind::Vertical
@@ -1320,7 +1320,7 @@ fn click(
                 add = Some(AnnotationKind::Linear {
                     view: vid,
                     a,
-                    b: Some(to_ref(body, &info)),
+                    b: Some(rf.clone()),
                     kind,
                     offset: 10.0,
                 });
@@ -1342,50 +1342,50 @@ fn click(
                     offset,
                 });
             }
-            (_, Some((vid, body, info))) if info.kind == CurveKind::Line => {
-                d.picks.push((vid, to_ref(body, &info), q))
+            (_, Some(Hit { vid, rf, kind: hk, .. })) if hk.is_none_or(|k| k == CurveKind::Line) => {
+                d.picks.push((vid, rf.clone(), q))
             }
             _ => {}
         },
         2 => {
-            if let Some((vid, body, info)) = hit {
+            if let Some(Hit { vid, rf, .. }) = hit {
                 match d.picks.pop() {
                     Some((pv, origin, _)) if pv == vid => {
                         let axis = if shift { SheetAxis::Y } else { SheetAxis::X };
                         add = Some(AnnotationKind::Ordinate {
                             view: vid,
                             origin,
-                            target: to_ref(body, &info),
+                            target: rf.clone(),
                             axis,
                             offset: 10.0,
                         });
                     }
-                    _ => d.picks.push((vid, to_ref(body, &info), q)),
+                    _ => d.picks.push((vid, rf.clone(), q)),
                 }
             }
         }
         3 | 8 => {
-            if let Some((vid, body, info)) = hit.filter(|h| h.2.kind == CurveKind::Circle) {
+            if let Some(Hit { vid, rf, .. }) = hit.filter(|h| h.kind.is_none_or(|k| k == CurveKind::Circle)) {
                 add = Some(if d.tool == 3 {
                     AnnotationKind::Radius {
                         view: vid,
-                        circle: to_ref(body, &info),
+                        circle: rf.clone(),
                         diameter: !shift,
                         leader_deg: 45.0,
                     }
                 } else {
                     AnnotationKind::CenterMark {
                         view: vid,
-                        circle: to_ref(body, &info),
+                        circle: rf.clone(),
                     }
                 });
             }
         }
         4 | 9 => {
-            if let Some((vid, body, info)) = hit.filter(|h| h.2.kind == CurveKind::Line) {
+            if let Some(Hit { vid, rf, .. }) = hit.filter(|h| h.kind.is_none_or(|k| k == CurveKind::Line)) {
                 match d.picks.pop() {
                     Some((pv, a, _)) if pv == vid => {
-                        let b = to_ref(body, &info);
+                        let b = rf.clone();
                         add = Some(if d.tool == 4 {
                             AnnotationKind::Angle {
                                 view: vid,
@@ -1397,7 +1397,7 @@ fn click(
                             AnnotationKind::Centerline { view: vid, a, b }
                         });
                     }
-                    _ => d.picks.push((vid, to_ref(body, &info), q)),
+                    _ => d.picks.push((vid, rf.clone(), q)),
                 }
             }
         }
@@ -1417,11 +1417,11 @@ fn click(
                     position: q,
                 })
             }
-            (_, Some((vid, body, info))) => d.picks.push((vid, to_ref(body, &info), q)),
+            (_, Some(Hit { vid, rf, .. })) => d.picks.push((vid, rf.clone(), q)),
             _ => {}
         },
         7 => {
-            if let Some((vid, body, _)) = hit {
+            if let Some(Hit { vid, body: Some(body), .. }) = hit {
                 add = Some(AnnotationKind::Balloon {
                     view: vid,
                     body,
@@ -1478,6 +1478,14 @@ pub fn commit_now(app: &mut CaseworkApp) -> Result<(), DocError> {
 /// The view an annotation belongs to (notes have none).
 pub fn annotation_view(k: &AnnotationKind) -> Option<ViewId> {
     k.view()
+}
+
+/// A view edge under the cursor.
+struct Hit {
+    vid: ViewId,
+    rf: DimRef,
+    kind: Option<CurveKind>,
+    body: Option<BodyId>,
 }
 
 /// Standard-scale third-angle layout for model extents on a sheet.
