@@ -777,6 +777,18 @@ verified on load.
 
 ## Changelog for GUI
 
+- **Sketch editing (GUI_NEEDS #12–14).** New `Constraint::Offset { source, target,
+  distance }` (exhaustive matches need an arm; it lowers to parallel + distance for
+  lines and concentric + radius offset for arcs/circles) and module `sketch_edit`:
+  `Sketch::{chain_from, offset_chain, split_at, trim, fillet_corner,
+  remove_entities -> Remap, project_edge}`, `Constraint::{points, entities, remap}`,
+  `Geom::{points, ends}`. `offset_chain` grows closed loops for positive distances
+  (left of travel for open chains), joins at the offset carriers' intersections and
+  refuses where a corner arc would be needed. `trim` keeps new ends on the cutting
+  curve; `fillet_corner` keeps the virtual corner on both lines; `project_edge`
+  gives exact lines / facing circles and arcs, edge-on circles as lines, and fixed
+  polylines otherwise.
+
 - **Face provenance and section view (GUI_NEEDS #8, #9).** New module
   `provenance` (`FaceOrigin`, `FaceRole`, `FaceOrigins`), `RegenResult.face_origins`
   + `RegenResult::face_origin(body, face)`, `regen::SectionView` +

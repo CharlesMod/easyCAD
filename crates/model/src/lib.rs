@@ -18,5 +18,6 @@ pub mod provenance;
 pub mod regen;
 pub mod select;
 pub mod sketch;
+pub mod sketch_edit;
 
 pub use occt;

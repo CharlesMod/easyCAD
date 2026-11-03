@@ -57,6 +57,10 @@ pub enum Constraint {
     Diameter(EntityId, Expr),
     /// Signed angle (degrees, CCW) from the first line's direction to the second's.
     Angle(EntityId, EntityId, Expr),
+    /// `target[i]` is `source[i]` offset by `distance`: lines stay parallel at that
+    /// distance, arcs/circles concentric with the radius changed by it (the side is
+    /// the one the target is on). Build both with [`Sketch::offset_chain`].
+    Offset { source: Vec<EntityId>, target: Vec<EntityId>, distance: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -290,6 +294,8 @@ enum Eq {
     PointLine(usize, usize, usize, f64),
     Length(usize, usize, f64),
     Radius(Rad, f64),
+    /// `rad(target) - rad(source) = v`.
+    RadiusOffset(Rad, Rad, f64),
     Angle([usize; 4], f64),
     /// Implicit: arc end on the arc's circle.
     ArcEnd(usize, usize, usize),
@@ -458,6 +464,31 @@ impl System {
                     let ([a, b], [c, dd]) = (line(i, *l1)?, line(i, *l2)?);
                     Eq::Angle([a, b, c, dd], ev(d)?.to_radians())
                 }
+                C::Offset { source, target, distance } => {
+                    if source.len() != target.len() {
+                        return Err(bad(i, "offset needs as many targets as sources"));
+                    }
+                    let d = ev(distance)?.abs();
+                    for (s0, t0) in source.iter().zip(target) {
+                        match (is_line(*s0), is_line(*t0)) {
+                            (true, true) => {
+                                let ([a, b], [c, dd]) = (line(i, *s0)?, line(i, *t0)?);
+                                eqs.push(Eq::Parallel([a, b, c, dd]));
+                                eqs.push(Eq::PointLine(c, a, b, d));
+                            }
+                            (false, false) => {
+                                let ((c1, r1), (c2, r2)) = (circ(i, *s0)?, circ(i, *t0)?);
+                                if c1 != c2 {
+                                    eqs.push(Eq::Coincident(c1, c2));
+                                }
+                                let grow = rad(&x0, r2) >= rad(&x0, r1);
+                                eqs.push(Eq::RadiusOffset(r1, r2, if grow { d } else { -d }));
+                            }
+                            _ => return Err(bad(i, "offset pairs a line with a line and an arc/circle with an arc/circle")),
+                        }
+                    }
+                    continue;
+                }
             });
         }
         Ok(System { n_points, circle_vars, eqs })
@@ -541,6 +572,7 @@ impl System {
                 Eq::PointLine(q, a, b, v) => r.push(line_dist(q, a, b).abs() - v),
                 Eq::Length(a, b, v) => r.push(dir(a, b).length() - v),
                 Eq::Radius(rr, v) => r.push(rad(x, rr) - v),
+                Eq::RadiusOffset(r1, r2, v) => r.push(rad(x, r2) - rad(x, r1) - v),
                 Eq::Angle([a, b, c, d], v) => {
                     let (u, w) = (dir(a, b), dir(c, d));
                     r.push(wrap_angle(u.perp_dot(w).atan2(u.dot(w)) - v));

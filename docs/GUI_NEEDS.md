@@ -72,16 +72,11 @@ today (adapter or limitation) and what would replace it.
 
 ## Sketch
 
-12. **Offset constraint.** The GUI's offset makes new geometry pinned by
-    point-to-line distances (straight joints) and radial lines + radius expressions
-    (tangent joints), which is fully constrained but verbose. *Want:* a native
-    `Offset(loop, Expr)` constraint and a loop-walking helper.
-13. **Editing helpers.** Trim/split at intersections, sketch fillet, and entity
-    removal with id remapping are implemented in the GUI (`sketch_mode.rs`).
-    *Want:* them in `sketch` so other front ends share them.
-14. **Project.** Projection of model edges into a sketch is GUI-side (mesh
-    polylines → fixed construction lines). *Want:* exact projected curves.
-
+12. ~~Offset constraint~~ — done by the engine: `Constraint::Offset` + `Sketch::offset_chain`,
+    `Sketch::chain_from`.
+13. ~~Editing helpers~~ — done by the engine (`sketch_edit`): `trim`, `split_at`,
+    `fillet_corner`, `remove_entities` → `Remap`.
+14. ~~Project~~ — done by the engine: `Sketch::project_edge(&EdgeInfo, samples, construction)`.
 ## Drawings
 
 15. **View orbit.** "Drag inside the view with Shift+MMB" from the mock is not
