@@ -775,6 +775,18 @@ int32_t match_edge(const Shape &s, V3 p, V3 tangent, double tol) {
 
 // ---------------------------------------------------------------- dress-up
 
+namespace {
+// A dress-up that eats through a thin feature (a chamfer wider than its hole, a
+// fillet bigger than a slot) can come back as a valid *shell*: BRepCheck accepts
+// it, but the body is gone. Refuse it, so the caller's ladder reduces the size.
+void requireSolids(const TopoDS_Shape &in, const TopoDS_Shape &out, const char *what) {
+  int a = 0, b = 0;
+  for (TopExp_Explorer ex(in, TopAbs_SOLID); ex.More(); ex.Next()) ++a;
+  for (TopExp_Explorer ex(out, TopAbs_SOLID); ex.More(); ex.Next()) ++b;
+  if (b < a) fail(std::string(what) + " cut through the body (the size is larger than a hole or wall it touches)");
+}
+} // namespace
+
 std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const uint32_t> edges, rust::Slice<const double> radii) {
   requireShape(s, "fillet");
   if (edges.empty()) fail("fillet: no edges selected");
@@ -791,6 +803,7 @@ std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const uint32_t> edges,
   mf.Build();
   if (!mf.IsDone()) fail("fillet failed (radius too large for the adjacent faces?)");
   TopoDS_Shape r = healIfInvalid(mf.Shape(), "fillet");
+  requireSolids(in, r, "fillet");
   return wrap(simplify(r));
 }
 
@@ -810,6 +823,7 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges
   mc.Build();
   if (!mc.IsDone()) fail("chamfer failed (distance too large?)");
   TopoDS_Shape r = healIfInvalid(mc.Shape(), "chamfer");
+  requireSolids(in, r, "chamfer");
   return wrap(simplify(r));
 }
 

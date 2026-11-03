@@ -33,6 +33,8 @@ pub enum EdgeResult {
     Applied,
     Reduced { requested: f64, applied: f64 },
     Failed { reason: String, max: Option<f64> },
+    /// Already smooth (its faces meet tangentially): nothing to round.
+    Smooth,
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +328,7 @@ impl FilletD {
                     reason: reason.clone(),
                     max: *max_size,
                 },
+                EdgeStatus::Smooth => EdgeResult::Smooth,
             };
             let Some(req) = rep.edge_requests.get(o.request) else { continue };
             let Some(&si) = used.get(req.set) else { continue };

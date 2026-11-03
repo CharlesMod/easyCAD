@@ -498,6 +498,41 @@ What changed for it:
     "does not fit" or "passes through the floor or lid"); "the rim fills the whole
     cavity at the plane" is its own infeasible message.
 
+- `crates/model/tests/fillet_fuzz.rs` throws random edge sets (a few edges, every
+  edge of a face, every edge at a vertex) × sizes (0.25–6 mm, fillet or chamfer,
+  auto-reduce on or off) at the wizard's bodies (after the shell, after the
+  standoffs, the finished halves) and at generated shelled boxes with bosses, slots
+  and vents, through `occt::dressup::dress`. Each request is **applied**, **reduced**,
+  **skipped** (some edges left sharp, with a reason) or **bailed** (error, panic, or
+  an invalid / solid-losing result). A skipped edge is **wrongly skipped** when the
+  kernel takes it, at full size, on the pipeline's own result. The full run is
+  `#[ignore]` (`--ignored --nocapture`, `FUZZ_N`, `FUZZ_V=1`);
+  `fillet_fuzz_regressions` replays the cases fixed here plus 20 random ones.
+
+  | 400 requests (seed `0x5eed_f111e7`) | applied | reduced | skipped | bailed |
+  |---|---|---|---|---|
+  | before | 202 | 8 | 179 | 11 |
+  | after | 283 | 59 | 58 | 0 |
+
+  After: 0 wrongly skipped (675 smooth edges left alone). The remaining 133 skipped
+  edges are sizes too large with auto-reduce off (a smaller working size is
+  reported) but for three that no size takes (the one checked sits on the tongue's
+  0.4 mm taper). "Before" counts smooth edges as skipped, or as applied when the
+  kernel silently dropped them from a mixed set. What changed:
+  - **Results that lost the solid.** A fillet or chamfer that eats through a thin
+    feature can come back as a valid *shell*; BRepCheck accepts it, and the pipeline
+    reported it as applied (all 11 bails). The shim now refuses a dress-up whose
+    result has fewer solids than its input, so the ladder reduces or reports it.
+  - **Smooth edges and seams** (the faces meet tangentially: a fillet's own
+    boundary, a cylinder's seam; common in "every edge of a face" requests) are
+    `EdgeStatus::Smooth` up front and kept out of every kernel call. They used to be
+    "failed: no suitable edges" alone, silently "applied" in a mixed set, and pushed
+    the whole set down the slow ladder. `all_applied()` counts them as fine;
+    `applied_count()` does not (only smooth edges is still an error).
+  - **Order.** When some chains fail after others were applied, the ladder runs once
+    more with the failed chains first and keeps the run that applied more edges
+    (fixed 6 of 22 order-dependent edges; the rest interact either way).
+
 ## Concurrency contract
 
 Everything in `occt` and `easycad-model` may run on any number of threads at once.
@@ -818,6 +853,14 @@ verified on load.
   `Shape::taper` instead. User drafts still go through it.
 
 ## Changelog for GUI
+
+- **Speed, fillet fuzz, setback (TODO §3/§5).**
+  - New `EdgeStatus::Smooth` (an exhaustive match needs an arm): the edge's faces
+    already meet tangentially, nothing was done; not a failure (`all_applied()`
+    is true), not applied (`applied_count()`). The fillet dialog maps it to
+    `EdgeResult::Smooth`, counted as done.
+  - New `Shape::taper(v, inset)`: a ruled 45°-style taper of a planar region.
+  - Booleans are serial by default (`CW_PARALLEL_BOP=1` for the old behaviour).
 
 - **GUI_NEEDS #17–#20.**
   - **Movable split components (#17).** New `Component.context_frame:

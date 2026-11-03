@@ -30,9 +30,12 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
       Done: `wall` edit 251–285 ms, `lid_split` 167–210 ms, undo 0.15 ms, assembly `wall` edit
       296–330 ms (busy 20-core machine); the test asserts 1.5 × 300 ms in release. Ruled tongue
       taper (the draft algorithm hung), serial booleans, no double checks (ENGINE.md, Performance).
-- [ ] **[eng]** Fillet/chamfer fuzz: random edge sets × radii on realistic enclosures; histogram
+- [x] **[eng]** Fillet/chamfer fuzz: random edge sets × radii on realistic enclosures; histogram
       applied / reduced / skipped / bailed; fix the "bailed" and wrongly "skipped" (vertex blends,
-      sliver faces, cross-feature fillets).
+      sliver faces, cross-feature fillets). Done: `tests/fillet_fuzz.rs` (full run `#[ignore]`,
+      regression subset runs normally). 400 requests: bailed 11 → 0 (results that lost the solid),
+      0 wrongly skipped; smooth edges and seams are `EdgeStatus::Smooth`; failed chains are
+      retried first. Left: edges next to sub-0.5 mm slivers that no size takes.
 - [ ] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
 
 ## 4. App work still open
