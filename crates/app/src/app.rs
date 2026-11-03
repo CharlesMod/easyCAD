@@ -109,6 +109,10 @@ pub struct CaseworkApp {
     pub dragging: bool,
     pub now: f64,
     pub quit: bool,
+    /// `CASEWORK_STATE_FILE` JSON dump for the E2E scripts.
+    pub state_dump: Option<crate::e2e_state::StateDump>,
+    /// Tab / Shift+Tab presses taken from the raw input for the pick stack.
+    pub pending_cycle: i32,
 }
 
 impl CaseworkApp {
@@ -172,6 +176,8 @@ impl CaseworkApp {
             dragging: false,
             now: 0.0,
             quit: false,
+            state_dump: crate::e2e_state::StateDump::from_env(),
+            pending_cycle: 0,
         }
     }
 
@@ -845,6 +851,10 @@ impl CaseworkApp {
         self.refresh_cache();
         crate::ui_main::show(self, ui);
         self.frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if let Some(mut d) = self.state_dump.take() {
+            d.write(self);
+            self.state_dump = Some(d);
+        }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -968,6 +978,19 @@ impl CaseworkApp {
         }
     }
 
+    /// The modal-ish window on top, if any (for the E2E state dump).
+    pub fn overlay_name(&self) -> Option<&'static str> {
+        if self.export.is_some() {
+            Some("export")
+        } else if self.new_doc_prompt.is_some() {
+            Some("new_doc")
+        } else if self.calibrate.is_some() {
+            Some("calibrate")
+        } else {
+            None
+        }
+    }
+
     pub fn fit_all(&mut self) {
         if let Some(bb) = self.model.as_ref().and_then(|m| m.bbox) {
             let aspect = self.viewport_size.x / self.viewport_size.y.max(1.0);
@@ -985,7 +1008,42 @@ impl CaseworkApp {
     }
 }
 
+impl CaseworkApp {
+    /// Tab over the viewport cycles the pick stack. egui's own focus navigation
+    /// would otherwise take the key first (moving focus into a parameter field),
+    /// so presses are removed from the raw input before egui sees them.
+    pub fn intercept_keys(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if !self.mode.is_model()
+            || self.hover_pos.is_none()
+            || self.stack.is_empty()
+            || ctx.egui_wants_keyboard_input()
+        {
+            return;
+        }
+        let mut steps = 0;
+        raw.events.retain(|e| match e {
+            egui::Event::Key {
+                key: Key::Tab,
+                pressed,
+                modifiers,
+                ..
+            } if !modifiers.ctrl && !modifiers.alt && !modifiers.command => {
+                if *pressed {
+                    steps += if modifiers.shift { -1 } else { 1 };
+                }
+                false
+            }
+            _ => true,
+        });
+        self.pending_cycle += steps;
+    }
+}
+
 impl eframe::App for CaseworkApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.intercept_keys(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
         if self.quit {

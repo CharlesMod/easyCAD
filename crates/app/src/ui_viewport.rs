@@ -189,6 +189,10 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         app.hover_pos = None;
     }
     // Tab cycles while hovering the viewport (and no text field has focus)
+    if app.pending_cycle != 0 {
+        let n = std::mem::take(&mut app.pending_cycle);
+        app.stack.cycle(n);
+    }
     if hover.is_some() && !app.stack.is_empty() && !ui.ctx().egui_wants_keyboard_input() {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)) {
             app.stack.cycle(-1);
@@ -451,12 +455,20 @@ fn build_frame(
         for k in &sel {
             if let Some(mesh) = mesh_of(m, k.body) {
                 match k.kind {
-                    PickKind::Face(f) => highlights.push(FaceHighlight {
-                        mesh: mesh.clone(),
-                        face: f,
-                        color: SELECT_COLOR,
-                        xray: false,
-                    }),
+                    PickKind::Face(f) => {
+                        // a selected face behind other geometry (picked through the
+                        // stack) is drawn x-ray, or the selection would be invisible
+                        let hidden = m
+                            .meshed(k.body)
+                            .and_then(|b| b.faces.get(f as usize))
+                            .is_some_and(|info| !point_visible(app, m, info.point.as_vec3()));
+                        highlights.push(FaceHighlight {
+                            mesh: mesh.clone(),
+                            face: f,
+                            color: SELECT_COLOR,
+                            xray: hidden,
+                        })
+                    }
                     PickKind::Body => highlights.push(FaceHighlight {
                         mesh: mesh.clone(),
                         face: u32::MAX,
