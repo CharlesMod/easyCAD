@@ -59,6 +59,16 @@ assembly by default (Enclosure master, hidden and out of the BOM → Base (groun
 Lid in context; a STEP board as a locked, purchased reference). See GUI_NEEDS #17
 for the design-position anchors that let in-context components move.
 
+The Split and Parting-joint dialogs have **Output as components** (new features
+only, and a joint that takes a Split's place): on OK the two halves become
+components built in context from the source (`split_to_components`), placed where
+the split happened and free to move or mate; the source stays as the hidden design
+master. On a plain part the root's history first moves into a component named after
+the document (`move_root_into_component`); in an active component that component
+becomes the master. Halves are named after their bodies ("Base (in context)" loses
+its suffix; a name already used gets " (lower)" / " (upper)"). Root imports (the
+sample's reference PCB) move into the master and are hidden with it.
+
 ## Idle cost
 
 The app draws only when something asks: input, a worker or sync result, an

@@ -286,6 +286,9 @@ pub struct Dialog {
     pub name: String,
     pub body: Body,
     pub error: Option<String>,
+    /// Split / Parting joint: "Output as components" (`None`: not offered, e.g.
+    /// when editing a feature whose halves may already be components).
+    pub as_components: Option<bool>,
 }
 
 pub enum DialogEvent {
@@ -519,12 +522,14 @@ impl Dialog {
             DialogKind::Standoffs => Body::Standoffs(standoffs::StandoffsD::new(d, model)?),
             DialogKind::Joint => Body::Joint(joint::JointD::new(d, model)),
         };
+        let as_components = matches!(kind, DialogKind::Split | DialogKind::Joint).then_some(false);
         let mut dlg = Dialog {
             kind,
             editing: None,
             name: kind.title().into(),
             body,
             error: None,
+            as_components,
         };
         if let Body::Joint(j) = &mut dlg.body {
             dlg.editing = j.adopt_split(d);
@@ -733,6 +738,7 @@ impl Dialog {
             name: f.name.clone(),
             body,
             error: None,
+            as_components: None,
         })
     }
 
@@ -1056,6 +1062,12 @@ impl Dialog {
                             let (c, e) = self.body_ui(ui, id, cx);
                             if let Some(e) = e {
                                 ev = e;
+                            }
+                            if let Some(on) = &mut self.as_components {
+                                widgets::divider(ui);
+                                ui.checkbox(on, RichText::new("Output as components").size(12.0)).on_hover_text(
+                                    "Each half becomes its own component, built in context from this one (it follows every edit) and free to move or mate. The source stays as the hidden design master.",
+                                );
                             }
                             c
                         })

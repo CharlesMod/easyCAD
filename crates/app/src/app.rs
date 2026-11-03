@@ -778,7 +778,18 @@ impl EasyCadApp {
             match d.build(&cx) {
                 Ok(feats) if !feats.is_empty() => {
                     let label = d.title_case();
+                    let before: HashSet<FeatureId> = crate::scope::features(&self.doc.data, self.scope()).iter().map(|f| f.id).collect();
                     self.commit_features(&label, feats, d.editing());
+                    if d.as_components == Some(true) {
+                        // the split just committed: a new one, or the Split a joint replaced
+                        let fid = crate::scope::features(&self.doc.data, self.scope())
+                            .iter()
+                            .find(|f| (!before.contains(&f.id) || d.editing() == Some(f.id)) && matches!(f.kind, easycad_model::feature::FeatureKind::Split { .. } | easycad_model::feature::FeatureKind::PartingJoint { .. }))
+                            .map(|f| f.id);
+                        if let Some(fid) = fid {
+                            self.output_as_components(fid);
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {

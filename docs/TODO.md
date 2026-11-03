@@ -36,7 +36,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 
 ## 4. App work still open
 - [ ] **[ui]** Assemblies in drawings: scope picker (assembly / component / occurrence), BOM table, balloons.
-- [ ] **[ui]** "Output as components" on the Split and Parting-joint dialogs.
+- [x] **[ui]** "Output as components" on the Split and Parting-joint dialogs. A checkbox on new
+      splits/joints; a plain part's root moves into a master component first. Root imports (a
+      reference PCB) go into the hidden master with it: re-insert the board as its own component.
 - [ ] **[ui]** Click-test linked-file Update/Break, drag-to-reparent, and one alternate navigation preset.
 - [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
 - [ ] **[ui]** History strip hint when the active root has no features of its own.

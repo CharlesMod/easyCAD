@@ -385,6 +385,76 @@ impl EasyCadApp {
         }
     }
 
+    /// "Output as components" (Split / Parting joint dialogs): the two halves of
+    /// `feature` in the component being edited become components built in context
+    /// (`split_to_components`), placed where the split happened and free to move.
+    /// Editing the root of a plain part first moves its history into a component
+    /// named after the document (the hidden design master). Ends at the root.
+    pub fn output_as_components(&mut self, feature: easycad_model::feature::FeatureId) {
+        let names = self.split_names(feature);
+        let (source, moved) = if self.active.is_empty() {
+            let name = self.doc.data.name.clone();
+            match self.doc.move_root_into_component(&name) {
+                Ok((_, occ)) => (vec![occ], true),
+                Err(e) => {
+                    self.warn(format!("Output as components: {e}"));
+                    return;
+                }
+            }
+        } else {
+            (self.active.clone(), false)
+        };
+        let grounded = source.last().and_then(|o| self.doc.data.occurrence(*o)).is_some_and(|o| o.grounded);
+        match self.doc.split_to_components(&source, feature, names.as_ref().map(|(a, b)| (a.as_str(), b.as_str()))) {
+            Ok([(_, lower), (_, upper)]) => {
+                // the lower half stays put for mates, like the master it came from
+                if grounded {
+                    let _ = self.doc.edit_occurrence(lower, "Ground lower half", |o| o.grounded = true);
+                }
+                let names = [lower, upper].map(|o| self.doc.data.occurrence(o).map(|o| o.name.clone()).unwrap_or_default());
+                self.activate(Vec::new());
+                self.asm.sel = Some(vec![upper]);
+                self.toast(format!("Split into components {} and {}", names[0], names[1]));
+            }
+            Err(e) => {
+                if moved {
+                    self.doc.undo();
+                }
+                self.warn(format!("Output as components: {e}"));
+            }
+        }
+        self.refresh_scope();
+        self.request_model();
+    }
+
+    /// Component names for the halves of a split in the component being edited:
+    /// the bodies' names without the " (in context)" of a body built from another
+    /// component, kept apart from existing component names. `None`: the engine's.
+    fn split_names(&self, feature: easycad_model::feature::FeatureId) -> Option<(String, String)> {
+        use easycad_model::feature::FeatureKind;
+        let f = crate::scope::features(&self.doc.data, self.scope()).iter().find(|f| f.id == feature)?;
+        let (body, upper) = match &f.kind {
+            FeatureKind::Split { body, new_name, .. } => (*body, new_name.clone()),
+            FeatureKind::PartingJoint { body, upper_name, .. } => (*body, upper_name.clone()),
+            _ => return None,
+        };
+        let m = self.model.as_ref()?;
+        let lower = match body {
+            Some(b) => m.body(b)?.name.clone(),
+            None => m.bodies.iter().find(|b| !b.body.reference && b.body.name != upper)?.body.name.clone(),
+        };
+        let taken = |n: &str| self.doc.data.components.iter().any(|c| c.name == n);
+        let tidy = |n: String, half: &str| {
+            let n = n.strip_suffix(" (in context)").map(str::to_string).unwrap_or(n);
+            if taken(&n) {
+                format!("{n} ({half})")
+            } else {
+                n
+            }
+        };
+        Some((tidy(lower, "lower"), tidy(upper, "upper")))
+    }
+
     /// The folder linked paths are relative to (where the document is saved).
     pub fn host_dir(&self) -> std::path::PathBuf {
         self.path
