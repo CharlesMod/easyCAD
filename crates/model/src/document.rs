@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::feature::*;
 use crate::library::{Library, PartInfo};
 use crate::params::{Expr, ExprError, Params};
+use crate::process::{BuildOrientation, ProcessProfile};
 use crate::regen::{RegenResult, Regenerator};
 use crate::sketch::Sketch;
 
@@ -86,6 +87,21 @@ pub struct DocData {
     /// Free-form metadata (title block fields: author, part number, ...).
     #[serde(default)]
     pub meta: BTreeMap<String, String>,
+    /// Process profiles available in this document (built-ins + user presets).
+    #[serde(default = "ProcessProfile::builtins")]
+    pub processes: Vec<ProcessProfile>,
+    /// Name of the profile fits and process stages are resolved against.
+    #[serde(default = "default_profile")]
+    pub active_profile: String,
+    /// Document default build orientation.
+    #[serde(default)]
+    pub build_orientation: BuildOrientation,
+    /// Per-body build orientation overrides.
+    #[serde(default)]
+    pub body_orientations: Vec<BodyOrientation>,
+    /// Per-hole teardrop on/off overrides.
+    #[serde(default)]
+    pub teardrop_overrides: Vec<TeardropOverride>,
     pub next_id: u32,
 }
 
@@ -102,6 +118,11 @@ impl DocData {
             features: Vec::new(),
             imports: Vec::new(),
             meta: BTreeMap::new(),
+            processes: ProcessProfile::builtins(),
+            active_profile: default_profile(),
+            build_orientation: BuildOrientation::default(),
+            body_orientations: Vec::new(),
+            teardrop_overrides: Vec::new(),
             next_id: 1,
         }
     }
@@ -110,6 +131,25 @@ impl DocData {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// The active process profile (falls back to nominal if the name is unknown).
+    pub fn profile(&self) -> ProcessProfile {
+        self.profile_named(&self.active_profile).unwrap_or_else(ProcessProfile::molded_nominal)
+    }
+    pub fn profile_named(&self, name: &str) -> Option<ProcessProfile> {
+        self.processes.iter().find(|p| p.name == name).cloned()
+    }
+    /// Parameter values under the active profile (what features see).
+    pub fn values(&self) -> Result<crate::params::Values, ExprError> {
+        let mut seed = crate::params::Values::new();
+        self.profile().inject(&mut seed);
+        self.params.evaluate_seeded(seed)
+    }
+
+    /// Build orientation of a body (override or document default).
+    pub fn orientation_of(&self, body: BodyId) -> BuildOrientation {
+        self.body_orientations.iter().find(|o| o.body == body).map(|o| o.orientation).unwrap_or(self.build_orientation)
     }
 
     pub fn sketch(&self, id: SketchId) -> Option<&Sketch> {
@@ -169,6 +209,24 @@ impl DocData {
     }
 }
 
+fn default_profile() -> String {
+    ProcessProfile::molded_nominal().name
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BodyOrientation {
+    pub body: BodyId,
+    pub orientation: BuildOrientation,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TeardropOverride {
+    pub body: BodyId,
+    /// The hole's cylindrical face.
+    pub face: crate::select::FaceSelector,
+    pub enabled: bool,
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -202,6 +260,23 @@ impl BlobStore {
 struct Snapshot {
     label: String,
     data: DocData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    Stl,
+    ThreeMf,
+    Step,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExportOptions {
+    /// Process profile override (e.g. FDM for STL, molded for STEP).
+    pub profile: Option<String>,
+    /// Rotate each body by its build orientation and drop it onto z = 0.
+    pub orient_to_plate: bool,
+    /// STEP only: include reference bodies (PCBs, library parts).
+    pub include_reference: bool,
 }
 
 /// One line of a bill of materials.
@@ -385,6 +460,89 @@ impl Document {
             blob,
             thread: inst.mate.thread.clone(),
         })
+    }
+
+    /// Switch the active process profile (undoable); regeneration re-resolves fits.
+    pub fn set_active_profile(&mut self, name: &str) -> Result<(), DocError> {
+        if self.data.profile_named(name).is_none() {
+            return Err(DocError::Other(format!("no process profile named `{name}`")));
+        }
+        self.edit(&format!("Process: {name}"), |d| {
+            d.active_profile = name.into();
+            Ok::<_, DocError>(())
+        })
+    }
+
+    /// Add or replace a process profile (by name).
+    pub fn add_profile(&mut self, p: ProcessProfile) {
+        self.edit(&format!("Add process {}", p.name), |d| {
+            d.processes.retain(|q| q.name != p.name);
+            d.processes.push(p);
+            Ok::<_, DocError>(())
+        })
+        .unwrap()
+    }
+
+    /// Set the build orientation of one body, or the document default (`None`).
+    pub fn set_build_orientation(&mut self, body: Option<BodyId>, o: BuildOrientation) {
+        self.edit("Build orientation", |d| {
+            match body {
+                None => d.build_orientation = o,
+                Some(b) => {
+                    d.body_orientations.retain(|x| x.body != b);
+                    d.body_orientations.push(BodyOrientation { body: b, orientation: o });
+                }
+            }
+            Ok::<_, DocError>(())
+        })
+        .unwrap()
+    }
+
+    /// Regenerate as if `profile` were active (shares the cache; the document is
+    /// not modified).
+    pub fn regenerate_with_profile(&mut self, profile: &str) -> Result<RegenResult, DocError> {
+        if self.data.profile_named(profile).is_none() {
+            return Err(DocError::Other(format!("no process profile named `{profile}`")));
+        }
+        let mut d = self.data.clone();
+        d.active_profile = profile.into();
+        Ok(self.regen.regenerate(&d, &self.blobs, &self.library))
+    }
+
+    /// Export solids (STL/3MF) or all bodies (STEP), optionally under another
+    /// process profile and re-oriented so each body's plate face is −Z.
+    pub fn export(&mut self, format: ExportFormat, path: &Path, opts: &ExportOptions) -> Result<(), DocError> {
+        let out = match &opts.profile {
+            Some(p) => self.regenerate_with_profile(p)?,
+            None => self.regenerate().clone(),
+        };
+        let mut bodies: Vec<crate::regen::Body> = out
+            .bodies
+            .iter()
+            .filter(|b| match format {
+                ExportFormat::Step => opts.include_reference || !b.reference,
+                _ => !b.reference,
+            })
+            .cloned()
+            .collect();
+        if opts.orient_to_plate {
+            for b in &mut bodies {
+                let o = self.data.orientation_of(b.id);
+                let (axis, angle) = o.quat().to_axis_angle();
+                let mut s = if angle.abs() > 1e-12 { b.shape().rotated(glam::DVec3::ZERO, axis, angle.to_degrees()) } else { Ok(b.shape().clone()) }
+                    .map_err(|e| DocError::Other(e.to_string()))?;
+                let bb = s.bbox().map_err(|e| DocError::Other(e.to_string()))?;
+                s = s.translated(glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(|e| DocError::Other(e.to_string()))?;
+                b.geom = crate::regen::BodyGeom::new(s);
+            }
+        }
+        let refs: Vec<&crate::regen::Body> = bodies.iter().collect();
+        let r = match format {
+            ExportFormat::Stl => crate::export::write_stl(&refs, path),
+            ExportFormat::ThreeMf => crate::export::write_3mf(&refs, path),
+            ExportFormat::Step => crate::export::write_step(&refs, path),
+        };
+        r.map_err(|e| DocError::Other(e.to_string()))
     }
 
     /// Accept the best candidate of an `Unresolved` feature: replaces `old` by `new`

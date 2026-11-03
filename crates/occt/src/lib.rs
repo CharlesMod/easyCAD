@@ -99,6 +99,8 @@ pub struct FaceInfo {
     pub centroid: DVec3,
     /// Outward normal at the surface point closest to the centroid.
     pub normal: DVec3,
+    /// The surface point where `normal` is evaluated.
+    pub point: DVec3,
     pub area: f64,
     /// Cylinder / cone axis and (reference) radius.
     pub axis: Option<(DVec3, DVec3)>,
@@ -441,6 +443,7 @@ impl Shape {
                 },
                 centroid: dv(f.centroid),
                 normal: dv(f.normal),
+                point: dv(f.point),
                 area: f.area,
                 axis: (f.kind == 1 || f.kind == 2).then(|| (dv(f.axis_origin), dv(f.axis_dir))),
                 radius: f.radius,

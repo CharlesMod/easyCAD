@@ -110,6 +110,9 @@ pub struct AutoHole {
     /// Overrides the default depth (blind holes); `None` = rule default / through.
     #[serde(default)]
     pub depth: Option<Expr>,
+    /// Process fit for the hole diameters (default: Hole / Snug).
+    #[serde(default)]
+    pub fit: Option<crate::process::Fit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -258,7 +261,7 @@ pub enum FeatureKind {
 }
 
 fn zero() -> Expr {
-    Expr("0".into())
+    Expr::new("0")
 }
 fn yes() -> bool {
     true

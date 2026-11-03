@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::process::{Fit, FitClass};
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ExprError {
     #[error("syntax error at {pos}: {msg}")]
@@ -27,16 +29,70 @@ pub enum ExprError {
     DivZero,
 }
 
-/// A numeric value written as an expression (e.g. `"wall*2 + 0.2"`, `"30"`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Expr(pub String);
+/// A numeric value written as an expression (e.g. `"wall*2 + 0.2"`, `"30"`), with an
+/// optional process [`Fit`] applied against the active process profile.
+///
+/// Serializes as a plain string when there is no fit, else as
+/// `{"expr": "...", "fit": {"role": "Hole", "class": "Slide"}}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expr(pub String, pub Option<Fit>);
+
+impl Serialize for Expr {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match &self.1 {
+            None => s.serialize_str(&self.0),
+            Some(fit) => {
+                use serde::ser::SerializeStruct;
+                let mut st = s.serialize_struct("Expr", 2)?;
+                st.serialize_field("expr", &self.0)?;
+                st.serialize_field("fit", fit)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Expr {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Plain(String),
+            WithFit { expr: String, fit: Option<Fit> },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Plain(s) => Expr(s, None),
+            Repr::WithFit { expr, fit } => Expr(expr, fit),
+        })
+    }
+}
 
 impl Expr {
     pub fn new(s: impl Into<String>) -> Self {
-        Expr(s.into())
+        Expr(s.into(), None)
     }
+    /// Same expression with a process fit.
+    pub fn fit(mut self, fit: Fit) -> Self {
+        self.1 = Some(fit);
+        self
+    }
+    /// Evaluate, applying this expression's fit (if any) against the profile
+    /// numbers in `vars` (see `ProcessProfile::inject`).
     pub fn eval(&self, vars: &Values) -> Result<f64, ExprError> {
+        let v = eval(&self.0, vars)?;
+        Ok(match self.1 {
+            Some(f) => crate::process::resolve_in(v, f, vars),
+            None => v,
+        })
+    }
+    /// Evaluate with `default` applied when the expression has no fit of its own
+    /// (features use this for their sensible default roles).
+    pub fn eval_or(&self, vars: &Values, default: Fit) -> Result<f64, ExprError> {
+        let v = eval(&self.0, vars)?;
+        Ok(crate::process::resolve_in(v, self.1.unwrap_or(default), vars))
+    }
+    /// Nominal value, ignoring any fit.
+    pub fn eval_nominal(&self, vars: &Values) -> Result<f64, ExprError> {
         eval(&self.0, vars)
     }
     /// Parameter names referenced by this expression.
@@ -50,17 +106,17 @@ impl Expr {
 
 impl From<f64> for Expr {
     fn from(v: f64) -> Self {
-        Expr(format_num(v))
+        Expr(format_num(v), None)
     }
 }
 impl From<i32> for Expr {
     fn from(v: i32) -> Self {
-        Expr(v.to_string())
+        Expr(v.to_string(), None)
     }
 }
 impl From<&str> for Expr {
     fn from(v: &str) -> Self {
-        Expr(v.to_string())
+        Expr(v.to_string(), None)
     }
 }
 
@@ -98,7 +154,7 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 fn is_reserved(n: &str) -> bool {
-    matches!(n, "mm" | "cm" | "m" | "in" | "mil" | "deg" | "rad" | "pi" | "sqrt" | "abs" | "min" | "max" | "sin" | "cos" | "tan")
+    matches!(n, "mm" | "cm" | "m" | "in" | "mil" | "deg" | "rad" | "pi" | "sqrt" | "abs" | "min" | "max" | "sin" | "cos" | "tan" | "hole" | "pin" | "gap" | "tol" | "press" | "snug" | "slide" | "loose")
 }
 
 impl Params {
@@ -126,6 +182,12 @@ impl Params {
 
     /// Evaluate all parameters in dependency order; reports cycles and unknown refs.
     pub fn evaluate(&self) -> Result<Values, ExprError> {
+        self.evaluate_seeded(Values::new())
+    }
+
+    /// Evaluate on top of `seed` values (e.g. process-profile keys from
+    /// `ProcessProfile::inject`, so `hole()`/`pin()` see the active profile).
+    pub fn evaluate_seeded(&self, seed: Values) -> Result<Values, ExprError> {
         let mut asts = BTreeMap::new();
         for p in &self.list {
             asts.insert(p.name.as_str(), parse(&p.expr.0)?);
@@ -171,7 +233,7 @@ impl Params {
             Ok(())
         }
         let mut st = HashMap::new();
-        let mut vals = Values::new();
+        let mut vals = seed;
         for p in &self.list {
             visit(p.name.as_str(), &asts, &mut st, &mut Vec::new(), &mut vals)?;
         }
@@ -207,7 +269,10 @@ impl Ast {
                 a.refs(out);
                 b.refs(out);
             }
-            Ast::Call(_, args) => args.iter().for_each(|a| a.refs(out)),
+            Ast::Call(f, args) => args.iter().for_each(|a| match a {
+                Ast::Var(v) if is_fit_fn(f) && FitClass::from_name(v).is_some() => {}
+                _ => a.refs(out),
+            }),
         }
     }
 
@@ -229,6 +294,28 @@ impl Ast {
                         x / y
                     }
                     _ => unreachable!(),
+                }
+            }
+            Ast::Call(f, args) if is_fit_fn(f) => {
+                // hole(x[, class]) pin(x[, class]) gap([class]) tol([class])
+                let mut class = FitClass::Slide;
+                let mut nums = Vec::new();
+                for a in args {
+                    match a {
+                        Ast::Var(v) if FitClass::from_name(v).is_some() => class = FitClass::from_name(v).unwrap(),
+                        _ => nums.push(a.eval(vars)?),
+                    }
+                }
+                let want = if matches!(f.as_str(), "hole" | "pin") { 1 } else { 0 };
+                if nums.len() != want {
+                    return Err(ExprError::Syntax { pos: 0, msg: format!("{f} takes {want} number(s) and an optional fit class") });
+                }
+                let x = nums.first().copied().unwrap_or(0.0);
+                match f.as_str() {
+                    "hole" => crate::process::resolve_in(x, Fit::hole(class), vars),
+                    "pin" => crate::process::resolve_in(x, Fit::pin(class), vars),
+                    "gap" => crate::process::resolve_in(0.0, Fit::gap(class), vars),
+                    _ => crate::process::resolve_in(0.0, Fit::gap(class), vars), // tol = per-side allowance
                 }
             }
             Ast::Call(f, args) => {
@@ -274,6 +361,10 @@ impl Ast {
             }
         })
     }
+}
+
+fn is_fit_fn(f: &str) -> bool {
+    matches!(f, "hole" | "pin" | "gap" | "tol")
 }
 
 fn unit_factor(u: &str) -> Option<f64> {

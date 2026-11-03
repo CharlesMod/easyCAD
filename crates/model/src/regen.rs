@@ -17,6 +17,7 @@ use crate::feature::*;
 use crate::geom::{Plane, Profile, Segment2};
 use crate::library::{local_mate, place, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
+use crate::process::{Fit, FitClass, ProcessProfile, TeardropStyle};
 use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
 use crate::sketch::{segment_point, Sketch, SolveReport};
 
@@ -125,6 +126,28 @@ pub struct RegenResult {
     pub reports: Vec<FeatureReport>,
     pub recomputed: usize,
     pub reused: usize,
+    /// What the final process stage (active profile) did.
+    pub process: ProcessReport,
+}
+
+/// A cylindrical hole considered by the teardrop stage.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HoleRef {
+    pub body: BodyId,
+    /// Face index on the body *before* the process stage.
+    pub face: u32,
+    pub center: DVec3,
+    pub axis: DVec3,
+    pub diameter: f64,
+    pub length: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProcessReport {
+    pub profile: String,
+    pub teardropped: Vec<HoleRef>,
+    pub skipped: Vec<(HoleRef, String)>,
+    pub warnings: Vec<String>,
 }
 
 impl RegenResult {
@@ -161,6 +184,7 @@ pub struct Regenerator {
     imports: HashMap<String, Arc<Shape>>,
     dxfs: HashMap<String, Arc<DxfDrawing>>,
     parts: HashMap<String, Arc<PartInstance>>,
+    stages: HashMap<u64, (Vec<Body>, ProcessReport)>,
 }
 
 impl Default for Regenerator {
@@ -172,6 +196,7 @@ impl Default for Regenerator {
             imports: HashMap::new(),
             dxfs: HashMap::new(),
             parts: HashMap::new(),
+            stages: HashMap::new(),
         }
     }
 }
@@ -284,11 +309,20 @@ impl Regenerator {
     }
 
     pub fn regenerate(&mut self, doc: &DocData, blobs: &BlobStore, lib: &Library) -> RegenResult {
-        let (vals, param_err) = match doc.params.evaluate() {
+        let profile = doc.profile();
+        let mut seed = Values::new();
+        profile.inject(&mut seed);
+        let (vals, param_err) = match doc.params.evaluate_seeded(seed.clone()) {
             Ok(v) => (v, None),
-            Err(e) => (Values::new(), Some(e.to_string())),
+            Err(e) => (seed, Some(e.to_string())),
         };
-        let mut key = 0x6361_7365_776f_726bu64; // "casework"
+        // Fit resolution depends on the profile's numbers: key every state on them.
+        let mut key = {
+            let mut h = DefaultHasher::new();
+            0x6361_7365_776f_726bu64.hash(&mut h); // "casework"
+            serde_json::to_string(&(&profile.fits, &profile.hole_comp, profile.xy_comp)).unwrap_or_default().hash(&mut h);
+            h.finish()
+        };
         let mut state: Arc<ModelState> = Arc::new(ModelState::default());
         let mut reports = Vec::new();
         let (mut recomputed, mut reused) = (0, 0);
@@ -310,7 +344,7 @@ impl Regenerator {
             let (next, report) = if f.suppressed {
                 ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, cached: false })
             } else {
-                let mut ctx = Ctx { doc, vals: &vals, blobs, lib, regen: self, report: None, sketch_report: None, warning: None };
+                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None };
                 let res = ctx.exec(f, &state);
                 let (dressup, sketch, warning) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take());
                 match res {
@@ -341,7 +375,28 @@ impl Regenerator {
             state = Arc::new(step.0.clone());
             reports.push(step.1.clone());
         }
-        RegenResult { bodies: state.bodies.clone(), reports, recomputed, reused }
+        // Final process stage (teardrops), cached on the final model key plus the
+        // profile's process settings, orientations and overrides.
+        let stage_key = {
+            let mut h = DefaultHasher::new();
+            key.hash(&mut h);
+            serde_json::to_string(&(&profile.teardrop, &doc.build_orientation, &doc.body_orientations, &doc.teardrop_overrides))
+                .unwrap_or_default()
+                .hash(&mut h);
+            h.finish()
+        };
+        let (bodies, process) = match self.stages.get(&stage_key) {
+            Some(hit) => hit.clone(),
+            None => {
+                let r = process_stage(&state.bodies, &profile, doc);
+                if self.stages.len() > self.capacity {
+                    self.stages.clear();
+                }
+                self.stages.insert(stage_key, r.clone());
+                r
+            }
+        };
+        RegenResult { bodies, reports, recomputed, reused, process }
     }
 
     fn insert(&mut self, key: u64, s: Step) {
@@ -359,6 +414,7 @@ impl Regenerator {
 struct Ctx<'a> {
     doc: &'a DocData,
     vals: &'a Values,
+    profile: &'a ProcessProfile,
     blobs: &'a BlobStore,
     lib: &'a Library,
     regen: &'a mut Regenerator,
@@ -421,6 +477,11 @@ fn tidy(s: Shape) -> Shape {
 impl Ctx<'_> {
     fn ev(&self, e: &Expr) -> R<f64> {
         e.eval(self.vals).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
+    }
+
+    /// Evaluate with a default fit role unless the expression carries its own.
+    fn ev_fit(&self, e: &Expr, default: Fit) -> R<f64> {
+        e.eval_or(self.vals, default).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
     }
 
     fn target(&self, st: &ModelState, id: Option<BodyId>) -> R<usize> {
@@ -572,7 +633,7 @@ impl Ctx<'_> {
             FeatureKind::ScrewBoss { body, plane, points, od, hole_dia, height, hole_depth, base_fillet, draft_deg } => {
                 let spec = BossSpec {
                     od: self.ev(od)?,
-                    hole: self.ev(hole_dia)?,
+                    hole: self.ev_fit(hole_dia, Fit::hole(FitClass::Snug))?,
                     height: self.ev(height)?,
                     hole_depth: hole_depth.as_ref().map(|e| self.ev(e)).transpose()?,
                     fillet: self.ev(base_fillet)?,
@@ -587,7 +648,7 @@ impl Ctx<'_> {
                 }
                 let spec = BossSpec {
                     od: self.ev(od)?,
-                    hole: self.ev(hole_dia)?,
+                    hole: self.ev_fit(hole_dia, Fit::hole(FitClass::Snug))?,
                     height: self.ev(height)?,
                     hole_depth: None,
                     fillet: self.ev(base_fillet)?,
@@ -652,6 +713,14 @@ impl Ctx<'_> {
                         let mut spec = inst.hole(ah.choice)?;
                         if let Some(d) = &ah.depth {
                             spec.depth = Some(self.ev(d)?);
+                        }
+                        let fit = ah.fit.unwrap_or(Fit::hole(FitClass::Snug));
+                        spec.diameter = self.profile.resolve(spec.diameter, fit);
+                        if let Some((d, h)) = spec.counterbore {
+                            spec.counterbore = Some((self.profile.resolve(d, fit), h));
+                        }
+                        if let Some((d, a)) = spec.countersink {
+                            spec.countersink = Some((self.profile.resolve(d, fit), a));
                         }
                         Some(spec)
                     }
@@ -1003,4 +1072,143 @@ fn rib_tool(plane: &Plane, chains: &[Vec<Segment2>], t: f64, h: f64, draft: f64,
         }
     }
     fuse_many(&pieces)
+}
+
+// ---------------------------------------------------------------------------
+// Process stage
+
+fn process_stage(bodies: &[Body], profile: &ProcessProfile, doc: &DocData) -> (Vec<Body>, ProcessReport) {
+    let mut rep = ProcessReport { profile: profile.name.clone(), ..Default::default() };
+    let td = profile.teardrop;
+    let any_override = doc.teardrop_overrides.iter().any(|o| o.enabled);
+    if !td.enabled && !any_override {
+        return (bodies.to_vec(), rep);
+    }
+    let mut out = Vec::with_capacity(bodies.len());
+    for b in bodies {
+        if b.reference {
+            out.push(b.clone());
+            continue;
+        }
+        match teardrop_body(b, profile, doc, &mut rep) {
+            Ok(Some(s)) => {
+                let mut nb = b.clone();
+                nb.geom = BodyGeom::new(s);
+                out.push(nb);
+            }
+            Ok(None) => out.push(b.clone()),
+            Err(e) => {
+                rep.warnings.push(format!("{}: teardrop stage failed ({e}); body left unchanged", b.name));
+                out.push(b.clone());
+            }
+        }
+    }
+    (out, rep)
+}
+
+fn teardrop_body(b: &Body, profile: &ProcessProfile, doc: &DocData, rep: &mut ProcessReport) -> Result<Option<Shape>, occt::Error> {
+    let td = profile.teardrop;
+    let shape = b.shape();
+    let up = doc.orientation_of(b.id).up_in_model().normalize();
+    let faces = shape.faces()?;
+    let edges = shape.edges()?;
+    // per-hole overrides for this body
+    let mut overrides: HashMap<u32, bool> = HashMap::new();
+    for o in doc.teardrop_overrides.iter().filter(|o| o.body == b.id) {
+        if let Ok(ix) = o.face.resolve(shape) {
+            for i in ix {
+                overrides.insert(i, o.enabled);
+            }
+        }
+    }
+    let mut cutters = Vec::new();
+    for f in faces.iter().filter(|f| f.kind == occt::SurfaceKind::Cylinder) {
+        let Some((o, a)) = f.axis else { continue };
+        let a = a.normalize();
+        let r = f.radius;
+        let radial = f.point - (o + a * (f.point - o).dot(a));
+        if f.normal.dot(radial) >= 0.0 {
+            continue; // convex: a boss or pin, not a hole
+        }
+        // axial extent from the face's boundary edges
+        let (mut t0, mut t1) = (f64::INFINITY, f64::NEG_INFINITY);
+        for ei in shape.face_edges(f.index)? {
+            let e = &edges[ei as usize];
+            for p in [e.start, e.end, e.midpoint] {
+                let t = (p - o).dot(a);
+                t0 = t0.min(t);
+                t1 = t1.max(t);
+            }
+        }
+        let len = t1 - t0;
+        let hole = HoleRef { body: b.id, face: f.index, center: o + a * (t0 + t1) / 2.0, axis: a, diameter: 2.0 * r, length: len };
+        let forced = overrides.get(&f.index).copied();
+        if forced == Some(false) {
+            rep.skipped.push((hole, "disabled by override".into()));
+            continue;
+        }
+        if forced.is_none() && !td.enabled {
+            continue;
+        }
+        if len.is_nan() || len <= 1e-6 {
+            rep.skipped.push((hole, "zero-length hole".into()));
+            continue;
+        }
+        if forced.is_none() && 2.0 * r < td.min_diameter {
+            rep.skipped.push((hole, format!("diameter {:.2} below the {:.2} mm minimum", 2.0 * r, td.min_diameter)));
+            continue;
+        }
+        let from_horizontal = a.dot(up).abs().clamp(0.0, 1.0).asin().to_degrees();
+        if forced.is_none() && from_horizontal > td.angle_threshold_deg {
+            rep.skipped.push((hole, format!("axis {from_horizontal:.0}° from horizontal (threshold {:.0}°)", td.angle_threshold_deg)));
+            continue;
+        }
+        let full = 2.0 * std::f64::consts::PI * r * len;
+        if (f.area - full).abs() > 0.03 * full {
+            rep.skipped.push((hole, "not a full round hole (partial cylinder)".into()));
+            continue;
+        }
+        let u = (up - a * up.dot(a)).normalize_or_zero();
+        if u == DVec3::ZERO {
+            rep.skipped.push((hole, "axis parallel to build direction".into()));
+            continue;
+        }
+        let s = a.cross(u);
+        let c0 = o + a * t0;
+        let p2 = |x: f64, y: f64| c0 + s * x + u * y;
+        let k = r * std::f64::consts::FRAC_1_SQRT_2;
+        let apex = r * std::f64::consts::SQRT_2;
+        let mut pts = vec![p2(0.0, 0.0), p2(k, k)];
+        match td.style {
+            TeardropStyle::Pointed45 => pts.push(p2(0.0, apex)),
+            TeardropStyle::Flat(fr) => {
+                let h = fr.clamp(std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::SQRT_2) * r;
+                let half = apex - h;
+                if half <= 1e-9 {
+                    pts.push(p2(0.0, apex));
+                } else if h <= k + 1e-9 {
+                    rep.skipped.push((hole, "flat height at or below the tangent points (no cap)".into()));
+                    continue;
+                } else {
+                    pts.push(p2(half, h));
+                    pts.push(p2(-half, h));
+                }
+            }
+        }
+        pts.push(p2(-k, k));
+        let edges3: Vec<Edge> = (0..pts.len()).map(|i| Edge::Line(pts[i], pts[(i + 1) % pts.len()])).collect();
+        let face = Shape::face(&Frame { origin: c0, x_dir: s, normal: a }, &edges3, &[])?;
+        cutters.push(face.extrude(a * len)?);
+        rep.teardropped.push(hole);
+    }
+    if cutters.is_empty() {
+        return Ok(None);
+    }
+    let refs: Vec<&Shape> = cutters.iter().collect();
+    let tool = if refs.len() == 1 { cutters[0].clone() } else { Shape::fuse_all(&refs)? };
+    let r = tidy(shape.cut(&tool)?);
+    if !r.is_valid() {
+        return Err(occt::Error("teardrop cut produced an invalid solid".into()));
+    }
+    Ok(Some(r))
 }

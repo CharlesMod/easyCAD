@@ -39,6 +39,8 @@ pub mod bridge {
         kind: u8,
         centroid: V3,
         normal: V3,
+        /// Surface point where `normal` was evaluated.
+        point: V3,
         area: f64,
         /// Cylinder/cone axis (zero otherwise).
         axis_origin: V3,

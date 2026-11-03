@@ -134,7 +134,7 @@ fn insert_part_with_auto_hole_and_bom() {
             ],
             flip: false,
             offset: 0.0.into(),
-            auto_hole: Some(AutoHole { choice: HoleChoice::Insert, depth: None }),
+            auto_hole: Some(AutoHole { choice: HoleChoice::Insert, depth: None, fit: None }),
             target: Some(plate),
         },
     );
@@ -147,7 +147,7 @@ fn insert_part_with_auto_hole_and_bom() {
             placements: vec![PlacementRef::Explicit { origin: DVec3::new(-10.0, -10.0, 10.0), axis: DVec3::Z }],
             flip: false,
             offset: Expr::from(0.0),
-            auto_hole: Some(AutoHole { choice: HoleChoice::Counterbore(Fit::Normal), depth: None }),
+            auto_hole: Some(AutoHole { choice: HoleChoice::Counterbore(Fit::Normal), depth: None, fit: None }),
             target: Some(plate),
         },
     );

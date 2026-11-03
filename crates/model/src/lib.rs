@@ -10,6 +10,7 @@ pub mod geom;
 pub mod library;
 pub mod params;
 pub mod pick;
+pub mod process;
 pub mod regen;
 pub mod select;
 pub mod sketch;

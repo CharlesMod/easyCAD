@@ -134,6 +134,46 @@ doc.bom(); doc.blob_refs();
   object per body, welded and watertight), `write_step` (AP214, via the kernel),
   `weld` and `open_edges`.
 
+## Process profiles, fits, teardrops, build orientation
+
+- `process::ProcessProfile` has `name`, `kind` (`Fdm/Sla/Sls/Molded/Cnc`),
+  per-side `fits` for `FitClass::{Press, Snug, Slide, Loose}`,
+  `hole_comp { base, per_mm }`, `xy_comp`, `first_layer_comp`,
+  `first_layer_chamfer` and `teardrop`. The built-ins are "FDM 0.4 generic", "SLA
+  generic" and "Injection molded (nominal)" (all zeros). Their numbers are starting
+  points to calibrate. User presets are loaded with `load_presets(dir)` and written
+  with `save_preset(dir)`.
+- Dimensions are `Expr(text, Option<Fit { role, class }>)`. Resolution is per side:
+  `Hole` gives `x + 2·allow + hole_comp(x)`, `Pin` gives `x − 2·allow − 2·xy_comp`,
+  `Gap` gives `x + allow`, and `Nominal` gives `x`. In a printed-to-printed mate,
+  each part takes its own share. Features use default roles: boss/standoff holes and
+  auto-holes are Hole/Snug, joint grooves/glands/pockets are Hole, tongues/lips/hooks
+  are Pin, and the parting-line clearance is Gap. Set a fit on the `Expr` to
+  override, or `Fit::NOMINAL` to opt out. Expressions can call `hole(x[, class])`,
+  `pin(x[, class])`, `gap([class])` and `tol([class])`; the class defaults to slide.
+- `DocData.active_profile` (new documents default to the nominal molded profile) and
+  `DocData.processes`. Use `Document::set_active_profile`, `add_profile`,
+  `regenerate_with_profile`, and `DocData::values()` (params under the active
+  profile). Every cached state is keyed on the profile's fit numbers, so switching
+  back hits the cache.
+- Build orientation is `BuildOrientation { down: CubeFace, quarter_turns }`, with
+  `quat()` mapping model to build coordinates (plate face to −Z). It is set per
+  document or per body with `Document::set_build_orientation(Option<BodyId>, _)`.
+- Teardrops run as a final process stage after all features. They apply to full
+  round internal holes whose axis is within `angle_threshold_deg` of horizontal
+  (relative to build-up) and whose diameter is at least `min_diameter`. The stage
+  cuts a prism over the hole's axial extent: 45° tangent lines meet r·√2 above the
+  centre (`Pointed45`), or are cut flat at `fraction·r` (`Flat`). The lower half
+  stays exactly round. Overrides are `DocData.teardrop_overrides`. The outcome is in
+  `RegenResult.process` (`teardropped`, `skipped` with reasons, `warnings`). The
+  stage is skipped entirely for profiles with teardrops disabled (molded, SLA), and
+  changing orientation re-runs only this stage.
+- `Document::export(ExportFormat::{Stl, ThreeMf, Step}, path, &ExportOptions { profile, orient_to_plate, include_reference })`.
+- `process::calibration_coupon(nominal, offsets)` builds a plate of
+  `nominal + offset` holes plus nominal pins, with index notches. Default offsets
+  run −0.10…+0.50 in 0.05 steps. Feed the results to
+  `ProcessProfile::from_calibration(&CalibrationResult)`.
+
 ## File format (`.cwk`), sync-friendly
 
 A `.cwk` is a folder containing `doc.json` and `blobs/<sha256>`. `doc.json` holds
@@ -183,3 +223,14 @@ verified on load.
   `Document::accept_candidate(feature, &selector, &best_candidate)` (undoable,
   label "Re-pick reference"). `select::replace_selector` does the same on any
   value. A score ≤ 1 is accepted.
+- **Process profiles (breaking).**
+  - `params::Expr` is now `Expr(String, Option<Fit>)`. Reading `.0` still works;
+    construct it with `Expr::new`, `From<&str/f64/i32>` and `.fit(..)`. Its JSON is
+    still a plain string unless a fit is set.
+  - New `Expr::eval_or` and `eval_nominal`, and `Params::evaluate_seeded`.
+  - `AutoHole` gained `fit: Option<Fit>`.
+  - `DocData` gained `processes`, `active_profile`, `build_orientation`,
+    `body_orientations` and `teardrop_overrides` (all serde-defaulted).
+  - `RegenResult` gained `process: ProcessReport`.
+  - `occt::FaceInfo` gained `point`.
+  - New module `process`; see the section above.

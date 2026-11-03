@@ -778,6 +778,7 @@ rust::Vec<FaceInfo> faces(const Shape &s) {
       if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
       fi.normal = toV(n);
     }
+    fi.point = toV(surf->Value(u, v));
     out.push_back(fi);
   }
   return out;
