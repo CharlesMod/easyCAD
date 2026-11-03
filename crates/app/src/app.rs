@@ -147,6 +147,7 @@ pub struct EasyCadApp {
     pub cloud: crate::cloud::Cloud,
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
     pub show_perf: bool,
+    pub bench_start: Option<f64>,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -244,6 +245,7 @@ impl EasyCadApp {
             section_bbox: None,
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
+            bench_start: None,
         }
     }
 
@@ -1078,6 +1080,7 @@ impl EasyCadApp {
         if ui.input(|i| i.key_pressed(egui::Key::F12)) {
             self.show_perf = !self.show_perf;
         }
+        self.bench_pan(ui.ctx());
         crate::viewport::gpu::set_hidden(!crate::widgets::window_visible(ui.ctx()));
         self.poll_worker();
         for n in self.cloud.poll(self.path.as_deref()) {
@@ -1361,6 +1364,26 @@ impl EasyCadApp {
         if interval > 0.0 && dirty {
             ctx.request_repaint_after(Duration::from_secs_f64(interval.clamp(0.5, 60.0)));
         }
+    }
+
+    /// `EASYCAD_BENCH_PAN=<seconds>`: once the model is shown, pan back and forth
+    /// every frame for that long, print the profiler's last second, and quit.
+    fn bench_pan(&mut self, ctx: &egui::Context) {
+        let Some(secs) = std::env::var("EASYCAD_BENCH_PAN").ok().and_then(|s| s.parse::<f64>().ok()) else { return };
+        if self.model.is_none() || self.regenerating() {
+            ctx.request_repaint();
+            return;
+        }
+        let start = *self.bench_start.get_or_insert(self.now);
+        let t = self.now - start;
+        if t > secs {
+            println!("{}", crate::profiler::report());
+            self.quit = true;
+            return;
+        }
+        let d = if (t * 2.0) as i64 % 2 == 0 { 4.0 } else { -4.0 };
+        self.camera.pan(glam::Vec2::new(d, d * 0.5), self.viewport_size.y.max(1.0));
+        ctx.request_repaint();
     }
 
     /// Clean exit: unsaved work keeps a last recovery copy, saved work leaves none.

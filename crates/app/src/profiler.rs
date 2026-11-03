@@ -116,6 +116,31 @@ pub fn gpu_ms(ms: f32) {
     with(|r| r.gpu.push(ms));
 }
 
+/// One line per series over the last second (for `EASYCAD_BENCH_PAN`).
+pub fn report() -> String {
+    with(|r| {
+        let line = |name: &str, s: &Series| match summary(&s.recent()) {
+            Some((avg, p99)) => format!("{name}: avg {avg:.2} ms, p99 {p99:.2} ms ({} samples)\n", s.recent().len()),
+            None => format!("{name}: none\n"),
+        };
+        let rendered = r.rendered.recent();
+        format!(
+            "{}\npresent {}\n{}{}{}{}{}renders {} of {} frames, last: {} draws, {} tris",
+            r.adapter,
+            r.present,
+            line("frame gap", &r.interval),
+            line("UI logic", &r.app),
+            line("whole update", &r.update),
+            line("3D encode", &r.encode),
+            line("3D GPU", &r.gpu),
+            rendered.iter().filter(|v| **v > 0.5).count(),
+            rendered.len(),
+            r.draws,
+            r.tris
+        )
+    })
+}
+
 fn summary(v: &[f32]) -> Option<(f32, f32)> {
     if v.is_empty() {
         return None;

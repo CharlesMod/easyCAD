@@ -86,7 +86,11 @@ the last second, a graph of frame gaps against 144 Hz and 60 Hz, and per frame: 
 (timestamp queries, requested at device creation when the adapter has them), 3D renders vs
 image-cache hits, draws and triangles of the last render (`profiler.rs`). The overlay itself
 never asks for frames. `EASYCAD_PRESENT=immediate|mailbox|fifo` overrides vsync to see
-uncapped frame times. `tests/pan_perf.rs` times a pan of the sample at 2560×1440.
+uncapped frame times (a Wayland compositor still paces frames to the display's refresh, so
+the frame gap can't beat the monitor's mode). `EASYCAD_BENCH_PAN=<seconds>` pans the open model
+every frame for that long, prints the profiler's last second and quits
+(`easycad --sample` with it is the real-GPU benchmark). `tests/pan_perf.rs` times a pan of the
+sample at 2560×1440.
 
 Started inside a distrobox/toolbox container without a GPU Vulkan driver (wgpu would
 fall back to llvmpipe), the binary re-runs itself on the host through
