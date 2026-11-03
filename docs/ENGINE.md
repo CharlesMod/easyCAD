@@ -295,8 +295,23 @@ clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) o
     bounding box is centred on), `hidden_lines`, `exact` (HLRBRep_Algo, or
     PolyAlgo; the exact algorithm falls back to PolyAlgo automatically and reports
     `poly_fallback`), `smooth_edges`, and `bodies` (empty = all solids).
-  - Projection uses `ViewFrame` (`sheet(p3)`, `local`, `sheet_dir`), and
-    `ViewOrientation::basis()` gives (toward viewer, right, up).
+  - Projection uses `ViewFrame` (`sheet(p3)`, `local`, `sheet_dir`; each
+    `ViewResult.frame`), `ViewOrientation::basis()` gives (toward viewer, right,
+    up) and `quat()` the model → view rotation of any orientation.
+  - `scope` (`Root`, `Assembly`, `Component`, `Occurrence`) and `exploded`: what
+    the view shows (non-root scopes hide lines between parts).
+  - **Section views:** `section: Some(SectionCut { parent, origin, normal, label })`.
+    `Drawing::add_section_view(parent, &frame, a, b, position)` makes one from a
+    sheet line across the parent: the plane holds the line and the parent's view
+    direction, the view looks at the cut along `-normal` (the side of the line the
+    view is placed on is the removed side, so the arrows point away from it, as
+    with a projected view), copies the parent's scale and contents and takes the
+    next free letter (no I, O, Q). Each part is cut (`Shape::split`) before the
+    hidden-line pass; its cut face (`Shape::section`) is hatched
+    (`ViewResult.hatch`, 45° / 135° alternating between parts,
+    `drawing::hatch_lines`). `ViewResult.marks` holds the chain cutting line with
+    thick ends, arrows and letters on the parent and the "SECTION A-A" caption; a
+    parent turned so the plane is no longer edge-on is reported in `error`.
 - **HLR:** `occt::Shape::hlr(dir, x_dir, exact, defl)`. Each `ViewEdge` has sheet
   points, a visible flag, a kind (`Sharp`, `Smooth` or `Outline`) and
   `source: Option<(BodyId, edge index)>`. Sources are found by matching against
@@ -318,16 +333,34 @@ clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) o
   - `CenterMark`;
   - `Centerline`;
   - `PartingLine` (from a `PartingJoint`/`Split` feature's plane, which must be seen
-    edge-on).
+    edge-on);
+  - `ItemBalloon` (assembly BOM item of an occurrence, or of a library-part body)
+    and `BomTable` (flat or indented, columns sized to their text);
+  - GD&T: `FeatureControl { symbol: GdtSymbol, tolerance, diameter, modifier:
+    Option<MaterialCondition>, datums, target: Option<DimRef>, position }` (the 14
+    characteristic symbols drawn as lines so every export shows them; form
+    tolerances drop their datums; `{param}` in the tolerance) and `Datum { target,
+    label, position }` (letter box, filled triangle on the edge).
 
   Each `AnnotationResult` has `status` (`Ok` or `Dangling(reason)`), `value` (model
   mm or degrees, already divided by the view scale), `text` and `prims` (polylines
   with a `LineStyle`, circles, texts, arrows in sheet mm). Dangling annotations stay
   in the document and recover if the geometry returns (e.g. on undo).
   `text_override` replaces the shown text.
-- **Export:** `drawing::primitives(result, drawing)` gives everything to draw;
+- **Dimension text clearing:** after all annotations resolve, the text of linear,
+  ordinate, radius, angle and chamfer dimensions that would overlap other text
+  (annotations, title block) or the drawn view geometry (edges shown, hatch)
+  moves: along its dimension line either way (the line is extended under text
+  moved past its ends), then to the line's other side; along its leader outward
+  (the leader grows). Text with no free spot stays.
+- **Text metrics:** `drawing::text_width(s, h)` is Helvetica's AFM advance widths
+  (a text height is the cap height, the em is `FONT_EM` = 1.4 h). The PDF centres
+  and right-aligns with it, the BOM table and feature control frames size their
+  cells with it, and the SVG asks for Helvetica / Arial at the same em.
+- **Export:** `drawing::primitives(result, drawing)` gives everything to draw
+  (views, hatch, section marks, annotations; `Prim::Fill` is a filled polygon);
   `to_svg` (mm viewBox), `to_dxf` (R12 LINE/CIRCLE/TEXT/SOLID on the layers
-  VISIBLE, HIDDEN, DIM, CENTER, PARTING, FRAME and TEXT, `$INSUNITS` = mm) and
+  VISIBLE, HIDDEN, DIM, CENTER, PARTING, FRAME, HATCH and TEXT, `$INSUNITS` = mm) and
   `to_pdf` (one vector page via the `pdf-writer` crate, base-14 Helvetica with
   WinAnsi for ⌀ ° ×). The GUI can render `DrawingResult` directly.
 
