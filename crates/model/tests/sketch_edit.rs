@@ -205,10 +205,13 @@ fn project_model_edges() {
     assert_eq!(made.len(), 16);
 }
 
+/// A reference entity: end points, and for an arc its centre and direction.
+type Seg = (DVec2, DVec2, Option<(DVec2, bool)>);
+
 /// Reference geometry as a DXF import makes it: every entity has its own end
 /// points (equal, not shared), fixed exactly once (lines: both ends; arcs: centre,
 /// start and one coordinate of the end; circles: centre and radius).
-fn fixed_reference(segs: &[(DVec2, DVec2, Option<(DVec2, bool)>)]) -> (Sketch, EntityId) {
+fn fixed_reference(segs: &[Seg]) -> (Sketch, EntityId) {
     let mut s = Sketch::new("S", Plane::XY);
     let mut first = None;
     for &(a, b, arc) in segs {
@@ -236,7 +239,7 @@ fn fixed_reference(segs: &[(DVec2, DVec2, Option<(DVec2, bool)>)]) -> (Sketch, E
 
 /// Offset `segs` by `d` and check the result is fully determined with no redundant
 /// equation, and that every new entity runs at `d` from its source.
-fn offset_is_determined(segs: &[(DVec2, DVec2, Option<(DVec2, bool)>)], d: f64) -> Sketch {
+fn offset_is_determined(segs: &[Seg], d: f64) -> Sketch {
     let (mut s, e0) = fixed_reference(segs);
     let v = Values::new();
     let before = s.analyze(&v).unwrap();
@@ -251,7 +254,7 @@ fn offset_is_determined(segs: &[(DVec2, DVec2, Option<(DVec2, bool)>)], d: f64) 
     assert_eq!(rep.equations, rep.rank, "no redundant equation: {rep:?}");
     assert_eq!(rep.status, ConstraintStatus::FullyConstrained);
     let Constraint::Offset { source, target, .. } = s.constraints.last().unwrap().clone() else { panic!() };
-    assert_eq!(closed, true);
+    assert!(closed);
     for (src, tgt) in source.iter().zip(&target) {
         let mid = |e: EntityId| match s.entities[e.0 as usize].geom {
             Geom::Line { a, b } => (s.point(a) + s.point(b)) / 2.0,
@@ -277,10 +280,10 @@ fn offset_is_determined(segs: &[(DVec2, DVec2, Option<(DVec2, bool)>)], d: f64) 
     s
 }
 
-fn l(a: (f64, f64), b: (f64, f64)) -> (DVec2, DVec2, Option<(DVec2, bool)>) {
+fn l(a: (f64, f64), b: (f64, f64)) -> Seg {
     (DVec2::new(a.0, a.1), DVec2::new(b.0, b.1), None)
 }
-fn arc(a: (f64, f64), b: (f64, f64), c: (f64, f64), ccw: bool) -> (DVec2, DVec2, Option<(DVec2, bool)>) {
+fn arc(a: (f64, f64), b: (f64, f64), c: (f64, f64), ccw: bool) -> Seg {
     (DVec2::new(a.0, a.1), DVec2::new(b.0, b.1), Some((DVec2::new(c.0, c.1), ccw)))
 }
 
@@ -345,4 +348,23 @@ fn offset_of_circles_and_open_arc_chains_is_fully_determined() {
     let Geom::Line { a, .. } = s.entities[new[0].0 as usize].geom else { panic!() };
     // left of travel of an open chain is inside the slot here
     assert!((s.point(a) - DVec2::new(0.0, 1.0)).length() < 1e-9, "{:?}", s.point(a));
+}
+
+#[test]
+fn filleted_offset_solves() {
+    // the wizard's profile: a fixed rectangle, offset, its corners rounded (the
+    // fillet's tangent points are placed by the fillet, not by the offset)
+    let (mut s, e0) = fixed_reference(&[l((0.0, 0.0), (30.0, 0.0)), l((30.0, 0.0), (30.0, 20.0)), l((30.0, 20.0), (0.0, 20.0)), l((0.0, 20.0), (0.0, 0.0))]);
+    let v = vals(&[("d", 2.5), ("r", 1.0)]);
+    let new = s.offset_chain(e0, "d", &v).unwrap();
+    let Geom::Line { a, .. } = s.entities[new[1].0 as usize].geom else { panic!() };
+    s.fillet_corner(a, "r", &v).unwrap();
+    // (a corner fillet leaves its tangent points free to first order along the
+    // lines, so this checks the solved shape rather than the rank)
+    for r in [1.0, 2.5, 4.0] {
+        let rep = s.solve(&vals(&[("d", 2.5), ("r", r)])).unwrap();
+        assert!(rep.converged && rep.status != ConstraintStatus::Conflicting, "r = {r}: {rep:?}");
+        let want = 35.0 * 25.0 - (1.0 - PI / 4.0) * r * r;
+        assert!(areas(&s).iter().any(|a| (a - want).abs() < 1e-4), "r = {r}: {:?} vs {want}", areas(&s));
+    }
 }

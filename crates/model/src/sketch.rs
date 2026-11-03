@@ -348,9 +348,11 @@ fn wrap_angle(a: f64) -> f64 {
 /// determined with no redundancy. At a transversal joint the point lies on both
 /// offset carriers. At a tangent joint (and at an open end) it lies on one offset
 /// carrier and on the normal through the source joint: there the two carriers
-/// touch, and their equations would be dependent. Target arcs share (or are tied
-/// to) the source centre and take their radius from their ends; a target circle
-/// takes the source radius ± d.
+/// touch, and their equations would be dependent. A target end shared with no
+/// other target is on its carrier only, unless the source chain ends there too
+/// (then it is on the normal): a fillet or trim of the offset places such ends.
+/// Target arcs share (or are tied to) the source centre and take their radius
+/// from their ends; a target circle takes the source radius ± d.
 fn lower_offset(
     sk: &Sketch,
     x0: &[f64],
@@ -434,7 +436,12 @@ fn lower_offset(
         match inc[..] {
             [(k, j)] => {
                 eqs.push(on(k, q));
-                eqs.push(normal(k, q, j));
+                // an end of the source chain: pinned on its normal. Otherwise the
+                // target was cut here (a fillet, a trim) and what cut it places it.
+                let shared = ends.iter().filter(|e| pt(e.2).distance(pt(j)) < 1e-6).count();
+                if shared < 2 {
+                    eqs.push(normal(k, q, j));
+                }
             }
             [(k1, j1), (k2, j2), ..] => {
                 eqs.push(on(k1, q));
