@@ -366,3 +366,32 @@ fn background_handle_syncs_and_stops() {
     wait_completed(&rx);
     h.stop();
 }
+
+#[tokio::test]
+async fn our_own_uploads_are_not_remote_news() {
+    let t = tempfile::tempdir().unwrap();
+    let remote = MemoryRemote::new();
+    let mut a = Device::new(&remote, t.path(), "a");
+    write_doc(&a, "Box", "{}", b"blob");
+    a.write("old.txt", b"x");
+    a.sync().await;
+    std::fs::remove_file(a.docs().join("old.txt")).unwrap();
+    a.sync().await;
+    assert!(!a.engine.remote_changed().await.unwrap(), "only our own uploads and trash happened");
+    remote.put(ROOT, "from_b.txt", b"b", "b");
+    assert!(a.engine.remote_changed().await.unwrap(), "another device's upload is news");
+    assert!(!a.engine.remote_changed().await.unwrap(), "and only once");
+}
+
+#[tokio::test]
+async fn downloads_are_noted_as_our_own_writes() {
+    let t = tempfile::tempdir().unwrap();
+    let remote = MemoryRemote::new();
+    remote.put(ROOT, "sub/x.txt", b"x", "b");
+    let mut a = Device::new(&remote, t.path(), "a");
+    a.sync().await;
+    let w = a.engine.written();
+    let w = w.lock().unwrap();
+    assert!(w.contains_key(&a.docs().join("sub/x.txt")));
+    assert!(w.contains_key(&a.docs().join("sub")), "the folder it created too");
+}

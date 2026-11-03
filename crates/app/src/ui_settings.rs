@@ -109,12 +109,10 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
                 app.warn(format!("Open failed: {e}"));
             }
         }
-        Some(CloudAct::Dismiss(i)) => {
-            if i < app.cloud.conflicts.len() {
-                app.cloud.conflicts.remove(i);
-            }
+        Some(CloudAct::Dismiss(i)) if i < app.cloud.conflicts.len() => {
+            app.cloud.conflicts.remove(i);
         }
-        None => {}
+        Some(CloudAct::Dismiss(_)) | None => {}
     }
     if inch != crate::units::inch() {
         crate::units::set_inch(inch);

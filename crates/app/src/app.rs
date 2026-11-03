@@ -1482,7 +1482,8 @@ impl eframe::App for EasyCadApp {
 /// `EASYCAD_DEBUG_REPAINT`: once a second, frames drawn and what asked for them.
 fn debug_repaint(ctx: &egui::Context) {
     use std::sync::Mutex;
-    static LOG: Mutex<Option<(std::time::Instant, u32, std::collections::BTreeMap<String, u32>)>> = Mutex::new(None);
+    type Second = (std::time::Instant, u32, std::collections::BTreeMap<String, u32>);
+    static LOG: Mutex<Option<Second>> = Mutex::new(None);
     let mut g = LOG.lock().unwrap();
     let (t0, n, causes) = g.get_or_insert_with(|| (std::time::Instant::now(), 0, Default::default()));
     *n += 1;

@@ -66,8 +66,16 @@ camera, meshes, colours, highlights, size) reuses the last offscreen image, so h
 and status-bar repaints cost a blit, not a 4×MSAA pass (`ViewportGpu::render_cached`).
 While the window is minimized or covered the viewport neither renders nor blits.
 Busy spinners (`widgets::spinner`) animate at full rate only in the focused window:
-2 frames/s when unfocused, none when hidden. `EASYCAD_DEBUG_REPAINT=1` prints frames
-per second, 3D renders and what requested each frame.
+2 frames/s when unfocused, none when hidden. Also: the offscreen target is allocated
+with headroom (rounded up to 256 px) so dragging the window edge reuses it; bodies
+wholly outside the view are not drawn; imported STEP colours keep one `Arc` per
+mesh so a regenerated, unchanged model stays cached; the hover pick skips its ray
+cast while pointer, camera, model and visibility are unchanged (`PickStack::key`);
+"Regenerating…" has no repaint timer (the worker wakes the UI). Sync ignores watcher
+events for files it wrote itself and Drive changes it made itself; `settings.json` is
+rewritten only when it changed; recovery copies hard-link the previous copy's blobs.
+`EASYCAD_DEBUG_REPAINT=1` prints frames per second, 3D renders and what requested
+each frame.
 
 ## Google Drive sync
 

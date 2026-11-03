@@ -150,7 +150,7 @@ fn unchanged_frames_reuse_the_image() {
             grid: None,
         })
     };
-    let mut draw = |gpu: &mut ViewportGpu, f: &Arc<Frame3D>| {
+    let draw = |gpu: &mut ViewportGpu, f: &Arc<Frame3D>| {
         let mut enc = device.create_command_encoder(&Default::default());
         gpu.render_cached(&device, &queue, &mut enc, f);
         queue.submit([enc.finish()]);
@@ -162,4 +162,45 @@ fn unchanged_frames_reuse_the_image() {
     cam.orbit(Vec2::new(4.0, 1.0));
     draw(&mut gpu, &frame(&cam));
     assert_eq!(gpu.renders, 2, "a camera move renders");
+}
+
+/// A body wholly outside the view costs no draw call.
+#[test]
+fn bodies_outside_the_view_are_skipped() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        eprintln!("no wgpu adapter: skipped");
+        return;
+    };
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let mut gpu = ViewportGpu::new(&device, &adapter, COLOR_FORMAT);
+    let mesh = Arc::new(grid_mesh(8));
+    let mut cam = Camera::default();
+    cam.fit_sphere(Vec3::new(50.0, 50.0, 0.0), 75.0, 1.6);
+    let size = Vec2::new(640.0, 400.0);
+    let mut draws = |model: glam::Mat4| {
+        let f = Frame3D {
+            size_px: [640, 400],
+            view_proj: cam.view_proj(size),
+            eye: cam.eye(),
+            forward: cam.forward(),
+            ortho: false,
+            light: Vec3::Z,
+            background: [0.1, 0.1, 0.1, 1.0],
+            mode: DisplayMode::Shaded,
+            edge_color: [0.1, 0.1, 0.1, 1.0],
+            bodies: vec![DrawBody { mesh: mesh.clone(), color: [0.7, 0.7, 0.7, 1.0], translucent: false, colors: None, model }],
+            highlights: Vec::new(),
+            grid: None,
+        };
+        let mut enc = device.create_command_encoder(&Default::default());
+        gpu.render(&device, &queue, &mut enc, &f);
+        queue.submit([enc.finish()]);
+        gpu.last_draws
+    };
+    assert_eq!(draws(glam::Mat4::IDENTITY), 1);
+    assert_eq!(draws(glam::Mat4::from_translation(Vec3::new(10_000.0, 0.0, 0.0))), 0);
 }

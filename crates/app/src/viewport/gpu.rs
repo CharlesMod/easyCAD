@@ -107,14 +107,25 @@ struct GpuMesh {
     ebuf: Option<wgpu::Buffer>,
     edge_verts: u32,
     last_used: u64,
+    /// Bounds in the mesh frame, for skipping bodies outside the view.
+    bounds: (Vec3, Vec3),
 }
 
 struct Target {
+    /// The part in use (top left); the textures are `cap` big so a window
+    /// resize reuses them instead of reallocating every step.
     size: [u32; 2],
+    cap: [u32; 2],
     msaa_color: Option<wgpu::TextureView>,
     depth: wgpu::TextureView,
     resolve: wgpu::TextureView,
     blit_bind: wgpu::BindGroup,
+    /// `size / cap`: the blit reads only the part in use
+    blit_uv: wgpu::Buffer,
+}
+
+fn blit_scale(size: [u32; 2], cap: [u32; 2]) -> [f32; 4] {
+    [size[0] as f32 / cap[0] as f32, size[1] as f32 / cap[1] as f32, 0.0, 0.0]
 }
 
 /// GPU state, stored in egui_wgpu's callback resources.
@@ -140,6 +151,8 @@ pub struct ViewportGpu {
     last: Option<Arc<Frame3D>>,
     /// Offscreen renders done (the image cache skips the rest).
     pub renders: u64,
+    /// Draw calls in the last render (bodies outside the view add none).
+    pub last_draws: usize,
     /// Bytes uploaded for meshes so far (for the status bar / tests).
     pub uploaded_meshes: u64,
 }
@@ -373,6 +386,16 @@ impl ViewportGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -434,6 +457,7 @@ impl ViewportGpu {
             frame: 0,
             last: None,
             renders: 0,
+            last_draws: 0,
             uploaded_meshes: 0,
         }
     }
@@ -506,6 +530,12 @@ impl ViewportGpu {
             })
         });
         self.uploaded_meshes += 1;
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for p in m.positions.iter().chain(m.edges.iter().flat_map(|e| e.points.iter())) {
+            lo = lo.min(Vec3::from(*p));
+            hi = hi.max(Vec3::from(*p));
+        }
         self.meshes.insert(
             k,
             GpuMesh {
@@ -517,18 +547,30 @@ impl ViewportGpu {
                 ebuf,
                 edge_verts: (lines.len() / 3) as u32,
                 last_used: self.frame,
+                bounds: (lo, hi),
             },
         );
     }
 
-    fn ensure_target(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+    fn ensure_target(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: [u32; 2]) {
         let size = [size[0].max(1), size[1].max(1)];
-        if self.target.as_ref().is_some_and(|t| t.size == size) {
-            return;
+        if let Some(t) = self.target.as_mut() {
+            let fits = t.cap[0] >= size[0] && t.cap[1] >= size[1];
+            // far too big after a big shrink: give the memory back
+            let roomy = (t.cap[0] as u64 * t.cap[1] as u64) <= 2 * size[0] as u64 * size[1] as u64 + (1 << 20);
+            if fits && roomy {
+                if t.size != size {
+                    t.size = size;
+                    queue.write_buffer(&t.blit_uv, 0, bytemuck::bytes_of(&blit_scale(size, t.cap)));
+                }
+                return;
+            }
         }
+        // round up so a drag of the window edge stays inside one allocation
+        let cap = [size[0].div_ceil(256) * 256, size[1].div_ceil(256) * 256];
         let ext = wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
+            width: cap[0],
+            height: cap[1],
             depth_or_array_layers: 1,
         };
         let tex =
@@ -555,10 +597,21 @@ impl ViewportGpu {
         );
         let msaa_color = (self.msaa > 1).then(|| tex("viewport msaa", COLOR_FORMAT, self.msaa, rt));
         let depth = tex("viewport depth", DEPTH_FORMAT, self.msaa, rt);
+        let blit_uv = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blit uv"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&blit_uv, 0, bytemuck::bytes_of(&blit_scale(size, cap)));
         let blit_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("blit"),
             layout: &self.blit_layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: blit_uv.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&resolve),
@@ -571,6 +624,8 @@ impl ViewportGpu {
         });
         self.target = Some(Target {
             size,
+            cap,
+            blit_uv,
             msaa_color,
             depth,
             resolve,
@@ -608,7 +663,7 @@ impl ViewportGpu {
         self.frame += 1;
         self.renders += 1;
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.ensure_target(device, f.size_px);
+        self.ensure_target(device, queue, f.size_px);
         for b in &f.bodies {
             self.upload(device, &b.mesh, b.colors.as_ref());
         }
@@ -671,7 +726,13 @@ impl ViewportGpu {
             model: b.model.to_cols_array_2d(),
         };
         let wire = f.mode == DisplayMode::Wireframe;
-        for b in f.bodies.iter().filter(|b| !b.translucent) {
+        // bodies wholly outside the view are not drawn (nothing visible is lost)
+        let shown: Vec<&DrawBody> = f
+            .bodies
+            .iter()
+            .filter(|b| self.meshes.get(&key(&b.mesh)).is_none_or(|g| in_view(g.bounds, f.view_proj * b.model)))
+            .collect();
+        for b in shown.iter().copied().filter(|b| !b.translucent) {
             if wire {
                 continue;
             }
@@ -683,7 +744,7 @@ impl ViewportGpu {
             } else {
                 f.edge_color
             };
-            for b in &f.bodies {
+            for b in shown.iter().copied() {
                 let c = if b.translucent {
                     [b.color[0], b.color[1], b.color[2], 0.9]
                 } else {
@@ -695,7 +756,7 @@ impl ViewportGpu {
         if f.grid.is_some() {
             list.push((P::Grid, 0, What::Grid, u([0.0; 4], 0.0, &Mat4::IDENTITY)));
         }
-        for b in &f.bodies {
+        for b in shown.iter().copied() {
             if b.translucent {
                 list.push((P::Blend, key(&b.mesh), What::All, ub(b, b.color, 0.6)));
             } else if wire {
@@ -718,6 +779,7 @@ impl ViewportGpu {
             }
         }
         list.truncate(MAX_DRAWS as usize);
+        self.last_draws = list.len();
         let mut bytes = vec![0u8; list.len().max(1) * SLOT as usize];
         for (i, (_, _, _, du)) in list.iter().enumerate() {
             let o = i * SLOT as usize;
@@ -760,6 +822,7 @@ impl ViewportGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        pass.set_viewport(0.0, 0.0, t.size[0] as f32, t.size[1] as f32, 0.0, 1.0);
         pass.set_bind_group(0, &self.globals_bind, &[]);
         for (i, (p, k, what, _)) in list.iter().enumerate() {
             let pipe = match p {
@@ -861,6 +924,26 @@ impl CallbackTrait for ViewportCallback {
             gpu.paint(pass);
         }
     }
+}
+
+/// Whether any part of the box `lo..hi` (mesh frame) can land in the view:
+/// false only when all 8 corners are outside one clip plane.
+fn in_view((lo, hi): (Vec3, Vec3), mvp: Mat4) -> bool {
+    if !lo.is_finite() || !hi.is_finite() {
+        return true;
+    }
+    let c: Vec<glam::Vec4> = (0..8)
+        .map(|i| {
+            let p = Vec3::new(
+                if i & 1 == 0 { lo.x } else { hi.x },
+                if i & 2 == 0 { lo.y } else { hi.y },
+                if i & 4 == 0 { lo.z } else { hi.z },
+            );
+            mvp * p.extend(1.0)
+        })
+        .collect();
+    let out = |f: &dyn Fn(&glam::Vec4) -> bool| c.iter().all(f);
+    !(out(&|v| v.x < -v.w) || out(&|v| v.x > v.w) || out(&|v| v.y < -v.w) || out(&|v| v.y > v.w) || out(&|v| v.z < 0.0) || out(&|v| v.z > v.w))
 }
 
 /// Whether two frames draw the same pixels (meshes compared by identity).

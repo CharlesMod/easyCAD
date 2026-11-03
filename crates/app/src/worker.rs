@@ -354,6 +354,8 @@ pub fn ctx_key(path: &[OccurrenceId], body: BodyId) -> BodyId {
     }
 }
 
+type VertexColors = Arc<Vec<[f32; 3]>>;
+
 /// A component body's mesh with what its instances share: picker, topology, bounds.
 type MeshEntry = (Arc<Mesh>, Arc<BodyPicker>, Arc<(Vec<FaceInfo>, Vec<EdgeInfo>)>, BBox);
 
@@ -364,6 +366,22 @@ struct AsmCaches {
     /// Per mesh (by pointer): picker, topology and mesh bounds, shared by instances.
     meshes: HashMap<usize, MeshEntry>,
     used: std::collections::HashSet<usize>,
+    /// Per-vertex colours by mesh (pointer; the mesh is held so the address stays
+    /// unique): the same `Arc` every regeneration, so the viewport's image cache
+    /// and the GPU upload see an unchanged body as unchanged.
+    colors: HashMap<usize, (Arc<Mesh>, Option<VertexColors>)>,
+}
+
+impl AsmCaches {
+    fn colors(&mut self, body: &easycad_model::regen::Body, mesh: &Arc<Mesh>, q: MeshQuality) -> Option<Arc<Vec<[f32; 3]>>> {
+        body.appearance()?;
+        let k = Arc::as_ptr(mesh) as usize;
+        self.colors
+            .entry(k)
+            .or_insert_with(|| (mesh.clone(), body.mesh_colors(q).ok().map(Arc::new)))
+            .1
+            .clone()
+    }
 }
 
 fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
@@ -407,6 +425,8 @@ fn process(
 ) -> Output {
     // no kernel mutex: the engine's concurrency contract allows parallel threads
     let t0 = Instant::now();
+    // colours of meshes nothing else holds any more
+    acache.colors.retain(|_, (m, _)| Arc::strong_count(m) > 1);
     let asm_mode = !r.data.occurrences.is_empty();
     let mut asm_out: Option<(AssemblyResult, Option<MateSolve>, ComponentId, OccPath)> = None;
     let result = if asm_mode {
@@ -486,16 +506,12 @@ fn process(
         .map(|b| {
             let faces = b.shape().faces().unwrap_or_default();
             let edges = b.shape().edges().unwrap_or_default();
-            let colors = b
-                .appearance()
-                .and_then(|_| b.mesh_colors(r.quality).ok())
-                .map(Arc::new);
             match b.mesh_quality(r.quality) {
                 Ok(m) => MeshedBody {
+                    colors: acache.colors(b, &m, r.quality),
                     body: b.clone(),
                     mesh: Some(m),
                     error: None,
-                    colors,
                     faces,
                     edges,
                 },
@@ -746,16 +762,12 @@ fn context_bodies(
     }
     let mut out = Vec::new();
     for (i, m, k) in prepared {
+        let colors = cache.colors(&i.body, &m, r.quality);
         let (_, picker, topo, _) = &cache.meshes[&k];
         let place = to_view * i.transform.affine();
         let stored = i.display.translation - i.transform.translation;
         let off = stored * t + i.path.first().and_then(|o| auto.get(o)).copied().unwrap_or(DVec3::ZERO);
         let xf = to_view * DAffine3::from_translation(off) * i.transform.affine();
-        let colors = i
-            .body
-            .appearance()
-            .and_then(|_| i.body.mesh_colors(r.quality).ok())
-            .map(Arc::new);
         out.push(CtxBody {
             key: ctx_key(&i.path, i.body.id),
             path: i.path.clone(),

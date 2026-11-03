@@ -223,7 +223,22 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     let model = app.model.clone();
     let filter = app.filter;
     if let (Some(m), Some(p)) = (&model, hover) {
-        if !resp.dragged() {
+        // the same pointer, camera, model and visibility pick the same stack:
+        // frames woken by something else (a spinner, sync, the worker) skip the ray cast
+        let pick_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (p.x.to_bits(), p.y.to_bits(), size.x.to_bits(), size.y.to_bits()).hash(&mut h);
+            let local = p - rect.min;
+            let (o, d) = app.camera.ray(Vec2::new(local.x, local.y), size);
+            [o.x, o.y, o.z, d.x, d.y, d.z].map(f32::to_bits).hash(&mut h);
+            (Arc::as_ptr(m) as usize, format!("{filter:?}"), app.camera.ortho).hash(&mut h);
+            let mut hidden: Vec<String> = app.hidden.iter().map(|b| format!("{b:?}")).collect();
+            hidden.sort();
+            hidden.hash(&mut h);
+            h.finish()
+        };
+        if !resp.dragged() && app.stack.key != Some(pick_key) {
             let local = p - rect.min;
             let (o, d) = app.camera.ray(Vec2::new(local.x, local.y), size);
             let tol = if app.camera.ortho {
@@ -239,6 +254,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
             }
             app.hover_pos = Some(p);
             app.stack.update(c);
+            app.stack.key = Some(pick_key);
         }
     } else if hover.is_none() {
         app.stack.clear();
@@ -358,8 +374,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
             theme::prop(12.0),
             theme::TEXT_MUTED,
         );
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
+        // no timer: the worker wakes the UI when the model arrives
     }
     if let Some(m) = &model {
         if let Some(i) = pick_popover(app, ui, rect, m) {

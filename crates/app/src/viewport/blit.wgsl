@@ -15,13 +15,15 @@ struct BlitOut {
 
 @group(0) @binding(0) var blit_tex: texture_2d<f32>;
 @group(0) @binding(1) var blit_samp: sampler;
+// xy: the used part of the texture (the target is allocated with headroom)
+@group(0) @binding(2) var<uniform> blit_uv: vec4<f32>;
 
 @vertex
 fn vs_blit(@builtin(vertex_index) vi: u32) -> BlitOut {
     let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
     var o: BlitOut;
     o.pos = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
-    o.uv = uv;
+    o.uv = uv * blit_uv.xy;
     return o;
 }
 

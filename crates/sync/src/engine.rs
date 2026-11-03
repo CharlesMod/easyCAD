@@ -20,6 +20,24 @@ pub struct Engine {
     cfg: SyncConfig,
     state: StateDb,
     events: EventSink,
+    /// Remote files this engine changed: id → (version it left, trashed), so the
+    /// change feed does not report our own uploads back as news.
+    own: std::collections::HashMap<String, (Option<i64>, bool)>,
+    written: Written,
+}
+
+/// Local paths the engine wrote or removed, with when, so the file watcher can
+/// ignore the events its own downloads cause.
+pub type Written = Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>>;
+
+fn note_written(w: &Written, p: &Path) {
+    let now = std::time::Instant::now();
+    let mut g = w.lock().unwrap();
+    g.retain(|_, t| now.duration_since(*t).as_secs() < 30);
+    // the file and the folders it may have created
+    for a in p.ancestors().take(8) {
+        g.insert(a.to_path_buf(), now);
+    }
 }
 
 /// Why an action did not run this pass.
@@ -77,7 +95,12 @@ fn unchanged(p: &Path, l: &LocalFile) -> bool {
 impl Engine {
     pub fn new(remote: Arc<dyn RemoteStore>, cfg: SyncConfig, events: EventSink) -> Engine {
         let state = StateDb::load(&cfg.state_path);
-        Engine { remote, cfg, state, events }
+        Engine { remote, cfg, state, events, own: Default::default(), written: Default::default() }
+    }
+
+    /// Paths this engine recently wrote (shared with the background watcher).
+    pub fn written(&self) -> Written {
+        self.written.clone()
     }
 
     pub fn config(&self) -> &SyncConfig {
@@ -95,7 +118,15 @@ impl Engine {
         let cs = self.remote.changes_since(&t).await?;
         self.state.page_token = Some(cs.new_token);
         self.state.save()?;
-        Ok(cs.changed > 0)
+        let theirs = cs.changes.iter().filter(|c| {
+            let ours = match self.own.get(&c.id) {
+                Some((_, true)) => c.removed,
+                Some((v, false)) => !c.removed && v.is_some() && *v == c.version,
+                None => false,
+            };
+            !c.folder && !ours
+        });
+        Ok(theirs.count() > 0 || cs.changed > cs.changes.len())
     }
 
     /// One full pass over every root. Offline and auth errors end the pass
@@ -278,6 +309,7 @@ impl Engine {
                 if !unchanged(&abs_path(&root.local, &path), &local) {
                     return Err(Skip::Deferred);
                 }
+                note_written(&self.written, &abs_path(&root.local, &path));
                 local::trash_local(&root.local, &path)?;
                 pass.st.entries.remove(&path);
                 pass.report.deleted_local += 1;
@@ -290,6 +322,7 @@ impl Engine {
                     _ => {}
                 }
                 self.remote.trash(&remote.id).await?;
+                self.own.insert(remote.id.clone(), (None, true));
                 pass.st.entries.remove(&path);
                 pass.remote.remove(&path);
                 pass.report.deleted_remote += 1;
@@ -320,6 +353,7 @@ impl Engine {
                         if let Some(d) = dest.parent() {
                             std::fs::create_dir_all(d)?;
                         }
+                        note_written(&self.written, &dest);
                         std::fs::copy(&same_here, &dest)?;
                     } else {
                         self.fetch(&f, &dest, &f.path, index, total).await?;
@@ -384,6 +418,7 @@ impl Engine {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
+        note_written(&self.written, dest);
         std::fs::rename(&tmp, dest)?;
         Ok(())
     }
@@ -437,6 +472,7 @@ impl Engine {
             f
         };
         pass.st.entries.insert(path.into(), entry(l, &got));
+        self.own.insert(got.id.clone(), (got.version, false));
         pass.remote.insert(path.into(), got);
         Ok(())
     }

@@ -213,3 +213,25 @@ async fn an_expired_session_says_so() {
     let e = client(&server).resume_upload(&format!("{}/upload/s", server.uri()), &req, &|_, _| {}).await.unwrap_err();
     assert!(matches!(e, RemoteError::SessionExpired), "{e}");
 }
+
+#[tokio::test]
+async fn changes_report_each_file() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/changes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "newStartPageToken": "9",
+            "changes": [
+                {"fileId": "a", "removed": false, "file": {"mimeType": "application/octet-stream", "trashed": false, "version": "4"}},
+                {"fileId": "b", "removed": false, "file": {"mimeType": "application/vnd.google-apps.folder", "version": "1"}},
+                {"fileId": "c", "removed": false, "file": {"trashed": true, "version": "7"}},
+                {"fileId": "d", "removed": true}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let cs = client(&server).changes_since("5").await.unwrap();
+    assert_eq!(cs.new_token, "9");
+    let v: Vec<_> = cs.changes.iter().map(|c| (c.id.as_str(), c.removed, c.version, c.folder)).collect();
+    assert_eq!(v, [("a", false, Some(4), false), ("b", false, Some(1), true), ("c", true, Some(7), false), ("d", true, None, false)]);
+}

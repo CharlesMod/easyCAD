@@ -131,6 +131,9 @@ pub fn candidates(hits: &[Hit], filter: Filter, facts: &dyn BodyFacts) -> Vec<Ca
 pub struct PickStack {
     pub items: Vec<Candidate>,
     pub index: usize,
+    /// Inputs of the pick that filled it (pointer, camera, model, visibility);
+    /// the viewport skips the ray cast while they are the same. `clear` resets it.
+    pub key: Option<u64>,
 }
 
 impl PickStack {
@@ -153,6 +156,7 @@ impl PickStack {
     pub fn clear(&mut self) {
         self.items.clear();
         self.index = 0;
+        self.key = None;
     }
 
     pub fn current(&self) -> Option<&Candidate> {

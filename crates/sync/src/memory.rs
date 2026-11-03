@@ -41,6 +41,7 @@ struct Inner {
     interrupt_at: Option<u64>,
     stats: Stats,
     change: u64,
+    log: Vec<crate::remote::Change>,
 }
 
 #[derive(Clone)]
@@ -120,8 +121,9 @@ impl MemoryRemote {
         let mut g = self.inner.lock().unwrap();
         if let Some(id) = g.files.values().find(|(f, _)| f.root == root && f.path == path).map(|(f, _)| f.id.clone()) {
             let f = g.files.remove(&id).unwrap();
-            g.trashed.insert(id, f);
+            g.trashed.insert(id.clone(), f);
             g.change += 1;
+            g.log.push(crate::remote::Change { id, removed: true, version: None, folder: false });
         }
     }
 
@@ -130,8 +132,12 @@ impl MemoryRemote {
     pub fn recreate_root(&self, root: &str) {
         let mut g = self.inner.lock().unwrap();
         g.roots.remove(root);
+        let gone: Vec<String> = g.files.values().filter(|(f, _)| f.root == root).map(|(f, _)| f.id.clone()).collect();
         g.files.retain(|_, (f, _)| f.root != root);
-        g.change += 1;
+        for id in gone {
+            g.change += 1;
+            g.log.push(crate::remote::Change { id, removed: true, version: None, folder: false });
+        }
     }
 
     fn check(&self) -> Result<std::sync::MutexGuard<'_, Inner>, RemoteError> {
@@ -161,7 +167,8 @@ fn store(g: &mut Inner, id: Option<String>, root: &str, path: &str, bytes: Vec<u
         modified_time: Some(chrono::Utc::now()),
         meta,
     };
-    g.files.insert(id, (f.clone(), bytes));
+    g.files.insert(id.clone(), (f.clone(), bytes));
+    g.log.push(crate::remote::Change { id, removed: false, version: Some(version), folder: false });
     f
 }
 
@@ -270,17 +277,20 @@ impl RemoteStore for MemoryRemote {
             g.trashed.insert(id.into(), f);
             g.stats.trashes += 1;
             g.change += 1;
+            g.log.push(crate::remote::Change { id: id.into(), removed: true, version: None, folder: false });
         }
         Ok(())
     }
 
     async fn start_page_token(&self) -> Result<String, RemoteError> {
-        Ok(self.check()?.change.to_string())
+        Ok(self.check()?.log.len().to_string())
     }
 
     async fn changes_since(&self, token: &str) -> Result<ChangeSet, RemoteError> {
         let g = self.check()?;
         let from: u64 = token.parse().unwrap_or(0);
-        Ok(ChangeSet { changed: g.change.saturating_sub(from) as usize, new_token: g.change.to_string() })
+        // the log has one entry per change, so a token is an index into it
+        let changes: Vec<_> = g.log.iter().skip(from as usize).cloned().collect();
+        Ok(ChangeSet { changed: changes.len(), new_token: g.log.len().to_string(), changes })
     }
 }

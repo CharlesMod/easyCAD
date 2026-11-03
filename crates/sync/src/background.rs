@@ -45,7 +45,7 @@ enum Cmd {
     Pause,
     Resume,
     Stop,
-    LocalChange,
+    LocalChange(Vec<std::path::PathBuf>),
 }
 
 /// Controls the background thread. Dropping it stops the thread (without
@@ -110,6 +110,7 @@ async fn run(
     watch_tx: mpsc::UnboundedSender<Cmd>,
 ) {
     let _watcher = if opts.watch { watch(&engine, watch_tx) } else { None };
+    let written = engine.written();
     let far = Duration::from_secs(365 * 24 * 3600);
     let mut paused = false;
     let mut auth_wait = false;
@@ -138,7 +139,14 @@ async fn run(
                     backoff = opts.first_backoff;
                     next_full = Instant::now();
                 }
-                Some(Cmd::LocalChange) => dirty = Some(Instant::now()),
+                Some(Cmd::LocalChange(paths)) => {
+                    // our own downloads and moves are not local edits
+                    let w = written.lock().unwrap();
+                    let fresh = |p: &std::path::Path| w.get(p).is_some_and(|t| t.elapsed().as_secs() < 10);
+                    if paths.is_empty() || paths.iter().any(|p| !fresh(p)) {
+                        dirty = Some(Instant::now());
+                    }
+                }
             },
             _ = tokio::time::sleep_until(wake) => {}
         }
@@ -196,8 +204,9 @@ fn watch(engine: &Engine, tx: mpsc::UnboundedSender<Cmd>) -> Option<notify::Reco
             if ev.kind.is_access() {
                 return;
             }
-            if ev.paths.iter().any(|p| !is_noise(p)) {
-                let _ = tx.send(Cmd::LocalChange);
+            let paths: Vec<std::path::PathBuf> = ev.paths.into_iter().filter(|p| !is_noise(p)).collect();
+            if !paths.is_empty() {
+                let _ = tx.send(Cmd::LocalChange(paths));
             }
         }
     })

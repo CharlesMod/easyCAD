@@ -82,6 +82,19 @@ pub fn write(doc: &Document, original: Option<&Path>) -> Result<PathBuf, String>
     let tmp = d.with_extension("tmp");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    // blobs (imported STEP files) are content-addressed: link the previous copy's
+    // instead of writing them again; save_to_dir writes only the missing ones
+    let (old, new) = (d.join("doc.ecad").join("blobs"), tmp.join("doc.ecad").join("blobs"));
+    if let Ok(rd) = std::fs::read_dir(&old) {
+        let wanted: std::collections::HashSet<String> = doc.blob_refs().into_iter().collect();
+        let _ = std::fs::create_dir_all(&new);
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if wanted.contains(&name) && std::fs::hard_link(e.path(), new.join(&name)).is_err() {
+                let _ = std::fs::copy(e.path(), new.join(&name));
+            }
+        }
+    }
     doc.save_to_dir(&tmp.join("doc.ecad"))
         .map_err(|e| e.to_string())?;
     let info = Info {

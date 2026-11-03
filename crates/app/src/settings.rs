@@ -160,7 +160,11 @@ impl Settings {
             if let Some(d) = p.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            let _ = std::fs::write(p, serde_json::to_string_pretty(self).unwrap_or_default());
+            let text = serde_json::to_string_pretty(self).unwrap_or_default();
+            // unchanged settings are not rewritten (each write is also a sync pass)
+            if std::fs::read_to_string(&p).ok().as_deref() != Some(text.as_str()) {
+                let _ = std::fs::write(p, text);
+            }
         }
     }
 }

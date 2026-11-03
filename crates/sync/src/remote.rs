@@ -53,6 +53,17 @@ pub struct UploadRequest {
     pub meta: FileMeta,
 }
 
+/// One entry of the remote change feed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Change {
+    pub id: String,
+    /// Gone for good, or in the trash.
+    pub removed: bool,
+    /// The file's version after the change, when the feed says.
+    pub version: Option<i64>,
+    pub folder: bool,
+}
+
 /// Result of polling the remote change feed.
 #[derive(Debug, Clone, Default)]
 pub struct ChangeSet {
@@ -60,6 +71,8 @@ pub struct ChangeSet {
     pub changed: usize,
     /// Token to use for the next poll.
     pub new_token: String,
+    /// The changes themselves (the engine skips the ones it made).
+    pub changes: Vec<Change>,
 }
 
 /// Progress callback: `(bytes_done, bytes_total)`.

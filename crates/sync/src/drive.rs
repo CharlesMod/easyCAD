@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::auth::TokenProvider;
 use crate::error::RemoteError;
-use crate::remote::{ChangeSet, FileMeta, ProgressFn, RemoteFile, RemoteStore, UploadRequest};
+use crate::remote::{Change, ChangeSet, FileMeta, ProgressFn, RemoteFile, RemoteStore, UploadRequest};
 
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const FIELDS: &str = "id,size,md5Checksum,headRevisionId,version,modifiedTime,appProperties,trashed";
@@ -628,21 +628,31 @@ impl RemoteStore for DriveClient {
         let url = self.url("changes");
         let mut page = token.to_string();
         let mut changed = 0;
+        let mut changes = Vec::new();
         loop {
             let query = [
                 ("pageToken", page.clone()),
                 ("pageSize", "1000".into()),
                 ("spaces", "drive".into()),
-                ("fields", "nextPageToken,newStartPageToken,changes(fileId)".into()),
+                ("fields", "nextPageToken,newStartPageToken,changes(fileId,removed,file(mimeType,trashed,version))".into()),
             ];
             let v = self.json(&|| self.http.get(&url).query(&query)).await?;
-            changed += v["changes"].as_array().map_or(0, Vec::len);
+            for c in v["changes"].as_array().into_iter().flatten() {
+                changed += 1;
+                let f = &c["file"];
+                changes.push(Change {
+                    id: c["fileId"].as_str().unwrap_or_default().into(),
+                    removed: c["removed"].as_bool().unwrap_or(false) || f["trashed"].as_bool().unwrap_or(false),
+                    version: f["version"].as_str().and_then(|s| s.parse().ok()),
+                    folder: f["mimeType"].as_str() == Some(FOLDER_MIME),
+                });
+            }
             if let Some(t) = v["newStartPageToken"].as_str() {
-                return Ok(ChangeSet { changed, new_token: t.into() });
+                return Ok(ChangeSet { changed, new_token: t.into(), changes });
             }
             match v["nextPageToken"].as_str() {
                 Some(t) => page = t.into(),
-                None => return Ok(ChangeSet { changed, new_token: page }),
+                None => return Ok(ChangeSet { changed, new_token: page, changes }),
             }
         }
     }
