@@ -218,9 +218,11 @@ pub mod bridge {
     }
 }
 
-// SAFETY: `TopoDS_Shape` is a ref-counted handle to immutable topology (OCCT uses
-// atomic ref counts). The only API that mutates shared data in place is meshing,
-// which the safe wrapper serialises behind a global mutex. Booleans run in
-// non-destructive mode.
+// SAFETY: `TopoDS_Shape` is a ref-counted handle to topology (OCCT uses atomic ref
+// counts). No shim entry point writes into an input's topology: operations that
+// would (meshing, ShapeFix healing, unify, offsets, shell, draft, fillet/chamfer)
+// run on a private `BRepBuilderAPI_Copy` of their input, and booleans run in
+// non-destructive mode. Process-global STEP/XCAF state is behind a lock in the shim.
+// See "Concurrency contract" in docs/ENGINE.md and tests/concurrency.rs (model).
 unsafe impl Send for bridge::Shape {}
 unsafe impl Sync for bridge::Shape {}

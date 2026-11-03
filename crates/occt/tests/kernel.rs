@@ -309,3 +309,68 @@ fn xcaf_names_and_colors_round_trip() {
     let (_, plain) = Shape::read_step_xcaf(&board.to_step_string().unwrap()).unwrap();
     assert_eq!(plain.len(), 1);
 }
+
+#[test]
+fn shell_without_open_faces_is_closed_hollow_solid() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let s = b.shell(&[], 2.0, false).unwrap();
+    assert!(s.is_valid());
+    assert_eq!(s.count(ShapeKind::Solid), 1);
+    assert_eq!(s.count(ShapeKind::Shell), 2, "outer skin + internal void");
+    assert!(close(s.volume().unwrap(), 24000.0 - 36.0 * 26.0 * 16.0, 1e-6), "{}", s.volume().unwrap());
+    assert!(close(s.bbox().unwrap().size().x, 40.0, 1e-6));
+    // outward: the original becomes the void
+    let o = b.shell(&[], 2.0, true).unwrap();
+    assert_eq!(o.count(ShapeKind::Shell), 2);
+    assert!(close(o.bbox().unwrap().size().x, 44.0, 1e-3));
+    // a rounded body (convex radius 6 > wall 2)
+    let r = b.fillet_raw(&(0..12).collect::<Vec<_>>(), &[6.0; 12]).unwrap();
+    let rs = r.shell(&[], 2.0, false).unwrap();
+    assert!(rs.is_valid() && rs.volume().unwrap() < r.volume().unwrap() * 0.5);
+    // walls thicker than the body: a clear error, never just the inner skin
+    let e = b.shell(&[], 12.0, false).unwrap_err();
+    assert!(e.0.contains("no open faces"), "{e}");
+}
+
+/// Meshing must not write into the (shared) input topology: a boolean on the same
+/// shape gives the same result before and after meshing.
+#[test]
+fn meshing_leaves_input_untouched() {
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let c = Shape::cylinder(DVec3::new(20.0, 15.0, -1.0), DVec3::Z, 5.0, 30.0).unwrap();
+    let body = b.cut(&c).unwrap();
+    let before = body.fuse(&b).unwrap().volume().unwrap();
+    let fine = body.tessellate(0.01, 5.0).unwrap().indices.len();
+    let coarse = body.tessellate(0.5, 30.0).unwrap().indices.len();
+    assert!(coarse < fine, "each call meshes at its own density");
+    let after = body.fuse(&b).unwrap().volume().unwrap();
+    assert_eq!(before, after);
+}
+
+/// After the kernel installed its signal handlers, a fault outside any kernel call
+/// still reaches Rust's handler (stack overflow report + abort) instead of OCCT's
+/// "*** Abort ***" + exit(1). Runs itself in a child process.
+#[test]
+fn faults_outside_kernel_calls_reach_rusts_handler() {
+    if std::env::var("CW_CHILD_OVERFLOW").is_ok() {
+        let _ = Shape::make_box(DVec3::ZERO, DVec3::ONE).unwrap(); // installs the handlers
+        #[allow(unconditional_recursion)]
+        fn deep(n: u64) -> u64 {
+            let buf = [n; 64];
+            std::hint::black_box(&buf);
+            deep(n + 1) + buf[3]
+        }
+        std::thread::Builder::new().stack_size(256 * 1024).spawn(|| deep(0)).unwrap().join().ok();
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args(["faults_outside_kernel_calls_reach_rusts_handler", "--exact", "--nocapture", "--test-threads=1"])
+        .env("CW_CHILD_OVERFLOW", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("overflowed its stack"), "stderr: {err}");
+    assert!(!err.contains("*** Abort ***"), "stderr: {err}");
+}

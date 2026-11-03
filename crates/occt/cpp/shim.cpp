@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <csignal>
+#include <cstring>
 #include <cstdlib>
 #include <mutex>
 #include <sstream>
@@ -32,6 +34,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -203,21 +206,99 @@ bool parallelBop() {
   return on;
 }
 
-std::mutex &meshMutex() {
+// ---- concurrency -----------------------------------------------------------
+//
+// A `Shape` may be used from several threads at once (Rust `Send + Sync`), so no
+// entry point may write into an input's topology. OCCT stores mutable caches inside
+// the shared TShapes: triangulations and edge polygons (BRepMesh, BRepTools::Clean),
+// and tolerances/pcurves that ShapeFix, the offset/thick-solid algorithms and
+// sometimes the fillet builder update in place. Readers of those caches include
+// BRepBndLib::Add (used by every boolean's BOPDS_DS::InitShapes), HLR PolyAlgo and the
+// STL writer. Meshing one body while another thread booleaned it was a
+// use-after-free on the replaced Poly_Triangulation (reproduced as SIGSEGV in
+// tests/concurrency.rs) and, single-threaded, made boolean bounding boxes depend on
+// whether the body had been displayed. So every operation that can mutate topology
+// runs on a private copy of its input (new TShapes, shared immutable geometry).
+TopoDS_Shape privateCopy(const TopoDS_Shape &s) {
+  BRepBuilderAPI_Copy cp(s, /*copyGeom=*/Standard_False, /*copyMesh=*/Standard_False);
+  if (!cp.IsDone()) fail("cannot copy shape");
+  return cp.Shape();
+}
+
+// STEP/XCAF translation keeps process-global state (Interface_Static parameters with
+// no locking, the XCAF application's document table, protocol registries). All STEP
+// entry points run under this lock. The nested OCC_CATCH_SIGNALS makes a converted
+// kernel signal unwind through the lock_guard (a longjmp to the outer handler in
+// rust::behavior::trycatch would skip it and leave the mutex locked forever).
+std::mutex &stepMutex() {
   static std::mutex m;
   return m;
 }
 
-void quietMessenger() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    Handle(Message_Messenger) msgr = Message::DefaultMessenger();
-    if (!msgr.IsNull()) {
-      Message_SequenceOfPrinters &printers = msgr->ChangePrinters();
-      printers.Clear();
-    }
-  });
+template <class F> auto withStepLock(F &&f) -> decltype(f()) {
+  std::lock_guard<std::mutex> lock(stepMutex());
+  OCC_CATCH_SIGNALS
+  return f();
 }
+
+} // namespace
+
+// ---- one-time process setup (called from shim.h before the first kernel call) --
+
+namespace {
+struct sigaction gPrevSegv, gPrevBus, gOccSegv, gOccBus;
+
+void forwardSignal(const struct sigaction &h, int sig, siginfo_t *info, void *ctx) {
+  if (h.sa_flags & SA_SIGINFO) {
+    h.sa_sigaction(sig, info, ctx);
+  } else if (h.sa_handler != SIG_DFL && h.sa_handler != SIG_IGN) {
+    h.sa_handler(sig);
+  } else {
+    // default action: reinstate it and return; the fault re-executes and kills the
+    // process with the right signal (core dump), as without OCCT.
+    struct sigaction dfl;
+    std::memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, nullptr);
+  }
+}
+
+// OCCT's handler converts a fault into a C++ exception by longjmp-ing to the
+// innermost OCC_CATCH_SIGNALS of the *faulting thread*; with none (any non-kernel
+// thread: Rust code, GPU drivers, the GUI) it prints "*** Abort ***" and calls exit()
+// from inside the signal handler, which runs static destructors under the other
+// threads' feet. Route faults outside kernel calls to the handler that was installed
+// before OCCT's (Rust's stack-overflow reporter, or the default action) instead.
+// SA_ONSTACK lets both run on the thread's alternate signal stack, so a stack
+// overflow inside the kernel is converted too instead of killing the process.
+void chainedFault(int sig, siginfo_t *info, void *ctx) {
+  const bool inKernel = Standard_ErrorHandler::IsInTryBlock();
+  if (sig == SIGSEGV) forwardSignal(inKernel ? gOccSegv : gPrevSegv, sig, info, ctx);
+  else forwardSignal(inKernel ? gOccBus : gPrevBus, sig, info, ctx);
+}
+} // namespace
+
+void initKernelOnce() {
+  sigaction(SIGSEGV, nullptr, &gPrevSegv);
+  sigaction(SIGBUS, nullptr, &gPrevBus);
+  OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
+  sigaction(SIGSEGV, nullptr, &gOccSegv);
+  sigaction(SIGBUS, nullptr, &gOccBus);
+  struct sigaction ch;
+  std::memset(&ch, 0, sizeof ch);
+  ch.sa_sigaction = chainedFault;
+  ch.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+  sigemptyset(&ch.sa_mask);
+  sigaction(SIGSEGV, &ch, nullptr);
+  sigaction(SIGBUS, &ch, nullptr);
+  // OCCT prints through a shared messenger; silence it once, before any algorithm can
+  // be iterating its printer list on another thread.
+  Handle(Message_Messenger) msgr = Message::DefaultMessenger();
+  if (!msgr.IsNull()) msgr->ChangePrinters().Clear();
+}
+
+namespace {
 
 TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op) {
   TopTools_ListOfShape args, tools;
@@ -495,12 +576,12 @@ std::unique_ptr<Shape> fuse_all(const Shape &c) {
 
 std::unique_ptr<Shape> unify(const Shape &s) {
   requireShape(s, "unify");
-  return wrap(simplify(doUnify(s.s)));
+  return wrap(simplify(doUnify(privateCopy(s.s))));
 }
 
 std::unique_ptr<Shape> heal(const Shape &s) {
   requireShape(s, "heal");
-  Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(s.s);
+  Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(privateCopy(s.s));
   fix->Perform();
   TopoDS_Shape r = fix->Shape();
   if (r.IsNull()) fail("heal produced no shape");
@@ -660,8 +741,9 @@ std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const uint32_t> edges,
   requireShape(s, "fillet");
   if (edges.empty()) fail("fillet: no edges selected");
   if (radii.size() != edges.size()) fail("fillet: one radius per edge required");
-  auto m = mapOf(s.s, TopAbs_EDGE);
-  BRepFilletAPI_MakeFillet mf(s.s);
+  TopoDS_Shape in = privateCopy(s.s); // same MapShapes order as s
+  auto m = mapOf(in, TopAbs_EDGE);
+  BRepFilletAPI_MakeFillet mf(in);
   for (size_t k = 0; k < edges.size(); ++k) {
     uint32_t i = edges[k];
     if (i >= static_cast<uint32_t>(m.Extent())) fail("fillet: edge index out of range");
@@ -678,8 +760,9 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges
   requireShape(s, "chamfer");
   if (edges.empty()) fail("chamfer: no edges selected");
   if (dists.size() != edges.size()) fail("chamfer: one distance per edge required");
-  auto m = mapOf(s.s, TopAbs_EDGE);
-  BRepFilletAPI_MakeChamfer mc(s.s);
+  TopoDS_Shape in = privateCopy(s.s);
+  auto m = mapOf(in, TopAbs_EDGE);
+  BRepFilletAPI_MakeChamfer mc(in);
   for (size_t k = 0; k < edges.size(); ++k) {
     uint32_t i = edges[k];
     if (i >= static_cast<uint32_t>(m.Extent())) fail("chamfer: edge index out of range");
@@ -692,17 +775,46 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges
   return wrap(simplify(r));
 }
 
+namespace {
+TopoDS_Shape doOffsetSolid(const TopoDS_Shape &in, double d);
+} // namespace
+
 std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset) {
   requireShape(s, "shell");
   if (std::abs(offset) < kTol) fail("shell thickness must be non-zero");
-  auto m = mapOf(s.s, TopAbs_FACE);
+  TopoDS_Shape copy = privateCopy(s.s);
+  auto m = mapOf(copy, TopAbs_FACE);
   TopTools_ListOfShape closing;
   for (uint32_t i : faces) {
     if (i >= static_cast<uint32_t>(m.Extent())) fail("shell: face index out of range");
     closing.Append(m.FindKey(static_cast<int>(i) + 1));
   }
   // The thick-solid algorithm wants a single solid.
-  TopoDS_Shape input = simplify(s.s);
+  TopoDS_Shape input = simplify(copy);
+  if (closing.IsEmpty()) {
+    // Nothing to open: MakeThickSolid would return only the offset skin. Build the
+    // closed hollow solid (outer skin + internal void) from a 3D offset instead.
+    TopoDS_Shape off;
+    try {
+      off = doOffsetSolid(privateCopy(input), offset);
+    } catch (const Standard_Failure &e) {
+      fail(std::string("shell with no open faces: the ") + (offset < 0 ? "inner" : "outer") +
+           " offset failed (thickness larger than a convex radius or a thin feature?): " + e.GetMessageString());
+    } catch (const std::exception &e) {
+      fail(std::string("shell with no open faces: the ") + (offset < 0 ? "inner" : "outer") +
+           " offset failed (thickness larger than a convex radius or a thin feature?): " + e.what());
+    }
+    TopoDS_Shape r = offset < 0 ? doBoolean(input, off, 1u) : doBoolean(off, input, 1u);
+    r = simplify(r);
+    if (count_sub(Shape(r), TopAbs_SOLID) != 1) fail("shell with no open faces: the walls are not one solid");
+    GProp_GProps a, b;
+    BRepGProp::VolumeProperties(r, a);
+    BRepGProp::VolumeProperties(input, b);
+    if (offset < 0 && !(a.Mass() > 0 && a.Mass() < b.Mass() - 1e-9))
+      fail("shell with no open faces: the inner offset did not produce a cavity");
+    checkValid(r, "shell");
+    return wrap(r);
+  }
   BRepOffsetAPI_MakeThickSolid mk;
   mk.MakeThickSolidByJoin(input, closing, offset, 1e-3, BRepOffset_Skin, Standard_False,
                           Standard_False, GeomAbs_Arc);
@@ -716,8 +828,9 @@ std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, 
                              double angle_rad, const Frame &neutral) {
   requireShape(s, "draft");
   if (faces.empty()) fail("draft: no faces selected");
-  auto m = mapOf(s.s, TopAbs_FACE);
-  BRepOffsetAPI_DraftAngle dr(s.s);
+  TopoDS_Shape in = privateCopy(s.s);
+  auto m = mapOf(in, TopAbs_FACE);
+  BRepOffsetAPI_DraftAngle dr(in);
   gp_Dir dir = D(pull, "pull direction");
   gp_Pln pln(frameAx(neutral));
   for (uint32_t i : faces) {
@@ -905,7 +1018,7 @@ std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
   gp_Pln pln;
   gp_Dir normal(0, 0, 1);
   bool first = true;
-  for (auto &f : facesOf(s.s)) {
+  for (auto &f : facesOf(privateCopy(s.s))) {
     gp_Pln p = planeOf(f);
     gp_Dir n = p.Axis().Direction();
     if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
@@ -1011,10 +1124,11 @@ rust::Vec<V3> outer_wire_point(const Shape &s, double t) {
   return out;
 }
 
-std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
-  requireShape(s, "offset_shape");
+namespace {
+// 3D skin offset of a solid as a solid (the caller passes a private copy).
+TopoDS_Shape doOffsetSolid(const TopoDS_Shape &in, double d) {
   BRepOffsetAPI_MakeOffsetShape mo;
-  mo.PerformByJoin(s.s, d, 1e-4, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
+  mo.PerformByJoin(in, d, 1e-4, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
   if (!mo.IsDone()) fail("3D offset failed");
   TopoDS_Shape r = mo.Shape();
   if (r.IsNull()) fail("3D offset produced no shape (offset larger than a convex radius?)");
@@ -1026,7 +1140,13 @@ std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
     bb.Add(so, r);
     r = so;
   }
-  return wrap(simplify(healIfInvalid(r, "offset")));
+  return simplify(healIfInvalid(r, "offset"));
+}
+} // namespace
+
+std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
+  requireShape(s, "offset_shape");
+  return wrap(doOffsetSolid(privateCopy(s.s), d));
 }
 
 // ---------------------------------------------------------------- queries
@@ -1168,14 +1288,14 @@ rust::Vec<uint32_t> face_edges(const Shape &s, uint32_t face) {
 MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad) {
   requireShape(s, "tessellate");
   if (lin_defl <= 0 || ang_defl_rad <= 0) fail("deflection must be positive");
-  std::lock_guard<std::mutex> lock(meshMutex());
-  // BRepMesh never coarsens an existing finer triangulation: start clean so each
-  // quality level gets its own density (callers cache meshes per level).
-  BRepTools::Clean(s.s);
-  BRepMesh_IncrementalMesh mesher(s.s, lin_defl, Standard_False, ang_defl_rad, parallelBop());
+  // Mesh a private copy: the triangulation lives inside the TShapes, which other
+  // threads may be reading (booleans, HLR, STL) or meshing at another density. A fresh
+  // copy also means each quality level gets its own density (BRepMesh never coarsens).
+  TopoDS_Shape m = privateCopy(s.s);
+  BRepMesh_IncrementalMesh mesher(m, lin_defl, Standard_False, ang_defl_rad, parallelBop());
   if (!mesher.IsDone()) fail("meshing failed");
   MeshData md;
-  auto fm = mapOf(s.s, TopAbs_FACE);
+  auto fm = mapOf(m, TopAbs_FACE);
   for (int fi = 1; fi <= fm.Extent(); ++fi) {
     TopoDS_Face f = TopoDS::Face(fm.FindKey(fi));
     TopLoc_Location loc;
@@ -1207,7 +1327,7 @@ MeshData tessellate(const Shape &s, double lin_defl, double ang_defl_rad) {
       md.tri_face.push_back(static_cast<uint32_t>(fi - 1));
     }
   }
-  auto em = mapOf(s.s, TopAbs_EDGE);
+  auto em = mapOf(m, TopAbs_EDGE);
   for (int ei = 1; ei <= em.Extent(); ++ei) {
     TopoDS_Edge e = TopoDS::Edge(em.FindKey(ei));
     if (BRep_Tool::Degenerated(e)) continue;
@@ -1266,7 +1386,7 @@ HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl) {
   if (exact) {
     try {
       Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
-      algo->Add(s.s);
+      algo->Add(privateCopy(s.s));
       algo->Projector(proj);
       algo->Update();
       algo->Hide();
@@ -1285,11 +1405,9 @@ HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl) {
   if (!done) {
     out = HlrData();
     out.poly_fallback = exact;
-    {
-      std::lock_guard<std::mutex> lock(meshMutex());
-      BRepMesh_IncrementalMesh mesher(s.s, defl, Standard_False, 0.2, Standard_False);
-    }
-    Handle(HLRBRep_PolyAlgo) algo = new HLRBRep_PolyAlgo(s.s);
+    TopoDS_Shape m = privateCopy(s.s); // PolyAlgo needs a triangulation: mesh a copy
+    BRepMesh_IncrementalMesh mesher(m, defl, Standard_False, 0.2, Standard_False);
+    Handle(HLRBRep_PolyAlgo) algo = new HLRBRep_PolyAlgo(m);
     algo->Projector(proj);
     algo->Update();
     HLRBRep_PolyHLRToShape h;
@@ -1430,58 +1548,60 @@ struct XcafCollect {
 } // namespace
 
 std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts) {
-  quietMessenger();
-  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
-  Handle(TDocStd_Document) doc;
-  app->NewDocument("MDTV-XCAF", doc);
-  STEPCAFControl_Reader rd;
-  rd.SetColorMode(Standard_True);
-  rd.SetNameMode(Standard_True);
-  rd.SetLayerMode(Standard_False);
-  std::istringstream is(std::string(data.data(), data.size()));
-  if (rd.ReadStream("memory.step", is) != IFSelect_RetDone) fail("STEP read failed (not a valid STEP file?)");
-  if (!rd.Transfer(doc)) fail("STEP transfer failed");
-  XcafCollect col;
-  col.st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-  col.ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
-  col.bb.MakeCompound(col.comp);
-  col.parts = &parts;
-  TDF_LabelSequence roots;
-  col.st->GetFreeShapes(roots);
-  Quantity_Color grey(0.7, 0.7, 0.7, Quantity_TOC_sRGB);
-  for (int i = 1; i <= roots.Length(); ++i) col.visit(roots.Value(i), TopLoc_Location(), "", false, grey, 0);
-  app->Close(doc);
-  if (parts.empty()) fail("STEP file contains no solids");
-  return wrap(col.comp);
+  return withStepLock([&] {
+    Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+    Handle(TDocStd_Document) doc;
+    app->NewDocument("MDTV-XCAF", doc);
+    STEPCAFControl_Reader rd;
+    rd.SetColorMode(Standard_True);
+    rd.SetNameMode(Standard_True);
+    rd.SetLayerMode(Standard_False);
+    std::istringstream is(std::string(data.data(), data.size()));
+    if (rd.ReadStream("memory.step", is) != IFSelect_RetDone) fail("STEP read failed (not a valid STEP file?)");
+    if (!rd.Transfer(doc)) fail("STEP transfer failed");
+    XcafCollect col;
+    col.st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    col.ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    col.bb.MakeCompound(col.comp);
+    col.parts = &parts;
+    TDF_LabelSequence roots;
+    col.st->GetFreeShapes(roots);
+    Quantity_Color grey(0.7, 0.7, 0.7, Quantity_TOC_sRGB);
+    for (int i = 1; i <= roots.Length(); ++i) col.visit(roots.Value(i), TopLoc_Location(), "", false, grey, 0);
+    app->Close(doc);
+    if (parts.empty()) fail("STEP file contains no solids");
+    return wrap(col.comp);
+  });
 }
 
 rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts) {
-  requireShape(c, "write_step_xcaf");
-  quietMessenger();
-  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
-  Handle(TDocStd_Document) doc;
-  app->NewDocument("MDTV-XCAF", doc);
-  Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-  Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
-  size_t i = 0;
-  for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++i) {
-    TDF_Label l = st->AddShape(it.Value(), Standard_False);
-    if (i < parts.size()) {
-      const XcafPart &p = parts[i];
-      TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(p.name).c_str()));
-      if (p.has_color) ct->SetColor(l, Quantity_Color(p.r, p.g, p.b, Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+  return withStepLock([&] {
+    requireShape(c, "write_step_xcaf");
+    Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+    Handle(TDocStd_Document) doc;
+    app->NewDocument("MDTV-XCAF", doc);
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    size_t i = 0;
+    for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++i) {
+      TDF_Label l = st->AddShape(it.Value(), Standard_False);
+      if (i < parts.size()) {
+        const XcafPart &p = parts[i];
+        TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(p.name).c_str()));
+        if (p.has_color) ct->SetColor(l, Quantity_Color(p.r, p.g, p.b, Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+      }
     }
-  }
-  Interface_Static::SetCVal("write.step.unit", "MM");
-  Interface_Static::SetCVal("write.step.schema", "AP214IS");
-  STEPCAFControl_Writer w;
-  w.SetColorMode(Standard_True);
-  w.SetNameMode(Standard_True);
-  if (!w.Transfer(doc, STEPControl_AsIs)) fail("STEP transfer failed");
-  std::ostringstream os;
-  if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
-  app->Close(doc);
-  return rust::String(os.str());
+    Interface_Static::SetCVal("write.step.unit", "MM");
+    Interface_Static::SetCVal("write.step.schema", "AP214IS");
+    STEPCAFControl_Writer w;
+    w.SetColorMode(Standard_True);
+    w.SetNameMode(Standard_True);
+    if (!w.Transfer(doc, STEPControl_AsIs)) fail("STEP transfer failed");
+    std::ostringstream os;
+    if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
+    app->Close(doc);
+    return rust::String(os.str());
+  });
 }
 
 rust::Vec<uint32_t> face_owners(const Shape &c) {
@@ -1501,22 +1621,23 @@ rust::Vec<uint32_t> face_owners(const Shape &c) {
 }
 
 std::unique_ptr<Shape> read_step_file(rust::Str path) {
-  quietMessenger();
-  STEPControl_Reader rd;
-  std::string p(path);
-  return finishStepRead(rd, rd.ReadFile(p.c_str()));
+  return withStepLock([&] {
+    STEPControl_Reader rd;
+    std::string p(path);
+    return finishStepRead(rd, rd.ReadFile(p.c_str()));
+  });
 }
 
 std::unique_ptr<Shape> read_step_str(rust::Str data) {
-  quietMessenger();
-  STEPControl_Reader rd;
-  std::istringstream is(std::string(data.data(), data.size()));
-  return finishStepRead(rd, rd.ReadStream("memory.step", is));
+  return withStepLock([&] {
+    STEPControl_Reader rd;
+    std::istringstream is(std::string(data.data(), data.size()));
+    return finishStepRead(rd, rd.ReadStream("memory.step", is));
+  });
 }
 
 namespace {
 void transferStep(STEPControl_Writer &w, const Shape &s) {
-  quietMessenger();
   requireShape(s, "write_step");
   Interface_Static::SetCVal("write.step.unit", "MM");
   Interface_Static::SetCVal("write.step.schema", "AP214IS");
@@ -1525,31 +1646,33 @@ void transferStep(STEPControl_Writer &w, const Shape &s) {
 } // namespace
 
 void write_step_file(const Shape &s, rust::Str path) {
-  STEPControl_Writer w;
-  transferStep(w, s);
-  std::string p(path);
-  if (w.Write(p.c_str()) != IFSelect_RetDone) fail("cannot write STEP file " + p);
+  return withStepLock([&] {
+    STEPControl_Writer w;
+    transferStep(w, s);
+    std::string p(path);
+    if (w.Write(p.c_str()) != IFSelect_RetDone) fail("cannot write STEP file " + p);
+  });
 }
 
 rust::String write_step_str(const Shape &s) {
-  STEPControl_Writer w;
-  transferStep(w, s);
-  std::ostringstream os;
-  if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
-  return rust::String(os.str());
+  return withStepLock([&] {
+    STEPControl_Writer w;
+    transferStep(w, s);
+    std::ostringstream os;
+    if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
+    return rust::String(os.str());
+  });
 }
 
 void write_stl_file(const Shape &s, rust::Str path, double lin_defl, bool ascii) {
   requireShape(s, "write_stl");
-  {
-    std::lock_guard<std::mutex> lock(meshMutex());
-    BRepMesh_IncrementalMesh mesher(s.s, lin_defl, Standard_False, 0.5, Standard_False);
-    if (!mesher.IsDone()) fail("meshing failed");
-  }
+  TopoDS_Shape m = privateCopy(s.s);
+  BRepMesh_IncrementalMesh mesher(m, lin_defl, Standard_False, 0.5, Standard_False);
+  if (!mesher.IsDone()) fail("meshing failed");
   StlAPI_Writer w;
   w.ASCIIMode() = ascii;
   std::string p(path);
-  if (!w.Write(s.s, p.c_str())) fail("cannot write STL file " + p);
+  if (!w.Write(m, p.c_str())) fail("cannot write STL file " + p);
 }
 
 } // namespace cw

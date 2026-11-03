@@ -18,10 +18,15 @@
 // OCCT algorithm on degenerate input) are converted into Standard_Failure through
 // OCCT's signal handler + OCC_CATCH_SIGNALS (OCC_CONVERT_SIGNALS build), so they
 // also come back as errors instead of killing the process.
+//
+// Concurrency (see "Concurrency contract" in docs/ENGINE.md): one-time global setup
+// (signal handlers, silenced messenger) happens here, under a C++11 magic static,
+// before the first kernel call on any thread.
 namespace cw {
+void initKernelOnce();
 inline void ensureSignals() {
   static const bool installed = [] {
-    OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
+    initKernelOnce();
     return true;
   }();
   (void)installed;

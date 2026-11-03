@@ -23,8 +23,8 @@ libs). Later builds reuse it. A debug test binary that links the kernel is about
 operation returns a new shape as `occt::Result<T>` (`Error(String)` carries the
 OCCT exception text). The shim catches every `Standard_Failure` and C++ exception
 through a custom `rust::behavior::trycatch`, so a kernel failure never aborts the
-process. Meshing mutates OCCT's triangulation cache, so it runs behind a global mutex.
-Booleans run in non-destructive mode.
+process. No call writes into its input shapes (see "Concurrency contract"), and
+booleans run in non-destructive mode.
 
 - Construction: `Shape::make_box`, `cylinder`, `cone`, `compound`,
   `Shape::face(&Frame, outer: &[Edge], holes: &[Vec<Edge>])` with
@@ -41,7 +41,9 @@ Booleans run in non-destructive mode.
   the `Strategy` used, and `summary()` (e.g. "3 of 4 edges done · edge 7 maxes out
   at 1.80 mm"). `auto_reduce` applies the max size automatically. `fillet_raw` and
   `chamfer_raw` make a single attempt.
-- `shell(open_faces, thickness, outward)` and
+- `shell(open_faces, thickness, outward)` (with no open faces: a closed hollow solid,
+  i.e. the outer skin plus an internal void shell, or an error naming the failed
+  offset) and
   `draft(faces, pull, deg, &neutral_frame)`.
 - Transforms: `translated`, `rotated`, `mirrored`, `linear_pattern`,
   `circular_pattern`, `split(origin, normal) -> (below, above)`.
@@ -354,13 +356,88 @@ chain, and most time sits in single large booleans.
   built with `OCC_CONVERT_SIGNALS`. A crash in, for example, MAT2d inside
   `BRepOffsetAPI_MakeOffset` therefore becomes `FeatureStatus::Error`. The 2D offset
   also cleans faces first and retries, which removed the one crash the randomized
-  test found. Note: OCCT's handler replaces Rust's SIGSEGV handler, so a Rust stack
-  overflow is reported by OCCT instead.
+  test found. Faults outside kernel calls are forwarded to the previously installed
+  handler, so a Rust stack overflow is still reported by Rust (see "Concurrency
+  contract").
 - `crates/model/tests/fuzz.rs` runs 200 random enclosures with a fixed seed,
   varying size, wall, fillet radius, draft, bosses, joint kind and params, rim,
   fit class and profile. It checks for no panic, valid solids, and a reason for every
   refusal. In the current run, 48 joints are built and 152 are refused, all with a
   reason.
+
+## Concurrency contract
+
+Everything in `occt` and `casework-model` may run on any number of threads at once.
+The GUI's global kernel mutex is no longer needed.
+
+- **Shapes** (`occt::Shape`, `Body`, `RegenResult`) are `Send + Sync` and may be used
+  from several threads at the same time: mesh a body on the render thread while the
+  regen worker booleans it and an export thread writes it.
+- **Documents** (`Document`, `Regenerator`) are plain `&mut` values. One thread per
+  document at a time (Rust enforces this). Separate documents regenerate in
+  parallel.
+- **Internal lock:** STEP/XCAF reading and writing (`read_step*`,
+  `write_step`, `to_step_string*`, `Document::import_step`'s regen, STEP export)
+  is serialised by one process-wide mutex in the shim. OCCT keeps translator
+  parameters (`Interface_Static`) and the XCAF application in unsynchronised globals.
+  Other kernel work is not blocked while a STEP file is being read.
+- **One-time setup** (signal handlers, silencing OCCT's messenger) runs before the
+  first kernel call on any thread, under a C++11 static initialiser.
+- **Signals.** A hardware fault inside a kernel call becomes `occt::Error`
+  ("OSD_SIGSEGV ..."), on whichever thread it happens. Faults outside kernel calls go
+  to the handler that was installed before OCCT's: Rust's stack overflow report, or
+  the default crash. OCCT's own handler would call `exit(1)` from inside the
+  signal handler. Handlers run on the alternate signal stack, so a stack overflow
+  inside the kernel is converted as well.
+
+**Root cause of the parallel SIGSEGV (GUI_NEEDS #10).** OCCT keeps mutable caches inside the
+shared topology objects (TShapes). Examples are triangulations and edge polygons
+(written by `BRepMesh` and `BRepTools::Clean`), and tolerances and pcurves that
+ShapeFix, offsets and the thick-solid algorithm update in place. Every boolean reads
+triangulations through `BRepBndLib::Add` (in `BOPDS_DS::InitShapes`), as do HLR
+PolyAlgo and the STL writer. Meshing a shape while another thread booleaned, meshed,
+hid or STL-exported the same shape freed a `Poly_Triangulation` under that thread. The
+shared-shape stress test reproduced it in 5 of 6 runs (SIGSEGV converted to errors,
+"cannot write STL", `BOPAlgo_AlertIntersectionFailed`). Separate documents shared
+nothing, so they were not the trigger; the regen worker's shapes being meshed for
+display on another thread were. Every operation that could write into topology now
+works on a private `BRepBuilderAPI_Copy` of its input (new TShapes, shared immutable
+geometry). Index order is preserved, so face and edge indices are unchanged. A side
+effect is that boolean bounding boxes no longer depend on whether a body had been
+displayed, so a regen is deterministic. Each mesh call also meshes at exactly its own
+density. In an A/B run of `tests/timing.rs` the copy made no difference beyond noise.
+
+**The last writer: exact HLR.** With the copies above, the shared-shape test still
+failed in about 2 of 5 runs with `OSD_SIGSEGV` (small addresses, i.e. a null
+member) inside `Shape::hlr(exact = true)`. `HLRBRep_Algo::Add` was the one remaining
+algorithm that ran directly on the shared input, and its outliner/edge data build
+writes into the input topology. It now also loads a private copy.
+
+**What is still locked, and why.** Only STEP/XCAF translation (global translator
+parameters, see above). No other lock exists in `occt` or `casework-model`; the old
+mesh mutex is gone. If a future kernel entry point is found to write into its input,
+the fix is the same `privateCopy` in the shim, not a caller-side lock.
+
+**Evidence.** `crates/model/tests/concurrency.rs` has two tests.
+`parallel_documents_regen_mesh_hlr_export` runs 6 threads × N rounds of
+regen, 3 mesh levels, exact, hidden-line and poly HLR, STEP/STL/3MF/SVG/PDF export, STEP
+re-import and assembly re-import, with every result compared to a serial reference.
+`shared_shapes_across_threads` runs 8 threads on the same `Shape`s, doing mesh, STL,
+HLR, boolean, STEP round trip, topology queries and section. Before the fix the
+shared test failed in 5 of 6 runs; with the copies but exact HLR still on the input,
+in 2 of 5. After the fix it passed 20 of 20 runs at the default rounds and 20 of 20
+with `CW_STRESS_ROUNDS=6`, and the whole file (both tests) passed 10 of 10 runs. ASan or TSan
+was not run: both need the static OCCT build and the Rust side instrumented together
+(nightly `-Zsanitizer` plus an OCCT rebuild in a separate target directory).
+
+**Rules for callers (the GUI).**
+- Drop the global kernel mutex. Run regen, meshing for display, drawings and exports
+  on whatever threads are convenient.
+- Never hold `&mut Document` on two threads (Rust stops you anyway). To regen in the
+  background, move or clone the `DocData` + `BlobStore` into the worker (or own the
+  `Document` there) and send `RegenResult`s back; they are cheap `Arc` clones.
+- A converted kernel fault (`occt::Error("OSD_SIGSEGV ...")`) leaves the process
+  healthy; report it like any other feature error.
 
 ## File format (`.cwk`), sync-friendly
 
@@ -415,6 +492,11 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Concurrency (GUI_NEEDS #10).** Kernel and model calls are safe on any number
+  of threads; see "Concurrency contract". The GUI's global kernel mutex can go.
+  Meshing no longer writes into the shape (each `MeshQuality` meshes a private copy),
+  so boolean results no longer depend on whether a body was displayed first.
 
 - **Selector confidence (breaking).** `FaceSelector::Hint` and `EdgeSelector::Hint`
   gained `kind: Option<FaceKind / EdgeKind>`. It is serde-defaulted, so old files
