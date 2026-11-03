@@ -365,6 +365,24 @@ fn plane_offset(p: &Plane) -> f64 {
     p.origin.dot(p.normal)
 }
 
+/// The z field of a plane feature: its `offset` expression (GUI_NEEDS #1), plus
+/// the plane's own offset when it has one (older files).
+pub fn plane_text(p: &Plane, offset: &Expr) -> String {
+    let po = plane_offset(p);
+    let off = offset.0.trim();
+    let zero = off.is_empty() || off.parse::<f64>().is_ok_and(|v| v == 0.0);
+    match (po.abs() < 1e-9, zero) {
+        (_, true) => fmt(po),
+        (true, false) => off.to_string(),
+        (false, false) => format!("{} + {off}", fmt(po)),
+    }
+}
+
+/// A plane through the origin with `n`, moved by the field's expression.
+fn z_expr(f: &Field) -> Expr {
+    Expr::new(crate::units::normalize_input(f.text.trim()))
+}
+
 pub fn fmt(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
@@ -579,6 +597,7 @@ impl Dialog {
                 faces,
                 neutral,
                 angle_deg,
+                offset,
                 ..
             } => (
                 DialogKind::Draft,
@@ -587,27 +606,19 @@ impl Dialog {
                     faces: Vec::new(),
                     kept: faces.clone(),
                     angle: Field::from_expr(angle_deg, None),
-                    neutral_z: Field::new(
-                        crate::adapters::binding(d, f.id)
-                            .map(String::from)
-                            .unwrap_or_else(|| fmt(plane_offset(neutral))),
-                    ),
+                    neutral_z: Field::new(plane_text(neutral, offset)),
                 }),
             ),
             FeatureKind::Split {
                 body,
                 plane,
                 new_name,
-                ..
+                offset,
             } => (
                 DialogKind::Split,
                 Body::Split(SplitD {
                     body: *body,
-                    z: Field::new(
-                        crate::adapters::binding(d, f.id)
-                            .map(String::from)
-                            .unwrap_or_else(|| fmt(plane_offset(plane))),
-                    ),
+                    z: Field::new(plane_text(plane, offset)),
                     new_name: new_name.clone(),
                 }),
             ),
@@ -620,15 +631,14 @@ impl Dialog {
                 height,
                 base_fillet,
                 draft_deg,
+                offset,
                 ..
             } => (
                 DialogKind::Boss,
                 Body::Boss(BossD {
                     body: *body,
                     plane_z: Field::new(
-                        crate::adapters::binding(d, f.id)
-                            .map(String::from)
-                            .unwrap_or_else(|| fmt(plane_offset(plane))),
+                        plane_text(plane, offset),
                     ),
                     points: points
                         .iter()
@@ -773,36 +783,10 @@ impl Dialog {
                 s.extend(crate::adapters::refs_of(&f.kind));
             }
         }
-        for (_, e) in self.bindings(&self.build(cx).unwrap_or_default()) {
-            s.extend(crate::adapters::refs_of(&e));
-        }
         if let Body::Joint(j) = &self.body {
             s.extend(j.refs());
         }
         s
-    }
-
-    /// Plane bindings for the built features (see adapters).
-    pub fn bindings(&self, feats: &[Feature]) -> Vec<(FeatureId, String)> {
-        let first = feats.first().map(|f| f.id);
-        let lit = |f: &Field| f.text.trim().parse::<f64>().is_ok();
-        let b = |f: &Field| {
-            if lit(f) {
-                String::new()
-            } else {
-                f.text.trim().to_string()
-            }
-        };
-        match (&self.body, first) {
-            (Body::Split(s), Some(id)) => vec![(id, b(&s.z))],
-            (Body::Draft(s), Some(id)) => vec![(id, b(&s.neutral_z))],
-            (Body::Boss(s), Some(id)) => vec![(id, b(&s.plane_z))],
-            (Body::Standoffs(s), Some(id)) => s.bindings(id),
-            // the joint's offset is a native expression: drop the plane binding
-            // of a Split it replaced
-            (Body::Joint(_), Some(id)) => vec![(id, String::new())],
-            _ => Vec::new(),
-        }
     }
 
     pub fn build(&self, cx: &BuildCx) -> Result<Vec<Feature>, String> {
@@ -860,27 +844,32 @@ impl Dialog {
                 one(FeatureKind::Draft {
                     body: s.body,
                     faces,
-                    neutral: Plane::XY.offset(z),
+                    neutral: Plane::XY,
                     pull: DVec3::Z,
                     angle_deg: s.angle.expr(None),
-                    offset: 0.0.into(),
+                    offset: {
+                        let _ = z;
+                        z_expr(&s.neutral_z)
+                    },
                 })
             }
             Body::Split(s) => {
                 let z = num(&s.z)?;
+                let _ = z;
                 one(FeatureKind::Split {
                     body: s.body,
-                    plane: Plane::XY.offset(z),
+                    plane: Plane::XY,
                     new_name: s.new_name.clone(),
-                    offset: 0.0.into(),
+                    offset: z_expr(&s.z),
                 })
             }
             Body::Boss(b) => {
                 let z = num(&b.plane_z)?;
                 let pts = parse_points(&b.points)?;
+                let _ = z;
                 one(FeatureKind::ScrewBoss {
                     body: b.body,
-                    plane: Plane::XY.offset(z),
+                    plane: Plane::XY,
                     points: pts,
                     od: b.od.expr(None),
                     hole_dia: b.hole.expr(default_fit(&boss_template(), "hole_dia")),
@@ -888,7 +877,7 @@ impl Dialog {
                     hole_depth: None,
                     base_fillet: b.base_fillet.expr(None),
                     draft_deg: b.draft.expr(None),
-                    offset: 0.0.into(),
+                    offset: z_expr(&b.plane_z),
                 })
             }
             Body::Rib(r) => one(FeatureKind::Rib {

@@ -169,19 +169,14 @@ impl JointD {
                 body,
                 plane,
                 new_name,
-                ..
+                offset,
             } if !f.suppressed && plane.normal.z.abs() > 0.999 => {
-                Some((f, *body, *plane, new_name.clone()))
+                Some((f, *body, (*plane, offset.clone()), new_name.clone()))
             }
             _ => None,
         })?;
         self.body = body.or(self.body);
-        self.z = Field::new(
-            d.meta
-                .get(&crate::adapters::bind_key(f.id))
-                .cloned()
-                .unwrap_or_else(|| super::fmt(plane.origin.z * plane.normal.z.signum())),
-        );
+        self.z = Field::new(super::plane_text(&plane.0, &plane.1));
         self.upper_name = upper;
         self.replaces = Some(f.name.clone());
         Some(f.id)

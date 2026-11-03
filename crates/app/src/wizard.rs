@@ -416,25 +416,24 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
         }
     };
     if !board.holes.is_empty() {
-        let so = doc.add_feature(
+        doc.add_feature(
             "Standoffs",
             FeatureKind::StandoffsFromPcb {
                 body: Some(base),
                 source,
-                plane: Plane::XY.offset(wall),
+                plane: Plane::XY,
                 od: "boss_od".into(),
                 hole_dia: "boss_hole".into(),
                 height: "standoff_h".into(),
                 base_fillet: "0.3".into(),
                 draft_deg: if molded { "draft".into() } else { "0".into() },
-                offset: 0.0.into(),
+                // standoffs start on the floor, whatever the wall thickness
+                offset: "wall".into(),
                 exclude: Vec::new(),
                 gussets: None,
                 lid_holes: None,
             },
         );
-        // standoffs start on the floor, whatever the wall thickness
-        crate::adapters::bind_plane_offset(&mut doc, so, "wall");
     }
     // 6. parting joint → Base + Lid
     let mut j = joint::JointD::new(&doc.data, None);

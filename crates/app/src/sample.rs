@@ -276,16 +276,15 @@ pub fn sensor_node() -> Document {
         },
     );
 
-    let split = doc.add_feature(
+    doc.add_feature(
         "Split",
         FeatureKind::Split {
             body: Some(base),
-            plane: Plane::XY.offset(28.0),
+            plane: Plane::XY,
             new_name: "Lid".into(),
-            offset: 0.0.into(),
+            offset: "lid_split".into(),
         },
     );
-    crate::adapters::bind_plane_offset(&mut doc, split, "lid_split");
 
     let (_, pcb_f) = doc.import_step("sensor-node", pcb_step().into_bytes(), true);
     let _ = pcb_f;
@@ -306,20 +305,20 @@ pub fn sensor_node() -> Document {
                 min_dia: 2.5,
                 max_dia: 4.0,
             },
-            plane: Plane::XY.offset(2.0),
+            plane: Plane::XY,
             od: "boss_od".into(),
             hole_dia: "boss_hole".into(),
             height: "18".into(),
             base_fillet: "0.8".into(),
             draft_deg: "draft".into(),
-            offset: 0.0.into(),
+            // standoffs start on the floor, whatever the wall thickness
+            offset: "wall".into(),
             exclude: Vec::new(),
             gussets: None,
             lid_holes: None,
         },
     );
-    // standoffs start on the floor, whatever the wall thickness
-    crate::adapters::bind_plane_offset(&mut doc, standoffs, "wall");
+    let _ = standoffs;
 
     let mut rib = Sketch::new("Rib", Plane::XY.offset(2.0));
     rib.line(DVec2::new(-25.0, 12.0), DVec2::new(25.0, 12.0));

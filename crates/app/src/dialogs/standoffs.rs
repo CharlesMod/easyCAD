@@ -9,6 +9,7 @@
 use casework_model::document::{DocData, ImportKind};
 use casework_model::feature::*;
 use casework_model::geom::Plane;
+use casework_model::params::Expr;
 use casework_model::occt::{CurveKind, Shape, SurfaceKind};
 use casework_model::process::{Fit, FitClass};
 use egui::{RichText, Ui};
@@ -182,6 +183,7 @@ impl StandoffsD {
             base_fillet,
             draft_deg,
             plane,
+            offset,
             ..
         } = &f.kind
         else {
@@ -198,11 +200,7 @@ impl StandoffsD {
         s.height = Field::from_expr(height, None);
         s.base_fillet = Field::from_expr(base_fillet, None);
         s.draft = Field::from_expr(draft_deg, None);
-        s.plane_z = Field::new(
-            crate::adapters::binding(d, f.id)
-                .map(String::from)
-                .unwrap_or_else(|| super::fmt(plane.origin.z)),
-        );
+        s.plane_z = Field::new(super::plane_text(plane, offset));
         Some(s)
     }
 
@@ -269,18 +267,6 @@ impl StandoffsD {
         }
     }
 
-    pub fn bindings(&self, id: FeatureId) -> Vec<(FeatureId, String)> {
-        let t = self.plane_z.text.trim();
-        vec![(
-            id,
-            if t.parse::<f64>().is_ok() {
-                String::new()
-            } else {
-                t.to_string()
-            },
-        )]
-    }
-
     pub fn build(
         &self,
         cx: &BuildCx,
@@ -290,7 +276,9 @@ impl StandoffsD {
         let board = self.board.as_ref().ok_or("pick the board")?;
         let vals = crate::adapters::values(&cx.data);
         let z = crate::widgets::eval(&self.plane_z.text, &vals)?;
-        let plane = Plane::XY.offset(z);
+        let _ = z;
+        let plane = Plane::XY;
+        let offset = Expr::new(crate::units::normalize_input(self.plane_z.text.trim()));
         let id = cx.id(editing, 0);
         let all_on = self.holes.iter().all(|h| h.on);
         let fit = crate::dialogs::default_fit(&crate::dialogs::boss_template(), "hole_dia");
@@ -319,7 +307,7 @@ impl StandoffsD {
                 height: self.height.expr(None),
                 base_fillet: self.base_fillet.expr(None),
                 draft_deg: self.draft.expr(None),
-                offset: 0.0.into(),
+                offset: offset.clone(),
                 exclude: Vec::new(),
                 gussets: None,
                 lid_holes: None,
@@ -344,7 +332,7 @@ impl StandoffsD {
                 hole_depth: None,
                 base_fillet: self.base_fillet.expr(None),
                 draft_deg: self.draft.expr(None),
-                offset: 0.0.into(),
+                offset,
             }
         };
         Ok(vec![Feature {

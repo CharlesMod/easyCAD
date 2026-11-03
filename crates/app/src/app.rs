@@ -597,7 +597,6 @@ impl CaseworkApp {
         label: &str,
         feats: Vec<Feature>,
         replace: Option<FeatureId>,
-        bind: Vec<(FeatureId, String)>,
     ) {
         let at = self.rollback;
         let scope = self.scope();
@@ -622,14 +621,6 @@ impl CaseworkApp {
                 }
                 d.features.insert(pos + k, f);
             }
-            for (fid, expr) in &bind {
-                if expr.is_empty() {
-                    d.meta.remove(&adapters::bind_key(*fid));
-                } else {
-                    d.meta.insert(adapters::bind_key(*fid), expr.clone());
-                }
-            }
-            adapters::apply_bindings(d);
             Ok::<_, DocError>(())
         });
         match r {
@@ -713,8 +704,7 @@ impl CaseworkApp {
             match d.build(&cx) {
                 Ok(feats) if !feats.is_empty() => {
                     let label = d.title_case();
-                    let bind = d.bindings(&feats);
-                    self.commit_features(&label, feats, d.editing(), bind);
+                    self.commit_features(&label, feats, d.editing());
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -850,7 +840,8 @@ impl CaseworkApp {
         self.load(d, None);
     }
 
-    pub fn load(&mut self, doc: Document, path: Option<PathBuf>) {
+    pub fn load(&mut self, mut doc: Document, path: Option<PathBuf>) {
+        adapters::migrate_bindings(&mut doc.data);
         self.saved_revision = doc.data.revision;
         self.doc = doc;
         self.path = path;
@@ -925,7 +916,6 @@ impl CaseworkApp {
         if p.extension().is_none_or(|e| e != "cwk") {
             p.set_extension("cwk");
         }
-        adapters::apply_bindings(&mut self.doc.data);
         self.doc.save_to_dir(&p).map_err(|e| e.to_string())?;
         self.saved_revision = self.doc.data.revision;
         crate::recovery::remove(&self.doc.data.doc_id);

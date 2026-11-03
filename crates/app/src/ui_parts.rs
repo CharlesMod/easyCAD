@@ -284,7 +284,7 @@ fn place(app: &mut CaseworkApp, keys: &[PickKey]) {
         },
     };
     let save = app.rollback;
-    app.commit_features(&format!("Insert {size} ×{n}"), vec![feat], None, Vec::new());
+    app.commit_features(&format!("Insert {size} ×{n}"), vec![feat], None);
     app.rollback = save;
     if let crate::app::Mode::Parts(p) = &mut app.mode {
         p.last_placed = Some(id);

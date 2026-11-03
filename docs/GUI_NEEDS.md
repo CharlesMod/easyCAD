@@ -33,47 +33,16 @@ today (adapter or limitation) and what would replace it.
 
 12a. ~~Fractional inches~~ — done by the engine. `units::normalize_input` still
     rewrites them (same value, harmless); it can shrink to the inch-mode suffix.
-12b. **Profile edits reorder the list.** `Document::add_profile` removes and
-    re-appends, so editing a profile moved it to the bottom of the picker. The GUI
-    uses `adapters::update_profile` (replace in place, own undo label). *Want:*
-    `Document::update_profile(label, p)` or in-place replacement in `add_profile`.
-12c. **O-ring gland corner radius.** On the sample (outline corners filleted r 5.3,
-    cavity corners r 3.3) the O-ring report says "gland corner radius 0.00 mm is
-    below the 5.33 mm bend guidance" and the check "min corner radius 0.00". Looks
-    like the gland path's corner radius is measured as 0 on a filleted outline.
-12d. **Snap fits on wizard boxes.** `wizard::build` on the sample DXF board
-    (91 × 55 outline, height 30, closed shell, lid_split 20, 4 standoffs) with
-    `JointKind::SnapFit` (GUI defaults, `Count(4)`) fails "no snap-fit position could
-    be placed: blocked by a boss, rib, the lid/floor or another feature" ×4. Nothing
-    obvious blocks z 12–20 on the walls.
-12e. **Fragile joint/shell at one corner radius.** Same box from the sample STEP
-    board (rectangle outline, offset 2.5, sketch corners `corner_r`), edge_r 3,
-    tongue & groove: corner_r 5 → "groove depth 1.65 needs 2.05 of material but only
-    0.00 is available"; corner_r 3, 5.3, 6, 8 are fine. With edge_r 1 (< wall) the
-    closed shell fails as documented. Reproduce by setting `corner_r` to 5 in
-    `wizard::tests::builds_a_clean_enclosure_from_dxf_and_step`.
-
-## Assemblies
-
-17. **Movable in-context components.** `split_to_components` makes Base / Lid with a
-    `ContextRef` resolved in the frame of the component's context occurrence, which is
-    its only occurrence; moving that occurrence (a mate, the gizmo) re-expresses the
-    master's half in the new frame, so it stays where it was in the world and a
-    hinge never opens. *Adapter:* `adapters::anchor_in_context` adds a hidden,
-    grounded, out-of-BOM "design position" occurrence of each inside the master and
-    sets it as `Component.context` (marked `meta["gui.anchor.<occ>"]`, hidden in the
-    tree and counts); the visible occurrence then moves. *Want:* a captured context
-    frame (`Component.context_frame: Option<Transform>`, set by
-    `split_to_components`), or `split_to_components` doing the anchoring itself.
-18. **Mate preview.** The dialog's draft mate is pushed into `DocData.mates` of every
-    model request (id `u32::MAX` while new) and the worker runs
-    `assembly::solve_mates` before `regenerate_assembly`. Fine, but *want:*
-    `solve_mates` to report per-mate the remaining free DOF direction (axis / plane)
-    so the jog control can show it on the model.
-
-19. **Interference volume for display.** `Interference` has the volume but not the
-    common solid, so the GUI tints the whole pair red (translucent). *Want:*
-    `Interference.common: Option<Shape>` (world frame) to draw the overlap itself.
+12b. ~~Profile edits reorder the list~~ — done by the engine:
+    `Document::update_profile(label, p)` (in place); `add_profile` keeps the position.
+12c. ~~O-ring gland corner radius~~ — engine: free-form (B-spline/offset) edges are
+    now measured through their ends instead of reading as sharp corners. Analytic
+    arcs already gave the right radius; please re-check the sample.
+12d. ~~Snap fits on wizard boxes~~ — done by the engine: beams/roots are fitted to
+    the real lid/floor and reported in `JointReport.adjustments`.
+12e. ~~Fragile joint/shell at one corner radius~~ — done by the engine: the exact
+    bounding box threw on a degenerate offset surface; `bbox` now falls back. The
+    closed shell is also validated (two shells, believable void) with a fallback.
 
 ## Sketch
 

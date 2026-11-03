@@ -346,8 +346,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
             .fixed_pos(r.min)
             .show(ui.ctx(), |ui| match ex.ui(ui, &app.doc.data) {
                 crate::dialogs::export::ExportEvent::Export => {
-                    let mut data = app.doc.data.clone();
-                    crate::adapters::apply_bindings(&mut data);
+                    let data = app.doc.data.clone();
                     let req = ex.request(&data.name);
                     let (blobs, lib) = (app.doc.blobs.clone(), app.doc.library.clone());
                     let ex2 = crate::dialogs::export::ExportDialog {

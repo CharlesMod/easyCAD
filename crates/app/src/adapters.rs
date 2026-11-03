@@ -1,9 +1,7 @@
 //! Adapters for engine gaps (each one is listed in docs/GUI_NEEDS.md).
 //!
-//! * **Plane bindings.** `Split`/`Draft`/`ScrewBoss` planes are numeric `Plane`s,
-//!   but the user wants "Split @ lid_split". The GUI stores the expression in
-//!   `DocData::meta["gui.bind.<feature>"]` and rewrites the plane's offset inside
-//!   the same undoable edit as every parameter change.
+//! * **Old plane bindings.** Files from before plane `offset` expressions are
+//!   migrated on open ([`migrate_bindings`]).
 //! * **Rollback marker.** Not part of `DocData` yet: the GUI keeps it and sends the
 //!   truncated feature list to the worker.
 //! * **Movable in-context components.** A component made by `split_to_components`
@@ -22,90 +20,42 @@ use casework_model::params::Values;
 
 const BIND: &str = "gui.bind.";
 
-pub fn bind_key(f: FeatureId) -> String {
-    format!("{BIND}{}", f.0)
-}
-
-/// Bind a feature's plane offset (along the plane normal, through the origin) to an expression.
-pub fn bind_plane_offset(doc: &mut Document, f: FeatureId, expr: &str) {
-    let key = bind_key(f);
-    let expr = expr.to_owned();
-    let _ = doc.edit("Bind plane", move |d| {
-        d.meta.insert(key, expr);
-        apply_bindings(d);
-        Ok::<_, DocError>(())
-    });
-}
-
-pub fn binding(d: &DocData, f: FeatureId) -> Option<&str> {
-    d.meta.get(&bind_key(f)).map(|s| s.as_str())
-}
-
-/// Re-evaluate every plane binding into its feature (root and components, each
-/// with its own params in scope).
-pub fn apply_bindings(d: &mut DocData) {
-    apply_bindings_root(d);
-    let bound: Vec<u32> = d
-        .meta
-        .keys()
-        .filter_map(|k| k.strip_prefix(BIND).and_then(|id| id.parse().ok()))
-        .collect();
-    if bound.is_empty() {
-        return;
-    }
-    let comps: Vec<casework_model::assembly::ComponentId> = d
-        .components
-        .iter()
-        .filter(|c| c.features.iter().any(|f| bound.contains(&f.id.0)))
-        .map(|c| c.id)
-        .collect();
-    for c in comps {
-        if let Some(mut v) = d.component_view(c) {
-            apply_bindings_root(&mut v);
-            if let Some(comp) = d.component_mut(c) {
-                comp.features = v.features;
-            }
-        }
-    }
-}
-
-fn apply_bindings_root(d: &mut DocData) {
-    let Ok(vals) = d.values() else { return };
-    let binds: Vec<(u32, String)> = d
+/// Files saved before plane features had an `offset` expression (GUI_NEEDS #1, done)
+/// kept "Split @ lid_split" in `meta["gui.bind.<feature>"]`. Move each into the
+/// feature's `offset` (plane back through the origin) and drop the key.
+pub fn migrate_bindings(d: &mut DocData) {
+    let binds: Vec<(String, u32, String)> = d
         .meta
         .iter()
         .filter_map(|(k, v)| {
             k.strip_prefix(BIND)
                 .and_then(|id| id.parse().ok())
-                .map(|id| (id, v.clone()))
+                .map(|id| (k.clone(), id, v.clone()))
         })
         .collect();
-    for (id, expr) in binds {
-        let Ok(v) = casework_model::params::eval(&expr, &vals) else {
-            continue;
-        };
-        if let Some(f) = d.feature_mut(FeatureId(id)) {
-            let plane = match &mut f.kind {
-                FeatureKind::Split { plane, .. }
-                | FeatureKind::ScrewBoss { plane, .. }
-                | FeatureKind::StandoffsFromPcb { plane, .. } => plane,
-                FeatureKind::Draft { neutral, .. } => neutral,
+    for (key, id, expr) in binds {
+        let feats = d
+            .features
+            .iter_mut()
+            .chain(d.components.iter_mut().flat_map(|c| c.features.iter_mut()));
+        for f in feats.filter(|f| f.id == FeatureId(id)) {
+            let (plane, offset) = match &mut f.kind {
+                FeatureKind::Split { plane, offset, .. }
+                | FeatureKind::ScrewBoss { plane, offset, .. }
+                | FeatureKind::StandoffsFromPcb { plane, offset, .. } => (plane, offset),
+                FeatureKind::Draft { neutral, offset, .. } => (neutral, offset),
                 _ => continue,
             };
-            plane.origin = plane.normal * v;
+            plane.origin = glam::DVec3::ZERO;
+            *offset = casework_model::params::Expr::new(expr.as_str());
         }
+        d.meta.remove(&key);
     }
 }
 
-/// Set a parameter (undoable) and refresh plane bindings in the same step.
+/// Set a parameter (undoable).
 pub fn set_param(doc: &mut Document, name: &str, expr: &str) -> Result<(), DocError> {
-    let (name, expr) = (name.to_owned(), expr.to_owned());
-    doc.edit(&format!("Set {name}"), move |d| {
-        d.params.set(&name, expr.as_str())?;
-        d.values()?;
-        apply_bindings(d);
-        Ok::<_, DocError>(())
-    })
+    doc.set_param(name, expr)
 }
 
 /// The document as the worker should see it: rolled back to `active` features.
@@ -120,7 +70,6 @@ pub fn effective_in(
     active: Option<usize>,
 ) -> DocData {
     let mut d = d.clone();
-    apply_bindings(&mut d);
     if let (Some(n), Some(f)) = (active, crate::scope::features_mut(&mut d, scope)) {
         f.truncate(n);
     }
@@ -173,11 +122,7 @@ pub fn usage_counts(d: &DocData) -> BTreeMap<String, usize> {
         }
     };
     for f in &d.features {
-        let mut s = refs_of(&f.kind);
-        if let Some(b) = binding(d, f.id) {
-            s.extend(refs_of(&b));
-        }
-        bump(s);
+        bump(refs_of(&f.kind));
     }
     for s in &d.sketches {
         bump(refs_of(&s.sketch.constraints));
@@ -194,10 +139,7 @@ pub fn usage_counts(d: &DocData) -> BTreeMap<String, usize> {
 pub fn users_of(d: &DocData, name: &str) -> Vec<String> {
     let mut v = Vec::new();
     for f in &d.features {
-        let mut s = refs_of(&f.kind);
-        if let Some(b) = binding(d, f.id) {
-            s.extend(refs_of(&b));
-        }
+        let s = refs_of(&f.kind);
         if s.contains(name) {
             v.push(f.name.clone());
         }
@@ -291,7 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bindings_follow_parameters() {
+    fn old_bindings_migrate_to_offsets() {
         let mut doc = crate::sample::sensor_node();
         let split = doc
             .data
@@ -300,18 +242,23 @@ mod tests {
             .find(|f| matches!(f.kind, FeatureKind::Split { .. }))
             .unwrap()
             .id;
-        let z = |d: &DocData| match &d.feature(split).unwrap().kind {
-            FeatureKind::Split { plane, .. } => plane.origin.z,
+        // an old file: numeric plane at 28 plus the binding in meta
+        if let Some(f) = doc.data.feature_mut(split) {
+            if let FeatureKind::Split { plane, offset, .. } = &mut f.kind {
+                *plane = casework_model::geom::Plane::XY.offset(28.0);
+                *offset = "0".into();
+            }
+        }
+        doc.data.meta.insert(format!("{BIND}{}", split.0), "lid_split".into());
+        migrate_bindings(&mut doc.data);
+        match &doc.data.feature(split).unwrap().kind {
+            FeatureKind::Split { plane, offset, .. } => {
+                assert!(plane.origin.length() < 1e-12);
+                assert_eq!(offset.0, "lid_split");
+            }
             _ => unreachable!(),
-        };
-        assert!((z(&doc.data) - 28.0).abs() < 1e-9);
-        set_param(&mut doc, "height", "40").unwrap();
-        assert!((z(&doc.data) - 36.0).abs() < 1e-9);
-        doc.undo();
-        assert!(
-            (z(&doc.data) - 28.0).abs() < 1e-9,
-            "undo restores the bound plane too"
-        );
+        }
+        assert!(doc.data.meta.keys().all(|k| !k.starts_with(BIND)));
         let counts = usage_counts(&doc.data);
         assert_eq!(counts["lid_split"], 1);
         assert!(counts["wall"] >= 3, "{counts:?}");

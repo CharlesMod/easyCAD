@@ -112,8 +112,7 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
         (ExportFormat::ThreeMf, "3mf", "FDM 0.4 generic", true),
     ] {
         let p = dir.join(format!("sensor-node.{ext}"));
-        let mut data = app.doc.data.clone();
-        crate::adapters::apply_bindings(&mut data);
+        let data = app.doc.data.clone();
         let rx = crate::dialogs::export::spawn(
             fmt,
             p.clone(),

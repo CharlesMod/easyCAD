@@ -1133,10 +1133,9 @@ pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> St
         FeatureKind::Fillet { radius, .. } => format!("{name} r{}", ev(radius)),
         FeatureKind::Chamfer { distance, .. } => format!("{name} {}", ev(distance)),
         FeatureKind::Shell { thickness, .. } => format!("{name} {}", ev(thickness)),
-        FeatureKind::Split { plane, .. } => match crate::adapters::binding(app.view(), f.id) {
-            Some(b) => format!("{name} @ {b}"),
-            None => format!("{name} @ {}", crate::dialogs::fmt(plane.origin.z)),
-        },
+        FeatureKind::Split { plane, offset, .. } => {
+            format!("{name} @ {}", crate::dialogs::plane_text(plane, offset))
+        }
         FeatureKind::StandoffsFromPcb { .. } => {
             let n = app
                 .model
