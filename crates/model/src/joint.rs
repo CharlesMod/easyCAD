@@ -483,6 +483,9 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
     lap("rim");
     let t = rep.effective_wall;
     let band = |width: f64, what: &str| -> JR<Shape> {
+        if width <= 0.05 {
+            return Err(format!("{what} width is {width:.2} mm after process fits; widen it or use a tighter fit class"));
+        }
         let m = (t - width) / 2.0;
         if m <= 0.0 {
             return Err(format!("{what} ({width:.2} mm) does not fit in the {t:.2} mm wall; add rim thickening (rim width ≥ {:.2})", width + 2.0 * MIN_WALL));
@@ -659,7 +662,10 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 return Err(format!("beam length {l:.2} mm is too short for a {y:.2} mm hook at {ins:.0}°/{ret:.0}°"));
             }
             if l + c + MIN_WALL > room(other(*beam_on)) {
-                return Err(format!("snap beam ({l:.2} mm) is longer than the other half is tall ({:.2} mm)", room(other(*beam_on))));
+                return Err(format!(
+                    "snap beam ({l:.2} mm + {c:.2} clearance + {MIN_WALL} skin) does not fit in the other half ({:.2} mm tall)",
+                    room(other(*beam_on))
+                ));
             }
             let root = (l * 0.5).min(room(*beam_on) - MIN_WALL).max(1.0);
             let env_outer = &ring.env;

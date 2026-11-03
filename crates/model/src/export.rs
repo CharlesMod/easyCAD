@@ -146,8 +146,27 @@ pub fn write_step(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     if bodies.is_empty() {
         return Err(ExportError::Empty);
     }
-    let shapes: Vec<&Shape> = bodies.iter().map(|b| b.shape()).collect();
-    Shape::compound(&shapes)?.write_step(path)?;
+    // one STEP part per body (per sub-part for assemblies), keeping names/colours
+    let mut shapes: Vec<Shape> = Vec::new();
+    let mut parts: Vec<occt::StepPart> = Vec::new();
+    for b in bodies {
+        match b.appearance().filter(|a| a.parts.len() > 1 && b.shape().kind() == Some(occt::ShapeKind::Compound)) {
+            Some(a) => {
+                let solids = b.shape().solids()?;
+                for (k, s) in solids.into_iter().enumerate() {
+                    let p = a.parts.get(k);
+                    parts.push(occt::StepPart { name: p.map(|p| p.name.clone()).unwrap_or_else(|| b.name.clone()), color: p.and_then(|p| p.color) });
+                    shapes.push(s);
+                }
+            }
+            None => {
+                parts.push(occt::StepPart { name: b.name.clone(), color: b.appearance().and_then(|a| a.parts.first()).and_then(|p| p.color) });
+                shapes.push(b.shape().clone());
+            }
+        }
+    }
+    let refs: Vec<&Shape> = shapes.iter().collect();
+    std::fs::write(path, Shape::compound(&refs)?.to_step_string_named(&parts)?)?;
     Ok(())
 }
 

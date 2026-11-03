@@ -284,3 +284,28 @@ fn hlr_front_view_of_a_drilled_box() {
         assert!(hid.iter().any(|e| e.points.iter().all(|p| (p[0] - 24.0).abs() < 1e-3)));
     }
 }
+
+#[test]
+fn xcaf_names_and_colors_round_trip() {
+    let board = Shape::make_box(DVec3::ZERO, DVec3::new(50.0, 30.0, 1.6)).unwrap();
+    let chip = Shape::make_box(DVec3::new(10.0, 10.0, 1.6), DVec3::new(8.0, 8.0, 1.2)).unwrap();
+    let c = Shape::compound(&[&board, &chip]).unwrap();
+    let parts = vec![
+        occt::StepPart { name: "PCB".into(), color: Some([0.0, 0.5, 0.0]) },
+        occt::StepPart { name: "U1".into(), color: Some([0.1, 0.1, 0.1]) },
+    ];
+    let step = c.to_step_string_named(&parts).unwrap();
+    let (back, got) = Shape::read_step_xcaf(&step).unwrap();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(back.count(ShapeKind::Solid), 2);
+    let pcb = got.iter().position(|p| p.name == "PCB").expect("names kept");
+    let col = got[pcb].color.unwrap();
+    assert!(col[1] > 0.4 && col[0] < 0.05 && col[2] < 0.05, "{col:?}");
+    assert!(got.iter().any(|p| p.name == "U1"));
+    let owners = back.face_owners().unwrap();
+    assert_eq!(owners.len(), 12);
+    assert_eq!(owners.iter().filter(|o| **o == 0).count(), 6);
+    // plain STEP without colours still loads through the XCAF path
+    let (_, plain) = Shape::read_step_xcaf(&board.to_step_string().unwrap()).unwrap();
+    assert_eq!(plain.len(), 1);
+}

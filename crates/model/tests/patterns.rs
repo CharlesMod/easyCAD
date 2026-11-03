@@ -149,3 +149,49 @@ fn rib_to_body() {
     let v2 = r.body_by_id(p).unwrap().shape().volume().unwrap();
     assert!(v2 > base && v2 < v, "drafted rib {v2} between {base} and {v}");
 }
+
+#[test]
+fn xcaf_pcb_import_keeps_names_and_colors() {
+    use casework_model::occt::{Shape, StepPart};
+    use casework_model::regen::MeshQuality;
+    let board = Shape::make_box(DVec3::ZERO, DVec3::new(50.0, 30.0, 1.6)).unwrap();
+    let usb = Shape::make_box(DVec3::new(-1.0, 10.0, 1.6), DVec3::new(7.0, 9.0, 3.2)).unwrap();
+    let chip = Shape::make_box(DVec3::new(20.0, 10.0, 1.6), DVec3::new(8.0, 8.0, 1.2)).unwrap();
+    let c = Shape::compound(&[&board, &usb, &chip]).unwrap();
+    let green = [0.0, 0.45, 0.1];
+    let step = c
+        .to_step_string_named(&[
+            StepPart { name: "Board".into(), color: Some(green) },
+            StepPart { name: "J1 USB-C".into(), color: Some([0.75, 0.75, 0.75]) },
+            StepPart { name: "U1".into(), color: Some([0.05, 0.05, 0.05]) },
+        ])
+        .unwrap();
+    let mut doc = Document::new("PCB");
+    let (_, f) = doc.import_step("pcb", step.clone().into_bytes(), true);
+    let out = doc.regenerate().clone();
+    let pcb = out.body_by_id(BodyId::of(f)).unwrap();
+    assert!(pcb.reference, "a locked reference body");
+    let app = pcb.appearance().unwrap();
+    let names: Vec<&str> = app.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["Board", "J1 USB-C", "U1"]);
+    let fc = pcb.face_colors().unwrap();
+    assert_eq!(fc.len(), 18);
+    assert!(fc.iter().filter(|c| (c[1] - green[1]).abs() < 0.02 && c[0] < 0.02).count() == 6, "board faces are green");
+    let vc = pcb.mesh_colors(MeshQuality::Display).unwrap();
+    assert_eq!(vc.len(), pcb.mesh().unwrap().positions.len());
+    assert!(vc.iter().any(|c| c[0] < 0.1 && c[1] < 0.1) && vc.iter().any(|c| c[1] > 0.4 && c[0] < 0.05));
+
+    // as solids: one named body per part; STEP export keeps names and colours
+    let mut doc2 = Document::new("PCB2");
+    doc2.import_step("pcb", step.into_bytes(), false);
+    let out2 = doc2.regenerate().clone();
+    let names2: Vec<String> = out2.bodies.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(names2, vec!["Board", "J1 USB-C", "U1"]);
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("out.step");
+    let refs: Vec<&casework_model::regen::Body> = out.bodies.iter().collect();
+    casework_model::export::write_step(&refs, &p).unwrap();
+    let (_, back) = Shape::read_step_xcaf(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(back.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), vec!["Board", "J1 USB-C", "U1"]);
+    assert!(back[0].color.is_some_and(|c| c[1] > 0.4));
+}

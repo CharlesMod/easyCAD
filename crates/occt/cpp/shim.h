@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+#include <OSD.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -12,11 +14,26 @@
 
 // Convert every C++/OCCT exception into a Rust `cxx::Exception` instead of aborting.
 // Standard_Failure does not derive from std::exception, so cxx's default would not
-// catch it.
+// catch it. Hardware signals raised inside the kernel (e.g. a null dereference in an
+// OCCT algorithm on degenerate input) are converted into Standard_Failure through
+// OCCT's signal handler + OCC_CATCH_SIGNALS (OCC_CONVERT_SIGNALS build), so they
+// also come back as errors instead of killing the process.
+namespace cw {
+inline void ensureSignals() {
+  static const bool installed = [] {
+    OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
+    return true;
+  }();
+  (void)installed;
+}
+} // namespace cw
+
 namespace rust {
 namespace behavior {
 template <typename Try, typename Fail>
 static void trycatch(Try &&func, Fail &&fail) noexcept try {
+  cw::ensureSignals();
+  OCC_CATCH_SIGNALS
   func();
 } catch (const Standard_Failure &e) {
   std::string msg = e.DynamicType()->Name();
@@ -52,6 +69,7 @@ struct MeshData;
 struct BBox;
 struct MassProps;
 struct HlrData;
+struct XcafPart;
 
 std::unique_ptr<Shape> shape_clone(const Shape &s);
 bool shape_is_null(const Shape &s);
@@ -106,6 +124,9 @@ HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl);
 MassProps mass_props(const Shape &s);
 BBox bounding_box(const Shape &s);
 
+std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts);
+rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts);
+rust::Vec<uint32_t> face_owners(const Shape &c);
 std::unique_ptr<Shape> read_step_file(rust::Str path);
 std::unique_ptr<Shape> read_step_str(rust::Str data);
 void write_step_file(const Shape &s, rust::Str path);

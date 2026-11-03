@@ -97,6 +97,16 @@ pub mod bridge {
         poly_fallback: bool,
     }
 
+    /// A named, coloured part of an XCAF (assembly) STEP file.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct XcafPart {
+        name: String,
+        r: f32,
+        g: f32,
+        b: f32,
+        has_color: bool,
+    }
+
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct BBox {
         min: V3,
@@ -193,6 +203,13 @@ pub mod bridge {
         fn mass_props(s: &Shape) -> Result<MassProps>;
         fn bounding_box(s: &Shape) -> Result<BBox>;
 
+        /// STEP with assembly structure, names and colours. Returns a compound whose
+        /// direct children are the leaf solids (placed), in the order of `parts`.
+        fn read_step_xcaf(data: &str, parts: &mut Vec<XcafPart>) -> Result<UniquePtr<Shape>>;
+        /// STEP writer keeping a name and colour per direct child of `c`.
+        fn write_step_xcaf(c: &Shape, parts: &[XcafPart]) -> Result<String>;
+        /// For each face of `c` (MapShapes order), the index of the direct child owning it.
+        fn face_owners(c: &Shape) -> Result<Vec<u32>>;
         fn read_step_file(path: &str) -> Result<UniquePtr<Shape>>;
         fn read_step_str(data: &str) -> Result<UniquePtr<Shape>>;
         fn write_step_file(s: &Shape, path: &str) -> Result<()>;

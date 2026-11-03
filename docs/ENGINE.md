@@ -316,6 +316,52 @@ clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) o
   run −0.10…+0.50 in 0.05 steps. Feed the results to
   `ProcessProfile::from_calibration(&CalibrationResult)`.
 
+## Performance
+
+Timings for the test enclosure in `crates/model/tests/timing.rs` (6 features: shell
+cavity, 4 filleted bosses, rib, tongue & groove joint with rim; best of 5, release,
+4-core container shared with a GUI build). Run them with
+`cargo test -p casework-model --release --test timing -- --nocapture`.
+
+| step | before | after |
+|---|---|---|
+| full regen (cold) | 443 ms | 301 ms |
+| param edit `wall` → regen | 481 ms | 345 ms |
+| edit of the last feature only | 345 ms | 225–254 ms |
+| undo → regen (cache) | 0.2 ms | 0.13 ms |
+| tessellation, Display (12k tris) | 79 ms | 29 ms |
+| tessellation, Final (24k tris) | 148 ms | 46 ms |
+| tessellation, Preview (4.5k tris) | — | 19 ms |
+
+What changed:
+- Joints defer their booleans to one fuse and one cut per half, and run the split,
+  the ring analysis and the two halves on two threads.
+- Booleans and BRepMesh use OCCT's parallel mode and oriented bounding boxes; set
+  `CW_SERIAL_BOP=1` to compare against serial.
+- Meshing starts from a clean triangulation, so each `MeshQuality` (Preview,
+  Display, Final) gets its own density, computed once per shape.
+- `FeatureReport.elapsed_ms` gives per-feature cost (the joint dominates).
+- Unchanged bodies keep their geometry `Arc`, and with it their meshes, across edits.
+
+Regenerating independent bodies in parallel is not done. Features form one cached
+chain, and most time sits in single large booleans.
+
+## Robustness
+
+- Hardware signals inside the kernel (null dereferences in OCCT algorithms on
+  degenerate input) are converted to errors. The shim installs OCCT's signal handler
+  (`OSD::SetSignal`) and every entry point runs under `OCC_CATCH_SIGNALS`; OCCT is
+  built with `OCC_CONVERT_SIGNALS`. A crash in, for example, MAT2d inside
+  `BRepOffsetAPI_MakeOffset` therefore becomes `FeatureStatus::Error`. The 2D offset
+  also cleans faces first and retries, which removed the one crash the randomized
+  test found. Note: OCCT's handler replaces Rust's SIGSEGV handler, so a Rust stack
+  overflow is reported by OCCT instead.
+- `crates/model/tests/fuzz.rs` runs 200 random enclosures with a fixed seed,
+  varying size, wall, fillet radius, draft, bosses, joint kind and params, rim,
+  fit class and profile. It checks for no panic, valid solids, and a reason for every
+  refusal. In the current run, 48 joints are built and 152 are refused, all with a
+  reason.
+
 ## File format (`.cwk`), sync-friendly
 
 A `.cwk` is a folder containing `doc.json` and `blobs/<sha256>`. `doc.json` holds
@@ -337,17 +383,25 @@ verified on load.
 - OCCT's limits apply. Shell fails when an inward thickness exceeds a concave
   fillet radius, and draft on faces adjacent to fillets can fail. Both return
   `FeatureStatus::Error`; nothing panics.
-- Ribs have an explicit height and do not extend to meet the body. Joints between
-  segments are rounded.
-- Pattern/Mirror of features re-applies recorded tool bodies (extrude, revolve, rib,
-  boss, auto-hole and pattern). Dress-up features (e.g. boss base fillets) are not
-  replayed, and InsertPart reference bodies are not copied (BOM counts placements).
+- Ribs use `extent: RibExtent::{Height, ToBody}`. `ToBody` grows the rib along its
+  direction and trims it where it first meets the body; with draft it is rebuilt to
+  that height. A rib that never meets the body, or starts inside it, is an error.
+  Joints between segments are rounded.
+- Pattern/Mirror re-runs the source feature's recipe under the transform: extrude,
+  revolve, rib, screw boss, standoffs, inserted parts and nested patterns. Boss
+  fillets, part copies (counted in the BOM), fits and teardrops therefore all follow.
+  Whole-body operations (fillet, shell, draft, split, joint) cannot be patterned and
+  give a clear error.
 - Threads are cosmetic. Several data rows carry `TODO`s (surfaced in
   `PartInfo::notes`): imperial inserts and standoffs, PT screw heads, some ISO 7380
   lengths, M2/M2.5 counterbores, the inch loose-fit class (ASME B18.2.8) and #2
   button/flat heads. Counterbores for non-socket heads and all countersinks are
   derived from head dimensions (`derived: true`).
-- STEP import is geometry only (no XCAF colours or names).
+- STEP import goes through XCAF and keeps per-solid names and colours. A reference
+  import is one locked body whose `Body::appearance()` lists sub-parts with their
+  names and colours. Non-reference imports give one named body per solid. STEP
+  export writes body and sub-part names and colours. Layers, face-level colours and
+  PMI are not read.
 - The DXF reader has no SPLINE, ELLIPSE, blocks/INSERT or binary DXF; skipped
   entities are counted in `DxfDrawing::skipped`.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.
@@ -393,3 +447,15 @@ verified on load.
   - `DocData.drawings` (serde-defaulted).
   - New `Document::{add_drawing, edit_drawing, drawing_result, export_drawing}`.
   - New `occt::Shape::hlr` with `occt::{HlrEdge, HlrKind}`.
+- **Phase 3.**
+  - `FeatureKind::Rib` gained `extent: RibExtent` (serde default `Height`). I added
+    `extent: Default::default()` to the two GUI struct literals (dialogs/mod.rs,
+    sample.rs) but did not commit them.
+  - `Document::bom()` now takes `&mut self` and counts the placed part bodies of the
+    regenerated model.
+  - `Body::{mesh_quality(MeshQuality), appearance(), face_colors(), mesh_colors(q)}`,
+    plus `regen::{MeshQuality, Appearance, SubPart, DEFAULT_COLOR}` and
+    `BodyGeom::with_appearance`.
+  - `FeatureReport.elapsed_ms`.
+  - `occt::{StepPart, Shape::read_step_xcaf, to_step_string_named, face_owners}`.
+  - Patterns no longer use `ToolOp.tool` (internal).

@@ -25,11 +25,34 @@ use crate::sketch::{segment_point, Sketch, SolveReport};
 pub struct BodyGeom {
     pub shape: Shape,
     meshes: [OnceLock<Result<Arc<Mesh>, String>>; 3],
+    /// Names/colours of sub-parts (imported STEP assemblies).
+    pub appearance: Option<Appearance>,
 }
+
+/// A named, optionally coloured sub-part of a body (e.g. one component of a PCB).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SubPart {
+    pub name: String,
+    /// sRGB 0..1.
+    pub color: Option<[f32; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Appearance {
+    pub parts: Vec<SubPart>,
+    /// Owning part per face (face index of the body's shape).
+    pub face_part: Vec<u32>,
+}
+
+/// Colour used for faces without one.
+pub const DEFAULT_COLOR: [f32; 3] = [0.72, 0.74, 0.78];
 
 impl BodyGeom {
     pub fn new(shape: Shape) -> Arc<Self> {
-        Arc::new(BodyGeom { shape, meshes: Default::default() })
+        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: None })
+    }
+    pub fn with_appearance(shape: Shape, appearance: Appearance) -> Arc<Self> {
+        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: Some(appearance) })
     }
 }
 
@@ -91,6 +114,30 @@ impl Body {
     pub fn mesh(&self) -> Result<Arc<Mesh>, String> {
         self.mesh_quality(MeshQuality::Display)
     }
+    /// Sub-part names and colours (imported assemblies), if any.
+    pub fn appearance(&self) -> Option<&Appearance> {
+        self.geom.appearance.as_ref()
+    }
+    /// Colour per face index, if the body has an appearance.
+    pub fn face_colors(&self) -> Option<Vec<[f32; 3]>> {
+        let a = self.appearance()?;
+        Some(a.face_part.iter().map(|p| a.parts.get(*p as usize).and_then(|x| x.color).unwrap_or(DEFAULT_COLOR)).collect())
+    }
+    /// Per-vertex colours for a mesh of this body (`DEFAULT_COLOR` where unknown).
+    pub fn mesh_colors(&self, q: MeshQuality) -> Result<Vec<[f32; 3]>, String> {
+        let m = self.mesh_quality(q)?;
+        let mut out = vec![DEFAULT_COLOR; m.positions.len()];
+        if let Some(fc) = self.face_colors() {
+            for (t, f) in m.indices.iter().zip(&m.tri_face) {
+                let c = fc.get(*f as usize).copied().unwrap_or(DEFAULT_COLOR);
+                for v in t {
+                    out[*v as usize] = c;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Mesh at a quality level (computed once per shape and level, shared by every
     /// cached state that holds this geometry).
     pub fn mesh_quality(&self, q: MeshQuality) -> Result<Arc<Mesh>, String> {
@@ -215,6 +262,7 @@ pub struct Regenerator {
     dxfs: HashMap<String, Arc<DxfDrawing>>,
     parts: HashMap<String, Arc<PartInstance>>,
     stages: HashMap<u64, (Vec<Body>, ProcessReport)>,
+    xcaf: HashMap<String, Arc<(Shape, Vec<occt::StepPart>)>>,
 }
 
 impl Default for Regenerator {
@@ -227,6 +275,7 @@ impl Default for Regenerator {
             dxfs: HashMap::new(),
             parts: HashMap::new(),
             stages: HashMap::new(),
+            xcaf: HashMap::new(),
         }
     }
 }
@@ -850,20 +899,28 @@ impl Ctx<'_> {
             }
             FeatureKind::ImportStep { import, reference, translate } => {
                 let imp = self.doc.import(*import).ok_or_else(|| Fail::msg(format!("import {import:?} missing")))?;
-                let mut s = (*self.step_shape(&imp.blob)?).clone();
+                let xc = self.step_xcaf(&imp.blob)?;
+                let (mut s, parts) = (xc.0.clone(), xc.1.clone());
                 if *translate != DVec3::ZERO {
                     s = s.translated(*translate)?;
                 }
+                let sub: Vec<SubPart> = parts.iter().map(|p| SubPart { name: p.name.clone(), color: p.color }).collect();
                 if *reference {
-                    st.bodies.push(Body { id: BodyId::of(fid), name: imp.name.clone(), reference: true, part: None, geom: BodyGeom::new(s) });
+                    // the whole assembly is one locked reference body with named,
+                    // coloured sub-parts
+                    let face_part = s.face_owners()?;
+                    let app = Appearance { parts: sub, face_part };
+                    st.bodies.push(Body { id: BodyId::of(fid), name: imp.name.clone(), reference: true, part: None, geom: BodyGeom::with_appearance(s, app) });
                 } else {
                     for (k, solid) in s.solids()?.into_iter().enumerate() {
+                        let sp = sub.get(k).cloned().unwrap_or(SubPart { name: format!("{} {}", imp.name, k + 1), color: None });
+                        let nf = solid.count(occt::ShapeKind::Face) as usize;
                         st.bodies.push(Body {
                             id: BodyId { feature: fid, index: k as u32 },
-                            name: format!("{} {}", imp.name, k + 1),
+                            name: sp.name.clone(),
                             reference: false,
                             part: None,
-                            geom: BodyGeom::new(solid),
+                            geom: BodyGeom::with_appearance(solid, Appearance { parts: vec![sp], face_part: vec![0; nf] }),
                         });
                     }
                 }
@@ -932,6 +989,16 @@ impl Ctx<'_> {
         let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
         let s = Arc::new(Shape::read_step_str(&String::from_utf8_lossy(&data))?);
         self.regen.imports.insert(blob.to_string(), s.clone());
+        Ok(s)
+    }
+
+    fn step_xcaf(&mut self, blob: &str) -> R<Arc<(Shape, Vec<occt::StepPart>)>> {
+        if let Some(s) = self.regen.xcaf.get(blob) {
+            return Ok(s.clone());
+        }
+        let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
+        let s = Arc::new(Shape::read_step_xcaf(&String::from_utf8_lossy(&data))?);
+        self.regen.xcaf.insert(blob.to_string(), s.clone());
         Ok(s)
     }
 

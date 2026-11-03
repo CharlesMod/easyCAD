@@ -65,7 +65,21 @@
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
 #include <Poly_Triangulation.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_Reader.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_Label.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDocStd_Document.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <Quantity_Color.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TCollection_ExtendedString.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -904,10 +918,36 @@ std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
       for (TopExp_Explorer ex(f, TopAbs_WIRE); ex.More(); ex.Next()) wires.push_back(TopoDS::Wire(ex.Current()));
       continue;
     }
-    BRepOffsetAPI_MakeOffset mo(f, GeomAbs_Arc, Standard_False);
-    mo.Perform(d);
-    if (!mo.IsDone()) fail("2D offset failed");
-    for (TopExp_Explorer ex(mo.Shape(), TopAbs_WIRE); ex.More(); ex.Next()) {
+    // MAT2d (used by MakeOffset) is fragile on tiny edges and split collinear
+    // edges: offset a cleaned copy, and retry once on failure.
+    auto attempt = [&](const TopoDS_Face &face) -> TopoDS_Shape {
+      try {
+        OCC_CATCH_SIGNALS
+        BRepOffsetAPI_MakeOffset mo(face, GeomAbs_Arc, Standard_False);
+        mo.Perform(d);
+        if (!mo.IsDone()) return TopoDS_Shape();
+        return mo.Shape();
+      } catch (const Standard_Failure &) {
+        return TopoDS_Shape();
+      }
+    };
+    TopoDS_Face clean = f;
+    try {
+      TopoDS_Shape u = doUnify(f);
+      TopExp_Explorer fx(u, TopAbs_FACE);
+      if (fx.More()) clean = TopoDS::Face(fx.Current());
+      Handle(ShapeFix_Face) sff = new ShapeFix_Face(clean);
+      sff->FixWireTool()->FixSmallMode() = 1;
+      sff->SetPrecision(1e-5);
+      sff->Perform();
+      clean = sff->Face();
+    } catch (...) {
+      clean = f;
+    }
+    TopoDS_Shape res = attempt(clean);
+    if (res.IsNull()) res = attempt(f);
+    if (res.IsNull()) fail("2D offset failed");
+    for (TopExp_Explorer ex(res, TopAbs_WIRE); ex.More(); ex.Next()) {
       TopoDS_Wire w = TopoDS::Wire(ex.Current());
       if (BRep_Tool::IsClosed(w)) wires.push_back(w);
     }
@@ -1302,6 +1342,163 @@ std::unique_ptr<Shape> finishStepRead(STEPControl_Reader &rd, IFSelect_ReturnSta
   return wrap(sh);
 }
 } // namespace
+
+namespace {
+std::string labelName(const TDF_Label &l) {
+  Handle(TDataStd_Name) n;
+  if (!l.IsNull() && l.FindAttribute(TDataStd_Name::GetID(), n)) {
+    TCollection_AsciiString a(n->Get());
+    return a.ToCString();
+  }
+  return "";
+}
+
+bool labelColor(const Handle(XCAFDoc_ColorTool) &ct, const TDF_Label &l, Quantity_Color &c) {
+  return !l.IsNull() && (ct->GetColor(l, XCAFDoc_ColorSurf, c) || ct->GetColor(l, XCAFDoc_ColorGen, c));
+}
+
+struct XcafCollect {
+  Handle(XCAFDoc_ShapeTool) st;
+  Handle(XCAFDoc_ColorTool) ct;
+  BRep_Builder bb;
+  TopoDS_Compound comp;
+  rust::Vec<XcafPart> *parts;
+
+  void leaf(const TopoDS_Shape &shape, const std::string &name, bool hasC, const Quantity_Color &c) {
+    int k = 0;
+    for (TopExp_Explorer ex(shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+      Quantity_Color sc = c;
+      bool has = hasC;
+      Quantity_Color own;
+      if (ct->GetColor(ex.Current(), XCAFDoc_ColorSurf, own) || ct->GetColor(ex.Current(), XCAFDoc_ColorGen, own)) {
+        sc = own;
+        has = true;
+      }
+      bb.Add(comp, ex.Current());
+      XcafPart p;
+      std::string nm = name.empty() ? std::string("Solid") : name;
+      if (k > 0) nm += " (" + std::to_string(k + 1) + ")";
+      p.name = rust::String(nm);
+      double r, g, b;
+      sc.Values(r, g, b, Quantity_TOC_sRGB);
+      p.r = static_cast<float>(r);
+      p.g = static_cast<float>(g);
+      p.b = static_cast<float>(b);
+      p.has_color = has;
+      parts->push_back(p);
+      ++k;
+    }
+  }
+
+  void visit(const TDF_Label &label, const TopLoc_Location &loc, const std::string &instName, bool hasC, const Quantity_Color &c, int depth) {
+    if (depth > 64) return;
+    Quantity_Color myC = c;
+    bool myHas = hasC;
+    Quantity_Color lc;
+    if (labelColor(ct, label, lc)) {
+      myC = lc;
+      myHas = true;
+    }
+    std::string name = instName.empty() ? labelName(label) : instName;
+    if (XCAFDoc_ShapeTool::IsAssembly(label)) {
+      TDF_LabelSequence comps;
+      XCAFDoc_ShapeTool::GetComponents(label, comps);
+      for (int i = 1; i <= comps.Length(); ++i) {
+        TDF_Label comp = comps.Value(i);
+        TDF_Label ref;
+        if (!XCAFDoc_ShapeTool::GetReferredShape(comp, ref)) continue;
+        Quantity_Color cc = myC;
+        bool ch = myHas;
+        Quantity_Color compC;
+        if (labelColor(ct, comp, compC)) {
+          cc = compC;
+          ch = true;
+        }
+        std::string cn = labelName(comp);
+        std::string rn = labelName(ref);
+        // instance names like "=>[0:1:1:2]" are not useful; prefer the referred name
+        std::string nm = (!rn.empty()) ? rn : cn;
+        visit(ref, loc * XCAFDoc_ShapeTool::GetLocation(comp), nm, ch, cc, depth + 1);
+      }
+    } else {
+      TopoDS_Shape s = XCAFDoc_ShapeTool::GetShape(label);
+      if (s.IsNull()) return;
+      leaf(s.Moved(loc), name, myHas, myC);
+    }
+  }
+};
+} // namespace
+
+std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts) {
+  quietMessenger();
+  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+  Handle(TDocStd_Document) doc;
+  app->NewDocument("MDTV-XCAF", doc);
+  STEPCAFControl_Reader rd;
+  rd.SetColorMode(Standard_True);
+  rd.SetNameMode(Standard_True);
+  rd.SetLayerMode(Standard_False);
+  std::istringstream is(std::string(data.data(), data.size()));
+  if (rd.ReadStream("memory.step", is) != IFSelect_RetDone) fail("STEP read failed (not a valid STEP file?)");
+  if (!rd.Transfer(doc)) fail("STEP transfer failed");
+  XcafCollect col;
+  col.st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  col.ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+  col.bb.MakeCompound(col.comp);
+  col.parts = &parts;
+  TDF_LabelSequence roots;
+  col.st->GetFreeShapes(roots);
+  Quantity_Color grey(0.7, 0.7, 0.7, Quantity_TOC_sRGB);
+  for (int i = 1; i <= roots.Length(); ++i) col.visit(roots.Value(i), TopLoc_Location(), "", false, grey, 0);
+  app->Close(doc);
+  if (parts.empty()) fail("STEP file contains no solids");
+  return wrap(col.comp);
+}
+
+rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts) {
+  requireShape(c, "write_step_xcaf");
+  quietMessenger();
+  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+  Handle(TDocStd_Document) doc;
+  app->NewDocument("MDTV-XCAF", doc);
+  Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+  size_t i = 0;
+  for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++i) {
+    TDF_Label l = st->AddShape(it.Value(), Standard_False);
+    if (i < parts.size()) {
+      const XcafPart &p = parts[i];
+      TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(p.name).c_str()));
+      if (p.has_color) ct->SetColor(l, Quantity_Color(p.r, p.g, p.b, Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+    }
+  }
+  Interface_Static::SetCVal("write.step.unit", "MM");
+  Interface_Static::SetCVal("write.step.schema", "AP214IS");
+  STEPCAFControl_Writer w;
+  w.SetColorMode(Standard_True);
+  w.SetNameMode(Standard_True);
+  if (!w.Transfer(doc, STEPControl_AsIs)) fail("STEP transfer failed");
+  std::ostringstream os;
+  if (w.WriteStream(os) != IFSelect_RetDone) fail("cannot write STEP stream");
+  app->Close(doc);
+  return rust::String(os.str());
+}
+
+rust::Vec<uint32_t> face_owners(const Shape &c) {
+  requireShape(c, "face_owners");
+  auto fm = mapOf(c.s, TopAbs_FACE);
+  std::vector<uint32_t> own(static_cast<size_t>(fm.Extent()), 0);
+  uint32_t k = 0;
+  for (TopoDS_Iterator it(c.s); it.More(); it.Next(), ++k) {
+    for (TopExp_Explorer ex(it.Value(), TopAbs_FACE); ex.More(); ex.Next()) {
+      int idx = fm.FindIndex(ex.Current());
+      if (idx > 0) own[static_cast<size_t>(idx - 1)] = k;
+    }
+  }
+  rust::Vec<uint32_t> out;
+  for (auto v : own) out.push_back(v);
+  return out;
+}
 
 std::unique_ptr<Shape> read_step_file(rust::Str path) {
   quietMessenger();

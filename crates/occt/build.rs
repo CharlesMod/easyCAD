@@ -3,7 +3,7 @@
 
 /// Static libs in dependency order (dependents first) for single-pass linkers.
 const OCCT_LIBS: &[&str] = &[
-    "TKDESTEP", "TKDESTL", "TKDE", "TKXCAF", "TKCAF", "TKLCAF", "TKXSBase",
+    "TKDESTEP", "TKDESTL", "TKDE", "TKXCAF", "TKVCAF", "TKCAF", "TKV3d", "TKService", "TKLCAF", "TKCDF", "TKXSBase",
     "TKHLR", "TKFeat", "TKOffset", "TKFillet", "TKBool", "TKBO", "TKMesh",
     "TKShHealing", "TKPrim", "TKTopAlgo", "TKGeomAlgo", "TKBRep", "TKGeomBase",
     "TKG3d", "TKG2d", "TKMath", "TKernel",
@@ -23,6 +23,8 @@ fn main() {
         .include("cpp")
         .std("c++17")
         .define("_USE_MATH_DEFINES", None)
+        // OCC_CATCH_SIGNALS turns kernel segfaults into exceptions (see shim.h)
+        .define("OCC_CONVERT_SIGNALS", None)
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-deprecated-declarations")
         .flag_if_supported("-Wno-unused-function")

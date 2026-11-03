@@ -156,6 +156,13 @@ pub struct HlrEdge {
     pub kind: HlrKind,
 }
 
+/// A named, optionally coloured (sRGB 0..1) part of a STEP assembly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepPart {
+    pub name: String,
+    pub color: Option<[f32; 3]>,
+}
+
 /// Triangle mesh of a shape with per-triangle face ids and per-edge polylines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
@@ -586,6 +593,28 @@ impl Shape {
 
     pub fn read_step(path: &std::path::Path) -> Result<Shape> {
         wrap(raw::read_step_file(&path.to_string_lossy()))
+    }
+    /// Read a STEP with its assembly tree flattened to leaf solids, keeping each
+    /// solid's name and colour. The compound's children follow `parts`.
+    pub fn read_step_xcaf(data: &str) -> Result<(Shape, Vec<StepPart>)> {
+        let mut parts = Vec::new();
+        let s = wrap(raw::read_step_xcaf(data, &mut parts))?;
+        Ok((s, parts.into_iter().map(|p| StepPart { name: p.name, color: p.has_color.then_some([p.r, p.g, p.b]) }).collect()))
+    }
+    /// Write the direct children of this compound as named, coloured STEP parts.
+    pub fn to_step_string_named(&self, parts: &[StepPart]) -> Result<String> {
+        let raw_parts: Vec<raw::XcafPart> = parts
+            .iter()
+            .map(|p| {
+                let c = p.color.unwrap_or([0.7, 0.7, 0.7]);
+                raw::XcafPart { name: p.name.clone(), r: c[0], g: c[1], b: c[2], has_color: p.color.is_some() }
+            })
+            .collect();
+        Ok(raw::write_step_xcaf(self.r(), &raw_parts)?)
+    }
+    /// Owning direct child of every face (MapShapes face order).
+    pub fn face_owners(&self) -> Result<Vec<u32>> {
+        Ok(raw::face_owners(self.r())?.into_iter().collect())
     }
     pub fn read_step_str(data: &str) -> Result<Shape> {
         wrap(raw::read_step_str(data))
