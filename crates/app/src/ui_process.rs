@@ -591,18 +591,21 @@ pub fn calibrate_window(app: &mut CaseworkApp, ui: &mut Ui) {
     });
     if export {
         let nominal = c.nominal;
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("STL", &["stl"])
-            .set_file_name("fit-coupon.stl")
-            .save_file()
-        {
+        let req = crate::files::Request::save("Export fit coupon", "STL", "stl", "fit-coupon.stl");
+        app.calibrate = Some(c);
+        app.ask_path(req, move |app, path| {
             match calibration_coupon(nominal, &default_coupon_offsets())
                 .and_then(|(s, _)| s.write_stl(&path, 0.02, false))
             {
-                Ok(()) => c.exported = Some(format!("Wrote {}", path.display())),
+                Ok(()) => {
+                    if let Some(c) = app.calibrate.as_mut() {
+                        c.exported = Some(format!("Wrote {}", path.display()));
+                    }
+                }
                 Err(e) => app.warn(format!("Coupon export failed: {}", e.0)),
             }
-        }
+        });
+        return;
     }
     if apply {
         let parse = |s: &str| s.trim().parse::<f64>().ok();

@@ -5,6 +5,7 @@ pub mod app;
 pub mod camera;
 pub mod dialogs;
 pub mod e2e_state;
+pub mod files;
 pub mod pickstack;
 pub mod sample;
 pub mod settings;

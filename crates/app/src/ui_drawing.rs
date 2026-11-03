@@ -516,17 +516,19 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
     }
     if let Some(ext) = export {
         if let (Some(r), Some(dr)) = (d.result.clone(), d.draft.clone()) {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter(ext.to_uppercase(), &[ext])
-                .set_file_name(format!("{}.{ext}", dr.name))
-                .save_file()
-            {
+            let req = crate::files::Request::save(
+                &format!("Export drawing as {}", ext.to_uppercase()),
+                &ext.to_uppercase(),
+                ext,
+                &format!("{} - {}.{ext}", app.doc.data.name, dr.name),
+            );
+            app.ask_path(req, move |app, path| {
                 let bytes = export_bytes(&r, &dr, ext);
                 match std::fs::write(&path, bytes) {
                     Ok(()) => app.toast(format!("Exported {}", path.display())),
                     Err(e) => app.warn(format!("Export failed: {e}")),
                 }
-            }
+            });
         }
     }
 }
@@ -1019,6 +1021,22 @@ fn draw_prim(p: &egui::Painter, x: &Xf, prim: &Prim, col: Color32) {
     }
 }
 
+/// Kind and offset of a one-edge length dimension whose line passes through `q`
+/// (sheet mm, y up), matching the engine's layout: Horizontal / Vertical offsets
+/// are measured from the edge's top / right end, Aligned along the edge's left
+/// normal. Axis-aligned edges get Horizontal / Vertical; Shift forces Vertical.
+fn single_edge_dim(p1: DVec2, p2: DVec2, q: DVec2, shift: bool) -> (LinearKind, f64) {
+    let d = p2 - p1;
+    let len = d.length().max(1e-9);
+    if shift || d.x.abs() / len < 1e-3 {
+        (LinearKind::Vertical, q.x - p1.x.max(p2.x))
+    } else if d.y.abs() / len < 1e-3 {
+        (LinearKind::Horizontal, q.y - p1.y.max(p2.y))
+    } else {
+        (LinearKind::Aligned, (q - p1).dot((d / len).perp()))
+    }
+}
+
 fn nearest_edge(r: &DrawingResult, q: DVec2, tol: f64) -> Option<(ViewId, &ViewEdge, f64)> {
     let mut best: Option<(ViewId, &ViewEdge, f64)> = None;
     for v in &r.views {
@@ -1305,17 +1323,21 @@ fn click(
                     offset: 10.0,
                 });
             }
-            (Some((vid, a, _)), None) => {
+            (Some((vid, a, at)), None) => {
+                // the dimension line goes where the paper was clicked
+                let line = nearest_edge(r, at, tol)
+                    .and_then(|(_, e, _)| Some((*e.points.first()?, *e.points.last()?)));
+                let (kind, offset) = match line {
+                    Some((p1, p2)) => single_edge_dim(p1, p2, q, shift),
+                    None if shift => (LinearKind::Vertical, 8.0),
+                    None => (LinearKind::Aligned, 8.0),
+                };
                 add = Some(AnnotationKind::Linear {
                     view: vid,
                     a,
                     b: None,
-                    kind: if shift {
-                        LinearKind::Vertical
-                    } else {
-                        LinearKind::Aligned
-                    },
-                    offset: 8.0,
+                    kind,
+                    offset,
                 });
             }
             (_, Some((vid, body, info))) if info.kind == CurveKind::Line => {
@@ -1519,6 +1541,17 @@ pub fn export_bytes(r: &DrawingResult, d: &Drawing, ext: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn single_edge_dim_follows_the_click() {
+        use glam::DVec2 as V;
+        let (k, o) = super::single_edge_dim(V::new(0.0, 0.0), V::new(10.0, 0.0), V::new(5.0, -7.0), false);
+        assert!(matches!(k, super::LinearKind::Horizontal) && (o + 7.0).abs() < 1e-9);
+        let (k, o) = super::single_edge_dim(V::new(2.0, 0.0), V::new(2.0, 9.0), V::new(9.0, 4.0), false);
+        assert!(matches!(k, super::LinearKind::Vertical) && (o - 7.0).abs() < 1e-9);
+        let (k, o) = super::single_edge_dim(V::new(0.0, 0.0), V::new(3.0, 4.0), V::new(-4.0, 3.0), false);
+        assert!(matches!(k, super::LinearKind::Aligned) && (o - 5.0).abs() < 1e-9);
+    }
     use super::*;
 
     #[test]

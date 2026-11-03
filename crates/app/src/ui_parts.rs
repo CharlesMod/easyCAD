@@ -777,12 +777,12 @@ fn left(app: &mut CaseworkApp, ui: &mut Ui) {
         });
     if save_step {
         if let Ok(inst) = doc.library.build(&info.source, &info.id, &p.size()) {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_file_name(format!("{}-{}.step", info.id, p.size().replace('/', "_")))
-                .save_file()
-            {
-                let _ = inst.shape.write_step(&path);
-            }
+            let name = format!("{}-{}.step", info.id, p.size().replace('/', "_"));
+            let req = crate::files::Request::save("Save part STEP", "STEP", "step", &name);
+            app.ask_path(req, move |app, path| match inst.shape.write_step(&path) {
+                Ok(()) => app.toast(format!("Saved {}", path.display())),
+                Err(e) => app.warn(format!("STEP export failed: {}", e.0)),
+            });
         }
     }
     if place_now {
@@ -914,6 +914,7 @@ fn right(app: &mut CaseworkApp, ui: &mut Ui) {
             .inner_margin(Margin::symmetric(14, 6))
             .show(ui, |ui| ui.label(widgets::muted("Nothing placed yet.")));
     }
+    let mut save_csv = false;
     let csv: String = std::iter::once("part,note,qty".to_string())
         .chain(rows.iter().map(|(a, b, c)| format!("\"{a}\",\"{b}\",{c}")))
         .collect::<Vec<_>>()
@@ -924,17 +925,18 @@ fn right(app: &mut CaseworkApp, ui: &mut Ui) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if widgets::button(ui, "Export CSV").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("CSV", &["csv"])
-                        .set_file_name("bom.csv")
-                        .save_file()
-                    {
-                        let _ = std::fs::write(path, &csv);
-                    }
+                    save_csv = true;
                 }
                 if widgets::button(ui, "Copy").clicked() {
                     ui.ctx().copy_text(csv.clone());
                 }
             });
         });
+    if save_csv {
+        let req = crate::files::Request::save("Export BOM", "CSV", "csv", "bom.csv");
+        app.ask_path(req, move |app, path| match std::fs::write(&path, &csv) {
+            Ok(()) => app.toast(format!("Saved {}", path.display())),
+            Err(e) => app.warn(format!("BOM export failed: {e}")),
+        });
+    }
 }

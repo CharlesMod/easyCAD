@@ -32,6 +32,8 @@ mode a bare number means inches.
 | `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
 | `units.rs` | mm / in display and input normalization. |
+| `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `CASEWORK_FILE_DIALOG=builtin` forces the prompt. |
+| `e2e_state.rs` | `CASEWORK_STATE_FILE`: JSON dump of what the user sees, for the E2E scripts. |
 | `smoke.rs` | `--smoke`: save/reopen, import STEP/DXF, export STEP/STL/3MF and drawing PDF/DXF/SVG through the dialogs' own functions. |
 
 ## Keyboard
@@ -58,3 +60,26 @@ cargo test -p casework                 # unit + snapshot + GPU tests
 Snapshots (written, not compared) land in `crates/app/tests/snapshots/`. They need
 a wgpu adapter; in a container install `mesa-vulkan-drivers` (lavapipe). The
 snapshot tests serialize themselves (one GPU, one kernel).
+
+## Click-through E2E (`crates/app/e2e/`)
+
+The release binary under Xvfb, driven by xdotool, asserting on the state dump with
+jq and saving screenshots to `e2e/shots/` (a selection is committed).
+
+```
+cargo build --release -p casework
+crates/app/e2e/run_all.sh          # or one scenario: bash crates/app/e2e/d_sketch_extrude.sh
+```
+
+| scenario | covers |
+|---|---|
+| a | navigation: orbit, pan, zoom, view cube, steps |
+| b | pick stack: Tab cycling, hidden faces |
+| c | parameter edit, live regen, Ctrl+Z / Ctrl+Shift+Z, bad expression |
+| d | sketch on the floor (picked through the PCB), typed rectangle, Fix, extrude-cut |
+| e | fillet: pick edges, radius too big, "Use r_max", OK |
+| f | parting joint replacing the sample's Split: drag the plane handle, O-ring, OK |
+| g | process FDM ↔ molded, teardrop toggle / style, undo |
+| h | drawing: add a dimension, Export PDF through the in-app path prompt |
+
+Coordinates assume the 1440×900 window the harness sets.

@@ -106,6 +106,8 @@ fn mode(app: &CaseworkApp) -> Value {
         Mode::Drawing(d) => json!({
             "name": "drawing",
             "annotations": d.draft.as_ref().map(|x| x.annotations.len()),
+            "last_annotation": d.draft.as_ref().and_then(|x| x.annotations.last()).map(|a| format!("{:?}", a.kind)),
+            "dims": d.result.as_ref().map(|r| r.annotations.iter().filter_map(|a| a.value).map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>()),
             "views": d.draft.as_ref().map(|x| x.views.len()),
             "tool": d.tool,
             "picks": d.picks.len(),
@@ -187,5 +189,6 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "toasts": app.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>(),
         "overlay": app.overlay_name(),
         "typing": app.typing,
+        "path_prompt": app.path_prompt.as_ref().map(|(p, _)| json!({ "title": p.req.title, "text": p.text })),
     })
 }

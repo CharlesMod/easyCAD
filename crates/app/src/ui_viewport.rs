@@ -323,10 +323,18 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
                 crate::dialogs::export::ExportEvent::Export => {
                     let mut data = app.doc.data.clone();
                     crate::adapters::apply_bindings(&mut data);
-                    if let Some(rx) = ex.run(data, app.doc.blobs.clone(), app.doc.library.clone()) {
-                        app.export_job = Some(rx);
+                    let req = ex.request(&data.name);
+                    let (blobs, lib) = (app.doc.blobs.clone(), app.doc.library.clone());
+                    let ex2 = crate::dialogs::export::ExportDialog {
+                        format: ex.format,
+                        profile: ex.profile.clone(),
+                        orient: ex.orient,
+                        include_reference: ex.include_reference,
+                    };
+                    app.ask_path(req, move |app, path| {
+                        app.export_job = Some(ex2.start(path, data, blobs, lib));
                         app.toast("Exporting in the background…");
-                    }
+                    });
                     keep = false;
                 }
                 crate::dialogs::export::ExportEvent::Cancel => keep = false,

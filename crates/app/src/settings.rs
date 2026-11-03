@@ -10,6 +10,12 @@ pub struct Settings {
     /// Display lengths in inches.
     #[serde(default)]
     pub inch: bool,
+    /// Folder of the last file chosen in a file dialog.
+    #[serde(default)]
+    pub last_dir: Option<std::path::PathBuf>,
+    /// Recently opened or saved documents, newest first.
+    #[serde(default)]
+    pub recent: Vec<std::path::PathBuf>,
 }
 
 fn path() -> Option<std::path::PathBuf> {
@@ -23,6 +29,14 @@ fn path() -> Option<std::path::PathBuf> {
 }
 
 impl Settings {
+    /// Put a document at the top of the recent list (max 8).
+    pub fn push_recent(p: &std::path::Path) {
+        let mut s = Settings::load();
+        s.recent.retain(|q| q != p);
+        s.recent.insert(0, p.to_path_buf());
+        s.recent.truncate(8);
+        s.save();
+    }
     pub fn load() -> Settings {
         path()
             .and_then(|p| std::fs::read_to_string(p).ok())

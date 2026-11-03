@@ -118,7 +118,12 @@ pub struct CaseworkApp {
     /// The body whose face a new sketch was placed on, and once committed the
     /// sketch's id: the default target of an Extrude / Revolve on that sketch.
     pub sketch_body: Option<(Option<casework_model::feature::SketchId>, BodyId)>,
+    /// In-app path prompt (no system file dialog) and what to do with the path.
+    pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
 }
+
+/// What a file chooser does with the chosen path.
+pub type OnPath = Box<dyn FnOnce(&mut CaseworkApp, PathBuf)>;
 
 impl CaseworkApp {
     pub fn new(cc: &eframe::CreationContext<'_>, doc: Option<Document>) -> Self {
@@ -185,6 +190,7 @@ impl CaseworkApp {
             pending_cycle: 0,
             typing: false,
             sketch_body: None,
+            path_prompt: None,
         }
     }
 
@@ -739,28 +745,54 @@ impl CaseworkApp {
         self.request_model();
     }
 
-    pub fn open_dialog_file(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("Open .cwk document folder")
-            .pick_folder()
-        {
-            if let Err(e) = self.open_path(&dir) {
-                self.warn(format!("Open failed: {e}"));
+    /// Ask for a path (system dialog, else the in-app prompt), then `then` it.
+    pub fn ask_path(
+        &mut self,
+        req: crate::files::Request,
+        then: impl FnOnce(&mut CaseworkApp, PathBuf) + 'static,
+    ) {
+        use crate::files::Pick;
+        match crate::files::native(&req) {
+            Pick::Path(p) => then(self, p),
+            Pick::Cancelled => {}
+            Pick::Unavailable => {
+                self.path_prompt = Some((crate::files::PathPrompt::new(req), Box::new(then)));
             }
         }
     }
 
+    fn path_prompt_ui(&mut self, ctx: &egui::Context) {
+        use crate::files::PromptEvent;
+        if let Some((mut p, then)) = self.path_prompt.take() {
+            match p.ui(ctx) {
+                PromptEvent::Chosen(path) => then(self, path),
+                PromptEvent::Cancel => {}
+                PromptEvent::None => self.path_prompt = Some((p, then)),
+            }
+        }
+    }
+
+    pub fn open_dialog_file(&mut self) {
+        let req = crate::files::Request::folder("Open a .cwk document folder");
+        self.ask_path(req, |app, dir| {
+            if let Err(e) = app.open_path(&dir) {
+                app.warn(format!("Open failed: {e}"));
+            }
+        });
+    }
+
     pub fn save(&mut self, save_as: bool) {
-        let path = match (&self.path, save_as) {
-            (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new()
-                .set_file_name(format!("{}.cwk", self.doc.data.name))
-                .save_file(),
+        let save = |app: &mut CaseworkApp, p: PathBuf| match app.save_to(p) {
+            Ok(p) => app.toast(format!("Saved {}", p.display())),
+            Err(e) => app.warn(format!("Save failed: {e}")),
         };
-        let Some(p) = path else { return };
-        match self.save_to(p) {
-            Ok(p) => self.toast(format!("Saved {}", p.display())),
-            Err(e) => self.warn(format!("Save failed: {e}")),
+        match (&self.path, save_as) {
+            (Some(p), false) => save(self, p.clone()),
+            _ => {
+                let name = format!("{}.cwk", self.doc.data.name);
+                let req = crate::files::Request::save("Save document", "Casework", "cwk", &name);
+                self.ask_path(req, save);
+            }
         }
     }
 
@@ -773,6 +805,7 @@ impl CaseworkApp {
         self.doc.save_to_dir(&p).map_err(|e| e.to_string())?;
         self.saved_revision = self.doc.data.revision;
         self.path = Some(p.clone());
+        crate::settings::Settings::push_recent(&p);
         Ok(p)
     }
 
@@ -780,20 +813,16 @@ impl CaseworkApp {
     pub fn open_path(&mut self, dir: &std::path::Path) -> Result<(), String> {
         let d = Document::load_from_dir(dir).map_err(|e| e.to_string())?;
         self.load(d, Some(dir.to_path_buf()));
+        crate::settings::Settings::push_recent(dir);
         Ok(())
     }
 
     pub fn import_file(&mut self) {
-        let Some(p) = rfd::FileDialog::new()
-            .add_filter("STEP / DXF", &["step", "stp", "dxf"])
-            .pick_file()
-        else {
-            return;
-        };
-        match self.import_path(&p) {
-            Ok(msg) => self.toast(msg),
-            Err(e) => self.warn(e),
-        }
+        let req = crate::files::Request::open("Import STEP or DXF", "STEP / DXF", &["step", "stp", "dxf"]);
+        self.ask_path(req, |app, p| match app.import_path(&p) {
+            Ok(msg) => app.toast(msg),
+            Err(e) => app.warn(e),
+        });
     }
 
     /// Import a STEP (locked reference body) or a DXF (opens sketch mode with its
@@ -882,6 +911,7 @@ impl CaseworkApp {
         }
         self.refresh_cache();
         crate::ui_main::show(self, ui);
+        self.path_prompt_ui(ui.ctx());
         self.frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(mut d) = self.state_dump.take() {
             d.write(self);

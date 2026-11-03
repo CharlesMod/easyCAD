@@ -108,19 +108,26 @@ impl ExportDialog {
         ev
     }
 
-    /// Ask for a path and export in the background.
-    pub fn run(
+    /// The file chooser request for this export.
+    pub fn request(&self, doc_name: &str) -> crate::files::Request {
+        let e = ext(self.format);
+        crate::files::Request::save(
+            &format!("Export {}", e.to_uppercase()),
+            &e.to_uppercase(),
+            e,
+            &format!("{doc_name}.{e}"),
+        )
+    }
+
+    /// Export to `path` in the background.
+    pub fn start(
         &self,
+        path: std::path::PathBuf,
         data: DocData,
         blobs: BlobStore,
         library: Library,
-    ) -> Option<Receiver<Result<String, String>>> {
-        let e = ext(self.format);
-        let path = rfd::FileDialog::new()
-            .add_filter(e.to_uppercase(), &[e])
-            .set_file_name(format!("{}.{e}", data.name))
-            .save_file()?;
-        Some(spawn(
+    ) -> Receiver<Result<String, String>> {
+        spawn(
             self.format,
             path,
             ExportOptions {
@@ -131,7 +138,7 @@ impl ExportDialog {
             data,
             blobs,
             library,
-        ))
+        )
     }
 }
 
