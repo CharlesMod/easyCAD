@@ -337,11 +337,14 @@ fn snap_fit_matrix() {
 #[test]
 fn thin_wall_needs_rim_and_limits_are_reported() {
     let body = enclosure(Outline::RoundRect(4.0), 2.0, 0.0, Extras::default(), 20.0);
-    // a 1.5 mm tongue cannot fit a 2 mm wall without the rim …
+    // a 1.5 mm tongue cannot fit a 2 mm wall without a rim: the engine adds the
+    // rim the groove needs and reports it as an adjustment …
     let wide = JointKind::TongueGroove { width: 1.5.into(), height: 3.0.into(), clearance: 0.15.into(), extra_depth: 0.3.into(), tongue_on: Half::Lower, lead_in: 0.0.into() };
-    let e = run(&body, 20.0, wide.clone(), None).err().unwrap();
-    assert!(e.contains("rim"), "{e}");
-    // … but does with it
+    let auto = run(&body, 20.0, wide.clone(), None).unwrap();
+    assert!(auto.report.rim_added && auto.report.effective_wall > 2.0);
+    assert!(auto.report.adjustments.iter().any(|a| a.starts_with("rim added") && a.contains("rim width")), "{:?}", auto.report.adjustments);
+    assert_all(verify(&auto, "auto rim", true, None));
+    // … and with an explicit rim it is used as given
     let r = run(&body, 20.0, wide, Some((4.0, 3.0))).unwrap();
     assert!(r.report.rim_added && (r.report.effective_wall - 4.0).abs() < 1e-9);
     assert!((r.report.wall_thickness - 2.0).abs() < 0.05, "measured wall {}", r.report.wall_thickness);
@@ -478,4 +481,95 @@ fn impossible_draft_is_an_error() {
     let f = outline_face(Outline::RoundRect(0.5));
     let e = f.extrude_ext(&Frame::XY, DVec3::Z, H, false, 2.0).unwrap_err();
     assert!(e.0.contains("draft angle too large"), "{e}");
+}
+
+/// The PCB wizard's box: rounded-rect outline, top edges filleted, closed shell
+/// (no open faces), parting joint 10 mm below the top. GUI_NEEDS 12d/12e.
+fn wizard_box(w: f64, d: f64, corner_r: f64, kind: JointKind) -> (casework_model::regen::RegenResult, FeatureId) {
+    use casework_model::select::{EdgeSelector, FaceSelector};
+    let mut doc = Document::new("Wizard box");
+    let mut s = casework_model::sketch::Sketch::new("P", Plane::XY);
+    s.rounded_rect(glam::DVec2::ZERO, w, d, corner_r, (w, d, corner_r));
+    let s = doc.add_sketch(s);
+    let b = BodyId::of(doc.add_feature(
+        "Base",
+        FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: 30.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    ));
+    doc.add_feature(
+        "Top edges",
+        FeatureKind::Fillet { body: Some(b), edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 3.0.into(), auto_reduce: false, sets: vec![], skipped: vec![], setback: false },
+    );
+    doc.add_feature("Shell", FeatureKind::Shell { body: Some(b), open_faces: vec![], thickness: 2.0.into(), outward: false });
+    let j = doc.add_feature(
+        "Joint",
+        FeatureKind::PartingJoint { body: Some(b), plane: Plane::XY, offset: 20.0.into(), kind, rim: None, upper_name: "Lid".into(), class: FitClass::Slide, closing_radius: None },
+    );
+    (doc.regenerate().clone(), j)
+}
+
+#[test]
+fn wizard_box_corner_radius_5_and_snap_fits() {
+    let tg = || JointKind::TongueGroove { width: 0.8.into(), height: 1.5.into(), clearance: 0.1.into(), extra_depth: 0.15.into(), tongue_on: Half::Lower, lead_in: 0.0.into() };
+    // 12e: corner_r 5 (inner skin of the r 3 top fillet has a degenerate offset
+    // surface, whose exact bounding box used to throw: "only 0.00 mm available")
+    for (w, d, r) in [(85.0, 55.0, 5.0), (96.0, 60.0, 5.0), (96.0, 60.0, 5.3), (85.0, 55.0, 3.0)] {
+        let (out, j) = wizard_box(w, d, r, tg());
+        assert!(out.errors().is_empty(), "{w}×{d} r{r}: {:?}", out.errors());
+        assert!(out.body_by_id(BodyId::of(j)).is_some());
+    }
+    // 12d: the GUI's default snap fit (4 × 8 mm beams) in a 10 mm lid with a 2 mm
+    // top: the beams are shortened to fit under the lid and reported
+    let snap = JointKind::SnapFit {
+        positions: SnapPositions::Count(4),
+        beam_length: 8.0.into(),
+        thickness: 1.0.into(),
+        width: 6.0.into(),
+        undercut: 0.5.into(),
+        insertion_deg: 30.0.into(),
+        retention_deg: 90.0.into(),
+        material: "PETG".into(),
+        beam_on: Half::Lower,
+        clearance: 0.2.into(),
+        margin: 2.0.into(),
+    };
+    let (out, j) = wizard_box(96.0, 60.0, 6.0, snap);
+    let rep = out.report(j).unwrap();
+    assert!(matches!(rep.status, FeatureStatus::Ok | FeatureStatus::Warning(_)), "{:?}", rep.status);
+    let jr = rep.joint.as_ref().unwrap();
+    assert_eq!(jr.snaps.iter().filter(|s| s.placed.is_some()).count(), 4, "{:?}", jr.snaps);
+    assert!(jr.adjustments.iter().any(|a| a.contains("beam shortened")), "{:?}", jr.adjustments);
+}
+
+/// A band too wide for the wall: the engine adds the rim it needs and says so.
+#[test]
+fn rim_is_added_when_it_is_the_only_blocker() {
+    let (out, j) = wizard_box(
+        80.0,
+        50.0,
+        6.0,
+        JointKind::TongueGroove { width: 1.2.into(), height: 2.0.into(), clearance: 0.15.into(), extra_depth: 0.2.into(), tongue_on: Half::Lower, lead_in: 0.0.into() },
+    );
+    let rep = out.report(j).unwrap();
+    assert!(matches!(rep.status, FeatureStatus::Ok | FeatureStatus::Warning(_)), "{:?}", rep.status);
+    let jr = rep.joint.as_ref().unwrap();
+    assert!(jr.rim_added && jr.effective_wall > 2.0);
+    assert!(jr.adjustments.iter().any(|a| a.starts_with("rim added")), "{:?}", jr.adjustments);
+    assert!(casework_model::joint::refusal_kind("the joint plane does not cut the body") == casework_model::joint::RefusalKind::Infeasible);
+    assert!(casework_model::joint::refusal_kind("rim offset: 2D offset failed") == casework_model::joint::RefusalKind::Bailed);
+}
+
+/// GUI_NEEDS 12c: a filleted outline (r 5.3 outside, 3.3 inside) gives the gland
+/// a real corner radius, not 0.
+#[test]
+fn oring_corner_radius_on_a_filleted_outline() {
+    let body = enclosure(Outline::RoundRect(5.3), 2.0, 0.0, Extras::default(), 20.0);
+    let k = JointKind::ORingGland { cord: "AS568-0xx".into(), squeeze: None, depth: None, width: None, gland_on: Half::Lower, compression_rib: None };
+    // analytic arcs, with a rim (inner contour offset 2 mm in: 3.3 → 1.3 + band margin)
+    for (cord, rim, lo) in [("AS568-0xx", Some((4.0, 3.0)), 1.3), ("M1.5", Some((3.0, 3.0)), 2.3), ("M1.0", None, 3.3)] {
+        let k = JointKind::ORingGland { cord: cord.into(), squeeze: None, depth: None, width: None, gland_on: Half::Lower, compression_rib: None };
+        let r = run(&body, 20.0, k, rim).unwrap();
+        let o = r.report.oring.as_ref().unwrap();
+        assert!(o.min_corner_radius > lo && o.min_corner_radius < 5.3, "{cord}: {}", o.min_corner_radius);
+    }
+    let _ = k;
 }

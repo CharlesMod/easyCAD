@@ -186,3 +186,15 @@ fn standoff_exclusions_gussets_and_lid_holes() {
     let ribs = v1 - v0 + lid_removed;
     assert!(ribs > 4.0 * 1.2 * 6.0 * 4.0 && ribs < 4.0 * 1.2 * 6.0 * 13.0, "{ribs}");
 }
+
+#[test]
+fn profile_edits_keep_their_place() {
+    let mut doc = Document::new("Profiles");
+    let names: Vec<String> = doc.data.processes.iter().map(|p| p.name.clone()).collect();
+    let mut p = doc.data.processes[0].clone();
+    p.xy_comp = 0.07;
+    doc.update_profile("Fit allowances", p);
+    assert_eq!(doc.undo_label(), Some("Fit allowances"));
+    assert_eq!(doc.data.processes.iter().map(|p| p.name.clone()).collect::<Vec<_>>(), names);
+    assert_eq!(doc.data.processes[0].xy_comp, 0.07);
+}

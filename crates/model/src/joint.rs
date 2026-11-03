@@ -179,6 +179,34 @@ pub struct JointReport {
     pub oring: Option<ORingReport>,
     pub snap: Option<SnapCalc>,
     pub snaps: Vec<SnapPlacement>,
+    /// Changes the engine made so the joint could be built (e.g. "rim added: 3.20 ×
+    /// 3.00 mm so the groove fits"); shown to the user like warnings.
+    pub adjustments: Vec<String>,
+}
+
+/// Why a joint was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub enum RefusalKind {
+    /// The request cannot be built as asked (plane misses the cavity, a band that
+    /// does not fit even with a rim, unknown cord...). The message says what to change.
+    Infeasible,
+    /// The algorithm or the kernel gave up on a request that should be buildable
+    /// (2D offset failure, invalid result, no snap position found).
+    Bailed,
+}
+
+/// Classify a joint error message (from `FeatureStatus::Error` of a `PartingJoint`).
+pub fn refusal_kind(msg: &str) -> RefusalKind {
+    const BAILED: [&str; 7] = ["offset failed", "offset region vanished", "came out invalid", "panicked", "OSD_", "no snap-fit position", "kernel"];
+    const KERNEL_STEPS: [&str; 18] = [
+        "section:", "section face:", "area:", "edges:", "envelope:", "cavity:", "closed ring:", "rim offset:", "rim clip:", "rim gaps:", "tongue:", "groove:", "lip:", "recess:",
+        "gland:", "rib:", "outline:", "split:",
+    ];
+    if BAILED.iter().any(|k| msg.contains(k)) || KERNEL_STEPS.iter().any(|k| msg.starts_with(k)) {
+        RefusalKind::Bailed
+    } else {
+        RefusalKind::Infeasible
+    }
 }
 
 impl JointReport {
@@ -332,9 +360,9 @@ fn wall_ring(body: &Shape, plane: &Plane, closing: f64) -> JR<Ring> {
         let rho = closing.max(12.0);
         let none = || "the plane passes through the floor or lid (no cavity at this height)".to_string();
         // closing done with single-boundary offsets (robust): outline and cavity separately
-        let g = r.offset_region(rho).map_err(|_| none())?;
+        let g = k(r.offset_region(rho), "closing (2D offset failed)")?;
         let g_filled = k(g.fill_holes(), "envelope")?;
-        let env = g_filled.offset_region(-rho).map_err(|_| none())?;
+        let env = k(g_filled.offset_region(-rho), "closing (2D offset failed)")?;
         let hole = g_filled.cut(&g).map_err(|_| none())?;
         if hole.area().unwrap_or(0.0) < 1e-6 || env.area().unwrap_or(0.0) < area * 1.2 {
             return Err(none());
@@ -387,7 +415,40 @@ pub struct JointInput<'a> {
 }
 
 /// Build the two halves. Returns `(lower, upper, report)`; errors carry a reason.
+///
+/// When the only blocker is a band that does not fit the wall (and the message
+/// names the rim width it needs), the joint is retried once with that rim
+/// (added or widened) and the change is reported in `JointReport::adjustments`.
 pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
+    let first = build_once(inp);
+    let Err(e) = &first else { return first };
+    let Some(need) = e.split("rim width ≥ ").nth(1).and_then(|r| r.split(|c: char| !(c.is_ascii_digit() || c == '.')).next()).and_then(|v| v.parse::<f64>().ok()) else {
+        return first;
+    };
+    let ev = |x: &Expr| x.eval(inp.vals).unwrap_or(0.0);
+    // the rim must be taller than the deepest cut into it
+    let depth = match inp.kind {
+        JointKind::TongueGroove { height, extra_depth, .. } => ev(height) + ev(extra_depth),
+        JointKind::Lip { height, clearance, .. } => ev(height) + ev(clearance),
+        JointKind::ORingGland { cord, depth, .. } => depth.as_ref().map(ev).unwrap_or_else(|| cords().into_iter().find(|(id, _)| id == cord).map(|(_, d)| d).unwrap_or(2.0)),
+        JointKind::SnapFit { .. } => return first,
+    };
+    let w = need + 0.2;
+    let h = inp.rim.map(|r| r.1).unwrap_or(0.0).max(depth + 1.0);
+    let retry = JointInput { rim: Some((w, h)), ..*inp };
+    match build_once(&retry) {
+        Ok((lo, up, mut rep)) => {
+            rep.adjustments.push(match inp.rim {
+                Some((w0, _)) if w0 > rep.wall_thickness => format!("rim widened from {w0:.2} to {w:.2} mm (height {h:.2}) so the joint fits ({e})"),
+                _ => format!("rim added: {w:.2} mm wide, {h:.2} mm tall, so the joint fits the {:.2} mm wall ({e})", rep.wall_thickness),
+            });
+            Ok((lo, up, rep))
+        }
+        Err(e2) => Err(format!("{e} (an automatic {w:.2} mm rim did not help either: {e2})")),
+    }
+}
+
+fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
     let plane = inp.plane;
     let n = plane.normal.normalize();
     let ev = |e: &Expr| e.eval(inp.vals).map_err(|err| format!("`{}`: {err}", e.0));
@@ -490,7 +551,7 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
         if m <= 0.0 {
             return Err(format!("{what} ({width:.2} mm) does not fit in the {t:.2} mm wall; add rim thickening (rim width ≥ {:.2})", width + 2.0 * MIN_WALL));
         }
-        rr.offset_region(-m).map_err(|_| format!("{what} ({width:.2} mm) does not fit in the {t:.2} mm wall; add rim thickening"))
+        rr.offset_region(-m).map_err(|e| format!("{what} ({width:.2} mm in the {t:.2} mm wall): 2D offset failed ({})", e.0))
     };
     let add = |half: Half, solid: Shape, pend: &mut Pending| -> JR<()> {
         pend.adds[half as usize].push(solid);
@@ -555,12 +616,15 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             let outer = t - rw;
             rep.check("outer wall at recess", outer, MIN_WALL, outer >= MIN_WALL);
             if outer < MIN_WALL {
-                return Err(format!("lip recess ({rw:.2} mm) leaves {outer:.2} mm of outer wall (min {MIN_WALL}); add rim thickening or narrow the lip"));
+                return Err(format!("lip recess ({rw:.2} mm) leaves {outer:.2} mm of outer wall (min {MIN_WALL}); add rim thickening (rim width ≥ {:.2}) or narrow the lip", rw + MIN_WALL + 0.05));
             }
             // the part of the (rimmed) wall within `w` of the cavity
             let cav = if rep.rim_added { k(ring.cavity.cut(&rr), "cavity")? } else { ring.cavity.clone() };
+            if cav.area().unwrap_or(0.0) < 1e-6 {
+                return Err("the rim fills the whole cavity at the plane; use a narrower rim".into());
+            }
             let inner = |w: f64, what: &str| -> JR<Shape> {
-                let e = cav.offset_region(w).map_err(|_| format!("{what} does not fit"))?;
+                let e = cav.offset_region(w).map_err(|e| format!("{what}: 2D offset of the cavity failed ({})", e.0))?;
                 k(rr.common(&e), what)
             };
             let lip = k(prism(&inner(lw, "lip")?, n, 0.0, -side(*lip_on) * lh), "lip")?;
@@ -682,7 +746,9 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 let mut found = None;
                 let mut why = String::from("no straight wall section free of features nearby");
                 let step = (half_span / perim).max(1e-4);
-                'search: for kk in 0..40 {
+                // walk the whole outline if needed (both directions)
+                let max_k = ((0.5 / step).ceil() as usize + 1).clamp(40, 400);
+                'search: for kk in 0..max_k {
                     for sgn in [1.0, -1.0] {
                         if kk == 0 && sgn < 0.0 {
                             continue;
@@ -694,23 +760,58 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                         }) {
                             continue;
                         }
-                        match snap_geometry(&ring, &rr, env_outer, perim, s, n, nb, &SnapDims { t_eff: t, b, tb, l, y, z1, z2, c, mg, root }) {
-                            Ok((beam, window, keepout_lo, keepout_up)) => {
+                        let dims = SnapDims { t_eff: t, b, tb, l, y, z1, z2, c, mg, root };
+                        match snap_geometry(&ring, &rr, env_outer, perim, s, n, nb, &dims) {
+                            Ok((beam, window, keepout_lo, keepout_up, fr)) => {
                                 let (lo_s, up_s) = if *beam_on == Half::Lower { (&lower, &upper) } else { (&upper, &lower) };
-                                let (i_lo, i_up) = (interference(&keepout_lo, lo_s), interference(&keepout_up, up_s));
-                                if i_lo > 1e-6 || i_up > 1e-6 {
-                                    why = "blocked by a boss, rib, the lid/floor or another feature".into();
-                                    continue;
+                                let blocked = |ko_lo: &Shape, ko_up: &Shape| interference(ko_lo, lo_s) > 1e-6 || interference(ko_up, up_s) > 1e-6;
+                                if !blocked(&keepout_lo, &keepout_up) {
+                                    found = Some((s, beam, window, None));
+                                    break 'search;
                                 }
-                                found = Some((s, beam, window));
-                                break 'search;
+                                // fit the beam to the cavity: the lid/floor (or a boss
+                                // under the beam) is closer than the beam or its root
+                                let free_up = fr.free(up_s, nb, room(other(*beam_on)));
+                                let free_lo = fr.free(lo_s, -nb, room(*beam_on));
+                                let l2 = l.min(free_up - c - 0.1);
+                                let root2 = root.min(free_lo - 0.1);
+                                let l_min = 0.5 + y / zr.0 + y / zr.1 + 0.2;
+                                why = format!("blocked by a boss, rib, the lid/floor or another feature (free height {free_up:.2} mm above, {free_lo:.2} mm below)");
+                                if l2 >= l_min && l2 >= 0.5 * l && root2 >= 1.0 && (l2 < l - 1e-6 || root2 < root - 1e-6) {
+                                    let z2b = l2 - y / zr.0;
+                                    let d2 = SnapDims { l: l2, z2: z2b, z1: z2b - y / zr.1, root: root2, ..dims };
+                                    if let Ok((beam, window, ko_lo, ko_up, _)) = snap_geometry(&ring, &rr, env_outer, perim, s, n, nb, &d2) {
+                                        if !blocked(&ko_lo, &ko_up) {
+                                            found = Some((s, beam, window, Some((l2, root2))));
+                                            break 'search;
+                                        }
+                                    }
+                                }
+                                continue;
                             }
                             Err(e) => why = e,
                         }
                     }
                 }
                 match found {
-                    Some((s, beam, window)) => {
+                    Some((s, beam, window, fit)) => {
+                        if let Some((l2, root2)) = fit {
+                            let mut msg = format!("snap at {:.0} %: ", s * 100.0);
+                            if l2 < l - 1e-6 {
+                                msg += &format!("beam shortened to {l2:.2} mm (the far side is that close)");
+                                let c2 = snap_calc(l2, tb, b, y_nom, ins, &mat);
+                                if !c2.pass {
+                                    rep.warnings.push(format!("shortened snap beam strain {:.2} % exceeds {:.2} %", c2.strain * 100.0, c2.allowable * 100.0));
+                                }
+                            }
+                            if root2 < root - 1e-6 {
+                                if l2 < l - 1e-6 {
+                                    msg += ", ";
+                                }
+                                msg += &format!("root shortened to {root2:.2} mm");
+                            }
+                            rep.adjustments.push(msg);
+                        }
                         placed_frac.push(s);
                         beams.push(beam);
                         windows.push(window);
@@ -720,7 +821,13 @@ pub fn build(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 }
             }
             if beams.is_empty() {
-                let why: Vec<String> = rep.snaps.iter().filter_map(|s| s.reason.clone()).collect();
+                let mut why: Vec<String> = rep.snaps.iter().filter_map(|s| s.reason.clone()).collect();
+                why.dedup();
+                // the whole outline was searched: without a blocker it is the outline
+                // itself (no straight run long enough, wall too thin for the hook)
+                if why.iter().all(|w| !w.starts_with("blocked")) {
+                    return Err(format!("snap fits do not fit this outline ({:.1} mm of straight wall needed per beam): {}", 2.0 * half_span, why.join("; ")));
+                }
                 return Err(format!("no snap-fit position could be placed: {}", why.join("; ")));
             }
             for (bm, w) in beams.into_iter().zip(windows) {
@@ -811,7 +918,7 @@ fn local_box(p: DVec3, tan: DVec3, inw: DVec3, nb: DVec3, a: (f64, f64), u: (f64
 }
 
 #[allow(clippy::too_many_arguments)]
-fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DVec3, nb: DVec3, d: &SnapDims) -> JR<(Shape, Shape, Shape, Shape)> {
+fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DVec3, nb: DVec3, d: &SnapDims) -> JR<(Shape, Shape, Shape, Shape, SnapFrame)> {
     let (p, tan) = k(env.outer_wire_point(s), "outline point")?;
     let tan = (tan - n * tan.dot(n)).normalize();
     // straight-wall check: neighbours along the outline stay on the tangent line
@@ -880,21 +987,62 @@ fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DV
     // keep-outs: space the beam needs, away from the wall it bonds to
     let ko_lo = bx((-ha - d.mg, ha + d.mg), (tw + 0.05, ub + d.tb + d.mg), (-d.root, -0.05))?;
     let ko_up = bx((-ha - d.mg, ha + d.mg), (tw + 0.05, ub + d.tb + d.mg), (0.05, d.l + d.c))?;
-    Ok((solid, tool, ko_lo, ko_up))
+    let frame = SnapFrame { p, tan, inw, u: (tw + 0.05, ub + d.tb + d.mg), a: (-ha - d.mg, ha + d.mg) };
+    Ok((solid, tool, ko_lo, ko_up, frame))
+}
+
+/// Where a snap beam sits: outline point, tangent, inward direction, and the
+/// keep-out footprint (inward `u` range, tangential `a` range).
+struct SnapFrame {
+    p: DVec3,
+    tan: DVec3,
+    inw: DVec3,
+    u: (f64, f64),
+    a: (f64, f64),
+}
+
+impl SnapFrame {
+    /// Free height along `dir` above the footprint before `half` has material
+    /// (up to `reach`).
+    fn free(&self, half: &Shape, dir: DVec3, reach: f64) -> f64 {
+        let Ok(tall) = local_box(self.p, self.tan, self.inw, dir, self.a, self.u, (0.05, reach.max(0.1))) else { return 0.0 };
+        match half.common(&tall).and_then(|h| h.edges()) {
+            Ok(es) => es.iter().flat_map(|e| [e.start, e.end]).map(|q| (q - self.p).dot(dir)).fold(reach, f64::min),
+            Err(_) => 0.0,
+        }
+    }
 }
 
 /// Smallest corner radius of a planar region's boundary (0 if any sharp corner).
 pub fn min_corner_radius(region: &Shape) -> f64 {
     let Ok(edges) = region.edges() else { return 0.0 };
+    // free-form edges (B-spline / offset curves from shelled walls): the circle
+    // through start, middle and end stands in for the curve at its ends
+    let circ = |e: &occt::EdgeInfo| -> Option<(DVec3, DVec3, f64)> {
+        if let Some(c) = e.circle {
+            return Some(c);
+        }
+        if e.kind == CurveKind::Line {
+            return None;
+        }
+        let (a, b, c) = (e.start, e.midpoint, e.end);
+        let (ab, ac) = (b - a, c - a);
+        let nrm = ab.cross(ac);
+        if nrm.length_squared() < 1e-12 * ab.length_squared().max(1e-12) * ac.length_squared().max(1e-12) {
+            return None; // straight
+        }
+        let center = a + (nrm.cross(ab) * ac.length_squared() + ac.cross(nrm) * ab.length_squared()) / (2.0 * nrm.length_squared());
+        Some((center, nrm.normalize(), center.distance(a)))
+    };
     let tangent_at = |e: &occt::EdgeInfo, p: DVec3| -> DVec3 {
-        match (e.kind, e.circle) {
-            (CurveKind::Circle, Some((c, ax, _))) => ax.cross(p - c).normalize_or_zero(),
-            _ => e.tangent.normalize_or_zero(),
+        match circ(e) {
+            Some((c, ax, _)) => ax.cross(p - c).normalize_or_zero(),
+            None => e.tangent.normalize_or_zero(),
         }
     };
     let mut min_r = f64::INFINITY;
     for e in &edges {
-        if let Some((_, _, r)) = e.circle {
+        if let Some((_, _, r)) = circ(e) {
             min_r = min_r.min(r);
         }
     }

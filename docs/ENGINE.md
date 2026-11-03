@@ -393,11 +393,52 @@ chain, and most time sits in single large booleans.
   test found. Faults outside kernel calls are forwarded to the previously installed
   handler, so a Rust stack overflow is still reported by Rust (see "Concurrency
   contract").
-- `crates/model/tests/fuzz.rs` runs 200 random enclosures with a fixed seed,
-  varying size, wall, fillet radius, draft, bosses, joint kind and params, rim,
-  fit class and profile. It checks for no panic, valid solids, and a reason for every
-  refusal. In the current run, 48 joints are built and 152 are refused, all with a
-  reason.
+- `crates/model/tests/fuzz.rs` has two fixed-seed runs of 200 enclosures (size,
+  wall, corner radius, draft, bosses, joint kind and params, rim, fit class,
+  profile). Both check for no panic, valid solids and a reason for every refusal,
+  and print a histogram of refusals split by `joint::refusal_kind(msg)` into
+  `Infeasible` (the request cannot be built as asked; the message says what to
+  change) and `Bailed` (the algorithm or the kernel gave up on something buildable).
+  Run with `--nocapture`; `CW_FUZZ_VERBOSE=1` prints every refusal.
+
+  | run | before | after |
+  |---|---|---|
+  | wild ranges (planes outside the body, joints wider than the wall) | 48 built, 152 refused (~8 bailed) | 87 built, 112 infeasible, 1 bailed |
+  | realistic ranges (what a designer enters) | 139 built, 41 infeasible, 20 bailed | 195 built (57 with adjustments), 4 infeasible, 0 bailed, 1 upstream |
+
+  The wild run's refusals are mostly planes that miss the body (56) or pass through
+  the floor/lid (23). The realistic run's remaining four are pin widths that go
+  negative under loose FDM fits; the upstream one is a 1.5° draft over 45 mm on a
+  1 mm corner radius (the extrude refuses). What changed:
+  - **Rim when it is the only blocker.** A tongue/groove, lip or gland that does not
+    fit the wall is retried once with the rim its message asks for (`rim width ≥ w`
+    + 0.2, as tall as the deepest cut + 1 mm, or the user's rim widened), reported in
+    `JointReport::adjustments` ("rim added: 3.48 mm wide, 2.78 mm tall, so the joint
+    fits the 2.00 mm wall (...)").
+  - **Snap beams fitted to the cavity.** Beam length and root depth used to be
+    checked against a 0.4 mm skin, not the real lid/floor, so the keep-outs hit the
+    lid ("blocked by ... the lid/floor", GUI_NEEDS 12d). A blocked position now
+    measures the free height above and below the beam footprint and shortens the
+    beam (to ≥ half its length and the hook's minimum) and/or the root (≥ 1 mm),
+    re-checks, and reports "snap at 38 %: beam shortened to 5.40 mm" (a strain
+    warning follows if the shorter beam is over-strained). The position search walks
+    the whole outline; a failure with no blocker is reported as infeasible ("snap
+    fits do not fit this outline (12.0 mm of straight wall needed per beam)").
+  - **2D offset ladder** (`offset_region`, shim): cleaned face, original face, each
+    loop on its own (outer by d, holes by −d, holes cut out; a hole that vanishes when
+    the region grows is dropped), intersection joins, then a 0.05 mm corner-radius
+    bump on every sharp vertex (`BRepFilletAPI_MakeFillet2d`) before trying again.
+  - **Bounding boxes never throw.** `Shape::bbox` falls back from the optimal box
+    to the geometric box, then to a fine mesh's box, when a degenerate offset surface
+    has no normal (the inner skin of an r 3 top fillet on an r 5 corner, GUI_NEEDS
+    12e: the joint saw "0.00 mm available").
+  - **Closed shell check.** `Shell` with no open faces must give one solid with two
+    shells and a removed volume within 0.5–1.5 × (V − A·t); otherwise it falls back
+    to shelling with the largest planar face open and closing it with that face's
+    slab (clipped to the body), or errors. (A non-hollow result used to pass.)
+  - Messages: kernel offset failures say "2D offset failed" (they used to read like
+    "does not fit" or "passes through the floor or lid"); "the rim fills the whole
+    cavity at the plane" is its own infeasible message.
 
 ## Concurrency contract
 
@@ -716,6 +757,18 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Joint refusals (item 3) and GUI_NEEDS 12b–12e.**
+  - `JointReport.adjustments: Vec<String>`: changes the engine made to build the
+    joint (rim added/widened, snap beams or roots shortened). Show them like
+    warnings; the feature status is `Ok`/`Warning` as before.
+  - `joint::{RefusalKind, refusal_kind(msg)}` classifies a joint error message.
+  - A joint that only failed for want of a rim is now built with one (12d/12e boxes
+    build too). The O-ring corner radius is measured on free-form edges (12c; I
+    could not reproduce the 0 with analytic arcs, so the GUI sample should be
+    re-checked).
+  - `Document::update_profile(label, p)` replaces a profile in place with its own
+    undo label (12b); `add_profile` now also keeps the position.
 
 - **GUI_NEEDS #1, #2, #3, #4, #6, #7 (BREAKING for struct literals).**
   - New fields (serde-defaulted, so files load): `Split/Draft/ScrewBoss/

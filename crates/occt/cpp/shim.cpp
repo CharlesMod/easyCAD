@@ -43,6 +43,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepFilletAPI_MakeFillet2d.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -811,26 +812,95 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
   if (closing.IsEmpty()) {
     // Nothing to open: MakeThickSolid would return only the offset skin. Build the
     // closed hollow solid (outer skin + internal void) from a 3D offset instead.
-    TopoDS_Shape off;
+    GProp_GProps in_v, in_a;
+    BRepGProp::VolumeProperties(input, in_v);
+    BRepGProp::SurfaceProperties(input, in_a);
+    const double V = in_v.Mass(), A = in_a.Mass(), t = std::abs(offset);
+    // a believable result: one solid, two shells (skin + void), and (inward) a
+    // void close to V - A·t (exact for flat walls; curvature changes it a little)
+    auto plausible = [&](const TopoDS_Shape &r, std::string &why) -> bool {
+      if (count_sub(Shape(r), TopAbs_SOLID) != 1) {
+        why = "the walls are not one solid";
+        return false;
+      }
+      if (count_sub(Shape(r), TopAbs_SHELL) != 2) {
+        why = "the result has no internal void";
+        return false;
+      }
+      GProp_GProps a;
+      BRepGProp::VolumeProperties(r, a);
+      if (offset < 0) {
+        double removed = V - a.Mass();
+        double est = V - A * t;
+        if (!(a.Mass() > 0 && removed > 1e-9) || (est > 0 && (removed < 0.5 * est || removed > 1.5 * est + 1e-6))) {
+          why = "the inner offset did not produce a believable cavity";
+          return false;
+        }
+      }
+      BRepCheck_Analyzer ana(r);
+      if (!ana.IsValid()) {
+        why = "the result is invalid";
+        return false;
+      }
+      return true;
+    };
+    std::string why;
+    TopoDS_Shape r;
     try {
-      off = doOffsetSolid(privateCopy(input), offset);
+      TopoDS_Shape off = doOffsetSolid(privateCopy(input), offset);
+      r = simplify(offset < 0 ? doBoolean(input, off, 1u) : doBoolean(off, input, 1u));
     } catch (const Standard_Failure &e) {
-      fail(std::string("shell with no open faces: the ") + (offset < 0 ? "inner" : "outer") +
-           " offset failed (thickness larger than a convex radius or a thin feature?): " + e.GetMessageString());
+      why = std::string("the ") + (offset < 0 ? "inner" : "outer") + " offset failed (thickness larger than a convex radius or a thin feature?): " + e.GetMessageString();
     } catch (const std::exception &e) {
-      fail(std::string("shell with no open faces: the ") + (offset < 0 ? "inner" : "outer") +
-           " offset failed (thickness larger than a convex radius or a thin feature?): " + e.what());
+      why = std::string("the ") + (offset < 0 ? "inner" : "outer") + " offset failed (thickness larger than a convex radius or a thin feature?): " + e.what();
     }
-    TopoDS_Shape r = offset < 0 ? doBoolean(input, off, 1u) : doBoolean(off, input, 1u);
-    r = simplify(r);
-    if (count_sub(Shape(r), TopAbs_SOLID) != 1) fail("shell with no open faces: the walls are not one solid");
-    GProp_GProps a, b;
-    BRepGProp::VolumeProperties(r, a);
-    BRepGProp::VolumeProperties(input, b);
-    if (offset < 0 && !(a.Mass() > 0 && a.Mass() < b.Mass() - 1e-9))
-      fail("shell with no open faces: the inner offset did not produce a cavity");
-    checkValid(r, "shell");
-    return wrap(r);
+    if (!r.IsNull() && plausible(r, why)) return wrap(r);
+    // Fallback (inward only): shell with the largest planar face open (the robust
+    // thick-solid path), then close it again with that face's slab of the input.
+    if (offset < 0) {
+      TopoDS_Face best;
+      double best_a = 0;
+      for (TopExp_Explorer ex(input, TopAbs_FACE); ex.More(); ex.Next()) {
+        TopoDS_Face f = TopoDS::Face(ex.Current());
+        if (BRepAdaptor_Surface(f).GetType() != GeomAbs_Plane) continue;
+        GProp_GProps g;
+        BRepGProp::SurfaceProperties(f, g);
+        if (g.Mass() > best_a) {
+          best_a = g.Mass();
+          best = f;
+        }
+      }
+      if (!best.IsNull()) {
+        try {
+          OCC_CATCH_SIGNALS
+          TopTools_ListOfShape open;
+          open.Append(best);
+          BRepOffsetAPI_MakeThickSolid mk;
+          mk.MakeThickSolidByJoin(input, open, offset, 1e-3, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
+          mk.Build();
+          if (mk.IsDone()) {
+            TopoDS_Shape cup = mk.Shape();
+            gp_Pln pl = BRepAdaptor_Surface(best).Plane();
+            gp_Dir nn = pl.Axis().Direction();
+            if (best.Orientation() == TopAbs_REVERSED) nn.Reverse();
+            // slab: the open face pushed t into the solid, clipped to the input
+            TopoDS_Shape slab = BRepPrimAPI_MakePrism(best, gp_Vec(nn) * (-t)).Shape();
+            slab = doBoolean(input, slab, 2u);
+            TopoDS_Shape c = simplify(doBoolean(cup, slab, 0u));
+            std::string why2;
+            if (plausible(c, why2)) return wrap(c);
+            why += "; open-and-close fallback: " + why2;
+          } else {
+            why += "; open-and-close fallback: the thick solid failed";
+          }
+        } catch (const Standard_Failure &e) {
+          why += std::string("; open-and-close fallback: ") + e.GetMessageString();
+        } catch (const std::exception &e) {
+          why += std::string("; open-and-close fallback: ") + e.what();
+        }
+      }
+    }
+    fail("shell with no open faces: " + why);
   }
   BRepOffsetAPI_MakeThickSolid mk;
   mk.MakeThickSolidByJoin(input, closing, offset, 1e-3, BRepOffset_Skin, Standard_False,
@@ -1048,17 +1118,111 @@ std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
       for (TopExp_Explorer ex(f, TopAbs_WIRE); ex.More(); ex.Next()) wires.push_back(TopoDS::Wire(ex.Current()));
       continue;
     }
-    // MAT2d (used by MakeOffset) is fragile on tiny edges and split collinear
-    // edges: offset a cleaned copy, and retry once on failure.
-    auto attempt = [&](const TopoDS_Face &face) -> TopoDS_Shape {
+    // MAT2d (used by MakeOffset) is fragile on tiny edges, split collinear edges,
+    // near-tangent loops and sharp corners. Fallback ladder (first success wins):
+    // cleaned face, original face, each loop on its own (holes offset the other
+    // way, then cut out), intersection joins, and a tiny corner radius bump.
+    auto attempt_join = [&](const TopoDS_Face &face, double dd, GeomAbs_JoinType join) -> TopoDS_Shape {
       try {
         OCC_CATCH_SIGNALS
-        BRepOffsetAPI_MakeOffset mo(face, GeomAbs_Arc, Standard_False);
-        mo.Perform(d);
+        BRepOffsetAPI_MakeOffset mo(face, join, Standard_False);
+        mo.Perform(dd);
         if (!mo.IsDone()) return TopoDS_Shape();
-        return mo.Shape();
+        TopoDS_Shape r = mo.Shape();
+        if (r.IsNull()) return TopoDS_Shape();
+        bool closed = false;
+        for (TopExp_Explorer ex(r, TopAbs_WIRE); ex.More(); ex.Next())
+          if (BRep_Tool::IsClosed(TopoDS::Wire(ex.Current()))) closed = true;
+        return closed ? r : TopoDS_Shape();
       } catch (const Standard_Failure &) {
         return TopoDS_Shape();
+      }
+    };
+    auto attempt = [&](const TopoDS_Face &face) -> TopoDS_Shape { return attempt_join(face, d, GeomAbs_Arc); };
+    // one face per loop of `face`, oriented with the plane normal
+    auto loopFace = [&](const TopoDS_Wire &w) -> TopoDS_Face {
+      BRepBuilderAPI_MakeFace mf(pln, w, Standard_True);
+      if (!mf.IsDone()) return TopoDS_Face();
+      Handle(ShapeFix_Face) sff = new ShapeFix_Face(mf.Face());
+      sff->FixOrientationMode() = 1;
+      sff->Perform();
+      TopoDS_Face lf = sff->Face();
+      gp_Dir ln = planeOf(lf).Axis().Direction();
+      if (lf.Orientation() == TopAbs_REVERSED) ln.Reverse();
+      if (ln.Dot(normal) < 0) lf.Reverse();
+      return lf;
+    };
+    auto facesOfWires = [&](const TopoDS_Shape &r) -> TopoDS_Shape {
+      std::vector<TopoDS_Wire> ws;
+      for (TopExp_Explorer ex(r, TopAbs_WIRE); ex.More(); ex.Next()) {
+        TopoDS_Wire w = TopoDS::Wire(ex.Current());
+        if (BRep_Tool::IsClosed(w)) ws.push_back(w);
+      }
+      if (ws.empty()) return TopoDS_Shape();
+      return facesFromWires(pln, ws, normal);
+    };
+    // offset the outer loop by d and each hole loop by -d, then cut the holes out
+    auto per_loop = [&](const TopoDS_Face &face, GeomAbs_JoinType join) -> TopoDS_Shape {
+      try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Wire outer = BRepTools::OuterWire(face);
+        TopoDS_Face of = loopFace(outer);
+        if (of.IsNull()) return TopoDS_Shape();
+        TopoDS_Shape o = attempt_join(of, d, join);
+        if (o.IsNull()) return TopoDS_Shape();
+        TopoDS_Shape acc = facesOfWires(o);
+        if (acc.IsNull()) return TopoDS_Shape();
+        for (TopExp_Explorer ex(face, TopAbs_WIRE); ex.More(); ex.Next()) {
+          TopoDS_Wire w = TopoDS::Wire(ex.Current());
+          if (w.IsSame(outer)) continue;
+          TopoDS_Face hf = loopFace(w);
+          if (hf.IsNull()) return TopoDS_Shape();
+          TopoDS_Shape h = attempt_join(hf, -d, join);
+          if (h.IsNull()) {
+            // a hole may legitimately vanish when the region grows past it
+            Bnd_Box hb;
+            BRepBndLib::Add(hf, hb);
+            double x0, y0, z0, x1, y1, z1;
+            hb.Get(x0, y0, z0, x1, y1, z1);
+            double dims[3] = {x1 - x0, y1 - y0, z1 - z0};
+            std::sort(dims, dims + 3);
+            if (d > 0 && dims[1] < 2.0 * d + 1e-6) continue;
+            return TopoDS_Shape();
+          }
+          TopoDS_Shape hfaces = facesOfWires(h);
+          if (hfaces.IsNull()) continue;
+          acc = doBoolean(acc, hfaces, 1u);
+        }
+        return acc;
+      } catch (const Standard_Failure &) {
+        return TopoDS_Shape();
+      }
+    };
+    // round sharp corners by a tiny radius (a degenerate corner trips MAT2d)
+    auto bumped = [&](const TopoDS_Face &face) -> TopoDS_Face {
+      double r = std::min(0.05, std::abs(d) / 4.0);
+      if (r < 1e-4) return TopoDS_Face();
+      try {
+        OCC_CATCH_SIGNALS
+        BRepFilletAPI_MakeFillet2d mf(face);
+        TopTools_IndexedDataMapOfShapeListOfShape ve;
+        TopExp::MapShapesAndAncestors(face, TopAbs_VERTEX, TopAbs_EDGE, ve);
+        int added = 0;
+        for (int i = 1; i <= ve.Extent(); ++i) {
+          if (ve(i).Extent() != 2) continue;
+          try {
+            mf.AddFillet(TopoDS::Vertex(ve.FindKey(i)), r);
+            if (mf.Status() == ChFi2d_IsDone) ++added;
+          } catch (const Standard_Failure &) {
+          }
+        }
+        if (added == 0) return TopoDS_Face();
+        mf.Build();
+        if (!mf.IsDone()) return TopoDS_Face();
+        TopExp_Explorer fx(mf.Shape(), TopAbs_FACE);
+        return fx.More() ? TopoDS::Face(fx.Current()) : TopoDS_Face();
+      } catch (const Standard_Failure &) {
+        return TopoDS_Face();
       }
     };
     TopoDS_Face clean = f;
@@ -1076,6 +1240,16 @@ std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
     }
     TopoDS_Shape res = attempt(clean);
     if (res.IsNull()) res = attempt(f);
+    if (res.IsNull()) res = per_loop(clean, GeomAbs_Arc);
+    if (res.IsNull()) res = attempt_join(clean, d, GeomAbs_Intersection);
+    if (res.IsNull()) res = per_loop(clean, GeomAbs_Intersection);
+    if (res.IsNull()) {
+      TopoDS_Face b = bumped(clean);
+      if (!b.IsNull()) {
+        res = attempt(b);
+        if (res.IsNull()) res = per_loop(b, GeomAbs_Arc);
+      }
+    }
     if (res.IsNull()) fail("2D offset failed");
     for (TopExp_Explorer ex(res, TopAbs_WIRE); ex.More(); ex.Next()) {
       TopoDS_Wire w = TopoDS::Wire(ex.Current());
@@ -1455,7 +1629,31 @@ MassProps mass_props(const Shape &s) {
 BBox bounding_box(const Shape &s) {
   requireShape(s, "bounding_box");
   Bnd_Box bb;
-  BRepBndLib::AddOptimal(s.s, bb, Standard_False, Standard_False);
+  // The optimal box evaluates surface derivatives, which throws on degenerate
+  // offset surfaces (e.g. an inward shell of a fillet blend). Fall back to the
+  // geometric box, then to the box of a fine private mesh.
+  bool done = false;
+  try {
+    OCC_CATCH_SIGNALS
+    BRepBndLib::AddOptimal(s.s, bb, Standard_False, Standard_False);
+    done = true;
+  } catch (const Standard_Failure &) {
+  }
+  if (!done) {
+    bb.SetVoid();
+    try {
+      OCC_CATCH_SIGNALS
+      BRepBndLib::Add(s.s, bb, Standard_False);
+      done = true;
+    } catch (const Standard_Failure &) {
+    }
+  }
+  if (!done) {
+    bb.SetVoid();
+    TopoDS_Shape copy = privateCopy(s.s);
+    BRepMesh_IncrementalMesh(copy, 0.01, Standard_False, 0.2);
+    BRepBndLib::Add(copy, bb, Standard_True);
+  }
   if (bb.IsVoid()) fail("bounding box of empty shape");
   double x0, y0, z0, x1, y1, z1;
   bb.Get(x0, y0, z0, x1, y1, z1);

@@ -557,11 +557,20 @@ impl Document {
         })
     }
 
-    /// Add or replace a process profile (by name).
+    /// Add a process profile, or replace the one with the same name in place (its
+    /// position in the list is kept).
     pub fn add_profile(&mut self, p: ProcessProfile) {
-        self.edit(&format!("Add process {}", p.name), |d| {
-            d.processes.retain(|q| q.name != p.name);
-            d.processes.push(p);
+        let label = format!("Add process {}", p.name);
+        self.update_profile(&label, p)
+    }
+
+    /// Replace (in place) or add a process profile, with an undo label.
+    pub fn update_profile(&mut self, label: &str, p: ProcessProfile) {
+        self.edit(label, |d| {
+            match d.processes.iter_mut().find(|q| q.name == p.name) {
+                Some(q) => *q = p,
+                None => d.processes.push(p),
+            }
             Ok::<_, DocError>(())
         })
         .unwrap()
