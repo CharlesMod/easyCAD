@@ -38,7 +38,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[ui]** Click-test linked-file Update/Break, drag-to-reparent, and one alternate navigation preset.
 - [ ] **[ui]** Wire the interference overlap solid and mate free-motion display (GUI_NEEDS #18/#19).
 - [ ] **[ui]** History strip hint when the active root has no features of its own.
-- [ ] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21).
+- [x] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21): each offset
+      joint gets two equations (tangent joints pinned on the source joint's normal); 0 DOF, no
+      redundancy on the board outline, S-curves, sharp corners, circles. The GUI's own offset is gone.
 
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.

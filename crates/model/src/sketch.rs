@@ -59,7 +59,10 @@ pub enum Constraint {
     Angle(EntityId, EntityId, Expr),
     /// `target[i]` is `source[i]` offset by `distance`: lines stay parallel at that
     /// distance, arcs/circles concentric with the radius changed by it (the side is
-    /// the one the target is on). Build both with [`Sketch::offset_chain`].
+    /// the one the target is on). Joints between targets that share a point are
+    /// pinned without redundancy: on both offset carriers, or, where the source
+    /// is tangent, on one carrier and the normal through the source joint. Build
+    /// both with [`Sketch::offset_chain`].
     Offset { source: Vec<EntityId>, target: Vec<EntityId>, distance: Expr },
 }
 
@@ -296,6 +299,10 @@ enum Eq {
     Radius(Rad, f64),
     /// `rad(target) - rad(source) = v`.
     RadiusOffset(Rad, Rad, f64),
+    /// `|q - c| = rad(source) + v`: q on an offset of the source circle.
+    OnOffsetCircle(usize, usize, Rad, f64),
+    /// `(q - j) · (b - a) = 0`: q on the normal through j of the line a–b.
+    Foot(usize, usize, usize, usize),
     Angle([usize; 4], f64),
     /// Implicit: arc end on the arc's circle.
     ArcEnd(usize, usize, usize),
@@ -336,6 +343,115 @@ fn wrap_angle(a: f64) -> f64 {
     a
 }
 
+/// Lower one `Constraint::Offset` (GUI_NEEDS #21). Every end point of the target
+/// chain gets exactly two equations, so a chain of lines and arcs is fully
+/// determined with no redundancy. At a transversal joint the point lies on both
+/// offset carriers. At a tangent joint (and at an open end) it lies on one offset
+/// carrier and on the normal through the source joint: there the two carriers
+/// touch, and their equations would be dependent. Target arcs share (or are tied
+/// to) the source centre and take their radius from their ends; a target circle
+/// takes the source radius ± d.
+fn lower_offset(
+    sk: &Sketch,
+    x0: &[f64],
+    circle_vars: &[(usize, usize)],
+    source: &[EntityId],
+    target: &[EntityId],
+    d: f64,
+    eqs: &mut Vec<Eq>,
+) -> Result<(), &'static str> {
+    #[derive(Clone, Copy)]
+    enum Src {
+        Line(usize, usize),
+        Circ(usize, Rad),
+    }
+    let geom = |e: EntityId| sk.entities.get(e.0 as usize).map(|x| x.geom).ok_or("no such entity");
+    let circ = |e: EntityId| -> Result<(usize, Rad), &'static str> {
+        match geom(e)? {
+            Geom::Arc { center, start, .. } => Ok((center.0 as usize, Rad::Arc(center.0 as usize, start.0 as usize))),
+            Geom::Circle { center, .. } => {
+                let v = circle_vars.iter().find(|v| v.0 == e.0 as usize).ok_or("no such circle")?.1;
+                Ok((center.0 as usize, Rad::Var(v)))
+            }
+            Geom::Line { .. } => Err("expected an arc or circle"),
+        }
+    };
+    let pt = |i: usize| p(x0, i);
+    let mut srcs = Vec::new();
+    // (target end point, pair, the source end point it offsets)
+    let mut ends: Vec<(usize, usize, usize)> = Vec::new();
+    for (k, (&s, &t)) in source.iter().zip(target).enumerate() {
+        let mut pair = |ta: PointId, tb: PointId, sa: PointId, sb: PointId| {
+            let [ta, tb, sa, sb] = [ta, tb, sa, sb].map(|q| q.0 as usize);
+            let straight = pt(ta).distance(pt(sa)) + pt(tb).distance(pt(sb)) <= pt(ta).distance(pt(sb)) + pt(tb).distance(pt(sa));
+            ends.push((ta, k, if straight { sa } else { sb }));
+            ends.push((tb, k, if straight { sb } else { sa }));
+        };
+        match (geom(s)?, geom(t)?) {
+            (Geom::Line { a, b }, Geom::Line { a: c, b: e }) => {
+                pair(c, e, a, b);
+                srcs.push(Src::Line(a.0 as usize, b.0 as usize));
+            }
+            (Geom::Arc { start, end, .. }, Geom::Arc { start: ts, end: te, .. }) => {
+                let ((c1, r1), (c2, _)) = (circ(s)?, circ(t)?);
+                if c1 != c2 {
+                    eqs.push(Eq::Coincident(c1, c2));
+                }
+                pair(ts, te, start, end);
+                srcs.push(Src::Circ(c1, r1));
+            }
+            (Geom::Arc { .. } | Geom::Circle { .. }, Geom::Circle { .. }) => {
+                let ((c1, r1), (c2, r2)) = (circ(s)?, circ(t)?);
+                if c1 != c2 {
+                    eqs.push(Eq::Coincident(c1, c2));
+                }
+                let grow = rad(x0, r2) >= rad(x0, r1);
+                eqs.push(Eq::RadiusOffset(r1, r2, if grow { d } else { -d }));
+                srcs.push(Src::Circ(c1, r1));
+            }
+            _ => return Err("offset pairs a line with a line, an arc with an arc and a circle with an arc or circle"),
+        }
+    }
+    let on = |k: usize, q: usize| match srcs[k] {
+        Src::Line(a, b) => Eq::PointLine(q, a, b, d),
+        Src::Circ(c, r) => Eq::OnOffsetCircle(q, c, r, if pt(q).distance(pt(c)) >= rad(x0, r) { d } else { -d }),
+    };
+    let normal = |k: usize, q: usize, j: usize| match srcs[k] {
+        Src::Line(a, b) => Eq::Foot(q, j, a, b),
+        Src::Circ(c, _) => Eq::PointOnLine(q, c, j),
+    };
+    let tangent = |k: usize, j: usize| match srcs[k] {
+        Src::Line(a, b) => (pt(b) - pt(a)).normalize_or_zero(),
+        Src::Circ(c, _) => (pt(j) - pt(c)).perp().normalize_or_zero(),
+    };
+    let mut done = Vec::new();
+    for &(q, _, _) in &ends {
+        if done.contains(&q) {
+            continue;
+        }
+        done.push(q);
+        let inc: Vec<(usize, usize)> = ends.iter().filter(|e| e.0 == q).map(|e| (e.1, e.2)).collect();
+        match inc[..] {
+            [(k, j)] => {
+                eqs.push(on(k, q));
+                eqs.push(normal(k, q, j));
+            }
+            [(k1, j1), (k2, j2), ..] => {
+                eqs.push(on(k1, q));
+                if tangent(k1, j1).perp_dot(tangent(k2, j2)).abs() < 1e-6 {
+                    // the normal of an arc (its radial) when there is one
+                    let (kn, jn) = if matches!(srcs[k1], Src::Circ(..)) || !matches!(srcs[k2], Src::Circ(..)) { (k1, j1) } else { (k2, j2) };
+                    eqs.push(normal(kn, q, jn));
+                } else {
+                    eqs.push(on(k2, q));
+                }
+            }
+            [] => {}
+        }
+    }
+    Ok(())
+}
+
 impl System {
     fn build(sk: &Sketch, vals: &Values) -> Result<System, SketchError> {
         let n_points = sk.points.len();
@@ -371,11 +487,23 @@ impl System {
                 Err(bad(i, "point out of range"))
             }
         };
+        // an offset target arc gets both ends from its joints (`Offset` below), so
+        // its implicit end-on-circle equation would be redundant
+        let offset_arcs: Vec<usize> = sk
+            .constraints
+            .iter()
+            .flat_map(|c| match c {
+                Constraint::Offset { target, .. } => target.as_slice(),
+                _ => &[],
+            })
+            .map(|e| e.0 as usize)
+            .collect();
         for (i, e) in sk.entities.iter().enumerate() {
             if let Geom::Arc { center, start, end } = e.geom {
-                eqs.push(Eq::ArcEnd(center.0 as usize, start.0 as usize, end.0 as usize));
+                if !offset_arcs.contains(&i) {
+                    eqs.push(Eq::ArcEnd(center.0 as usize, start.0 as usize, end.0 as usize));
+                }
             }
-            let _ = i;
         }
         let x0: Vec<f64> = {
             let mut x: Vec<f64> = sk.points.iter().flat_map(|p| [p.x, p.y]).collect();
@@ -468,25 +596,7 @@ impl System {
                     if source.len() != target.len() {
                         return Err(bad(i, "offset needs as many targets as sources"));
                     }
-                    let d = ev(distance)?.abs();
-                    for (s0, t0) in source.iter().zip(target) {
-                        match (is_line(*s0), is_line(*t0)) {
-                            (true, true) => {
-                                let ([a, b], [c, dd]) = (line(i, *s0)?, line(i, *t0)?);
-                                eqs.push(Eq::Parallel([a, b, c, dd]));
-                                eqs.push(Eq::PointLine(c, a, b, d));
-                            }
-                            (false, false) => {
-                                let ((c1, r1), (c2, r2)) = (circ(i, *s0)?, circ(i, *t0)?);
-                                if c1 != c2 {
-                                    eqs.push(Eq::Coincident(c1, c2));
-                                }
-                                let grow = rad(&x0, r2) >= rad(&x0, r1);
-                                eqs.push(Eq::RadiusOffset(r1, r2, if grow { d } else { -d }));
-                            }
-                            _ => return Err(bad(i, "offset pairs a line with a line and an arc/circle with an arc/circle")),
-                        }
-                    }
+                    lower_offset(sk, &x0, &circle_vars, source, target, ev(distance)?.abs(), &mut eqs).map_err(|m| bad(i, m))?;
                     continue;
                 }
             });
@@ -573,6 +683,11 @@ impl System {
                 Eq::Length(a, b, v) => r.push(dir(a, b).length() - v),
                 Eq::Radius(rr, v) => r.push(rad(x, rr) - v),
                 Eq::RadiusOffset(r1, r2, v) => r.push(rad(x, r2) - rad(x, r1) - v),
+                Eq::OnOffsetCircle(q, c, rr, v) => r.push((p(x, q) - p(x, c)).length() - rad(x, rr) - v),
+                Eq::Foot(q, j, a, b) => {
+                    let d = dir(a, b);
+                    r.push(d.dot(p(x, q) - p(x, j)) / d.length().max(1e-12))
+                }
                 Eq::Angle([a, b, c, d], v) => {
                     let (u, w) = (dir(a, b), dir(c, d));
                     r.push(wrap_angle(u.perp_dot(w).atan2(u.dot(w)) - v));

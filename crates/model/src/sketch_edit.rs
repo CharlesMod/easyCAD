@@ -203,7 +203,8 @@ impl Sketch {
         })
     }
 
-    /// Point classes joined by shared ids or `Coincident` constraints.
+    /// Point classes joined by shared ids, `Coincident` constraints, or entity end
+    /// points on the same spot (DXF imports have separate, equal end points).
     fn same_point(&self) -> impl Fn(PointId, PointId) -> bool + use<> {
         let n = self.points.len();
         let mut parent: Vec<usize> = (0..n).collect();
@@ -219,6 +220,15 @@ impl Sketch {
             if let Constraint::Coincident(a, b) = c {
                 if (a.0 as usize) < n && (b.0 as usize) < n {
                     let (x, y) = (find(&mut parent, a.0 as usize), find(&mut parent, b.0 as usize));
+                    parent[x] = y;
+                }
+            }
+        }
+        let ends: Vec<usize> = self.entities.iter().filter_map(|e| e.geom.ends()).flat_map(|(a, b)| [a.0 as usize, b.0 as usize]).filter(|i| *i < n).collect();
+        for (k, &i) in ends.iter().enumerate() {
+            for &j in &ends[k + 1..] {
+                if self.points[i].distance(self.points[j]) < 1e-6 {
+                    let (x, y) = (find(&mut parent, i), find(&mut parent, j));
                     parent[x] = y;
                 }
             }
@@ -288,8 +298,8 @@ impl Sketch {
         map
     }
 
-    /// The chain through `start`: entities joined end to end (shared or coincident
-    /// points), as `(entity, reversed)` in travel order, and whether it closes.
+    /// The chain through `start`: entities joined end to end (shared, coincident or
+    /// equal points), as `(entity, reversed)` in travel order, and whether it closes.
     /// Construction entities are skipped unless `start` is one. A circle is a
     /// closed chain of itself.
     pub fn chain_from(&self, start: EntityId) -> (Vec<(EntityId, bool)>, bool) {
@@ -351,7 +361,9 @@ impl Sketch {
     /// travel direction. Makes new entities joined at the offset carriers'
     /// intersections (sharp corners stay sharp), arcs concentric with their source
     /// (sharing its centre point), and one `Constraint::Offset` tying them to the
-    /// source. Returns the new entities in chain order.
+    /// source; it leaves them fully determined, tangent joints included. The new
+    /// entities are profile geometry even when the source is construction (a DXF
+    /// reference). Returns them in chain order.
     pub fn offset_chain(&mut self, start: EntityId, distance: impl Into<Expr>, vals: &Values) -> Result<Vec<EntityId>, String> {
         let distance = distance.into();
         let d = distance.eval(vals).map_err(|e| e.to_string())?;
@@ -362,14 +374,13 @@ impl Sketch {
         if chain.is_empty() {
             return Err("no such entity".into());
         }
-        let cons = self.entities[start.0 as usize].construction;
         // a lone circle
         if let [(e, _)] = chain[..] {
             if let Geom::Circle { center, radius } = self.entities[e.0 as usize].geom {
                 if radius + d <= 1e-9 {
                     return Err(format!("the offset circle would have radius {:.3}", radius + d));
                 }
-                let id = self.add_entity(Geom::Circle { center, radius: radius + d }, cons);
+                let id = self.add_entity(Geom::Circle { center, radius: radius + d }, false);
                 self.constrain(Constraint::Offset { source: vec![e], target: vec![id], distance });
                 return Ok(vec![id]);
             }
@@ -469,10 +480,10 @@ impl Sketch {
         for (k, &(_, rev)) in chain.iter().enumerate() {
             let (a, b) = (pid(k), pid(k + 1));
             let id = match &offs[k] {
-                Off::Line(..) => self.add_entity(Geom::Line { a, b }, cons),
+                Off::Line(..) => self.add_entity(Geom::Line { a, b }, false),
                 Off::Circ(center, ..) => {
                     let (s, t) = if rev { (b, a) } else { (a, b) };
-                    self.add_entity(Geom::Arc { center: *center, start: s, end: t }, cons)
+                    self.add_entity(Geom::Arc { center: *center, start: s, end: t }, false)
                 }
             };
             out.push(id);

@@ -799,8 +799,7 @@ verified on load.
     marker); `add_feature_in` inserts at a component's marker.
 
 - **Sketch editing (GUI_NEEDS #12–14).** New `Constraint::Offset { source, target,
-  distance }` (exhaustive matches need an arm; it lowers to parallel + distance for
-  lines and concentric + radius offset for arcs/circles) and module `sketch_edit`:
+  distance }` (exhaustive matches need an arm) and module `sketch_edit`:
   `Sketch::{chain_from, offset_chain, split_at, trim, fillet_corner,
   remove_entities -> Remap, project_edge}`, `Constraint::{points, entities, remap}`,
   `Geom::{points, ends}`. `offset_chain` grows closed loops for positive distances
@@ -809,6 +808,20 @@ verified on load.
   curve; `fillet_corner` keeps the virtual corner on both lines; `project_edge`
   gives exact lines / facing circles and arcs, edge-on circles as lines, and fixed
   polylines otherwise.
+  - **Offset lowering (GUI_NEEDS #21).** `Constraint::Offset` gives every end point
+    of the target chain exactly two equations, so line–arc chains are fully
+    determined with no redundancy (the sample board outline: +16 variables, +16
+    equations, rank +16). At a transversal joint the point is on both offset
+    carriers (line: `PointLineDistance`; arc: `|q − c| = r ± d`); at a tangent
+    joint (|sin| < 1e-6 between the source tangents) and at an open end it is on
+    one carrier and on the normal through the source joint (an arc's radial, a
+    line's perpendicular). Target arcs share the source centre (or get a
+    `Coincident`) and drop their implicit end-on-circle equation; target circles
+    keep `radius = source ± d`.
+  - `chain_from` (and `fillet_corner`) also join entity end points on the same
+    spot (< 1e-6 mm), so DXF loops with separate, equal end points chain without
+    welding. `offset_chain` always makes profile geometry (never construction),
+    also from a construction source such as a DXF reference.
 
 - **Face provenance and section view (GUI_NEEDS #8, #9).** New module
   `provenance` (`FaceOrigin`, `FaceRole`, `FaceOrigins`), `RegenResult.face_origins`
