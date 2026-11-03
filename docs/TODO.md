@@ -48,7 +48,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] Parts library rows marked TODO (imperial inserts/standoffs, thread-forming heads, some button-head
       lengths, M2/M2.5 counterbores, inch loose-fit clearance): verify against ISO 4762/7380/10642/273 and ASME B18.3.
 - [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).
-- [ ] Closed loops of mates are checked, not solved.
+- [x] Closed loops of mates are solved: the occurrences of a loop are solved together (least squares,
+      drives used in mate order); redundant-but-consistent loops get a note, inconsistent ones
+      `OverConstrained("the loop through … cannot close …")`. Tree mates still just propagate.
 - [ ] Pattern/mirror of whole-body features (fillet, shell) returns "cannot be patterned".
 - [ ] Threads are cosmetic only.
 

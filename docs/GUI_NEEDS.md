@@ -53,6 +53,12 @@ today (adapter or limitation) and what would replace it.
 
 20. ~~Root rollback leaks into component views~~ — done by the engine: components use
     their own `Component.rollback` (`Document::set_component_rollback`).
+22. **Show loop-solved drive values.** Closed loops of mates are solved now
+    (ENGINE.md, Mates): a mate whose drive the loop overrode has
+    `MateReport.actual: Some(value)` (degrees / mm) and a `MateSolve.notes` line.
+    The mate dialog / jog handle should show that value (and maybe offer "use as
+    drive"), and jogging a loop's follower joint does nothing until its drive is
+    the first one in mate order. Not wired yet.
 
 ## Sketch
 
