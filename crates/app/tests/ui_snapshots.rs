@@ -371,6 +371,33 @@ fn process_panel_and_fit_chips() {
         egui::Rect::from_min_max(egui::pos2(w - 300.0, 40.0), egui::pos2(w, H - 28.0)),
         "params_process",
     );
+    // one hole left out, gussets and lid holes (GUI_NEEDS #7, engine-native now)
+    {
+        let app = h.state_mut();
+        let Body::Standoffs(s) = &mut app.dialog.as_mut().unwrap().body else {
+            panic!("standoffs dialog")
+        };
+        assert!(s.holes.len() >= 4, "{} holes", s.holes.len());
+        s.holes[0].on = false;
+        s.gussets = true;
+        s.lid_holes = true;
+        app.request_preview();
+    }
+    settle(&mut h);
+    {
+        let app = h.state();
+        let p = app.preview.as_ref().expect("preview");
+        assert!(p.result.errors().is_empty(), "{:?}", p.result.errors());
+        let feats = app.dialog.as_ref().unwrap().build(&app.dialog_cx_data()).unwrap();
+        match &feats[0].kind {
+            casework_model::feature::FeatureKind::StandoffsFromPcb { exclude, gussets, lid_holes, .. } => {
+                assert_eq!(exclude.len(), 1);
+                assert!(gussets.is_some() && lid_holes.is_some());
+            }
+            k => panic!("{k:?}"),
+        }
+    }
+    save(&mut h, "standoffs_options");
 }
 
 #[test]

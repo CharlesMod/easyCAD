@@ -184,6 +184,9 @@ impl StandoffsD {
             draft_deg,
             plane,
             offset,
+            exclude,
+            gussets,
+            lid_holes,
             ..
         } = &f.kind
         else {
@@ -201,6 +204,11 @@ impl StandoffsD {
         s.base_fillet = Field::from_expr(base_fillet, None);
         s.draft = Field::from_expr(draft_deg, None);
         s.plane_z = Field::new(super::plane_text(plane, offset));
+        for h in &mut s.holes {
+            h.on = !exclude.iter().any(|e| e.distance(h.center) < 0.5);
+        }
+        s.gussets = gussets.is_some();
+        s.lid_holes = lid_holes.is_some();
         Some(s)
     }
 
@@ -282,58 +290,49 @@ impl StandoffsD {
         let id = cx.id(editing, 0);
         let all_on = self.holes.iter().all(|h| h.on);
         let fit = crate::dialogs::default_fit(&crate::dialogs::boss_template(), "hole_dia");
-        let kind = if all_on || self.holes.is_empty() {
-            let (lo, hi) = self.range();
-            let source = match board.kind {
-                ImportKind::Step => PcbSource::Step {
-                    import: board.import,
-                    min_dia: lo,
-                    max_dia: hi,
-                },
-                ImportKind::Dxf => PcbSource::Dxf {
-                    import: board.import,
-                    layers: Vec::new(),
-                    min_dia: lo,
-                    max_dia: hi,
-                    offset: DVec2::ZERO,
-                },
-            };
-            FeatureKind::StandoffsFromPcb {
+        let _ = all_on;
+        if !self.holes.is_empty() && self.holes.iter().all(|h| !h.on) {
+            return Err("tick at least one mounting hole".into());
+        }
+        let (lo, hi) = self.range();
+        let source = match board.kind {
+            ImportKind::Step => PcbSource::Step {
+                import: board.import,
+                min_dia: lo,
+                max_dia: hi,
+            },
+            ImportKind::Dxf => PcbSource::Dxf {
+                import: board.import,
+                layers: Vec::new(),
+                min_dia: lo,
+                max_dia: hi,
+                offset: DVec2::ZERO,
+            },
+        };
+        let has = |n: &str| vals.contains_key(n);
+        // unticked holes stay linked to the board, just without a standoff
+        let kind = FeatureKind::StandoffsFromPcb {
+            body: None,
+            source,
+            plane,
+            od: self.od.expr(None),
+            hole_dia: self.hole.expr(fit),
+            height: self.height.expr(None),
+            base_fillet: self.base_fillet.expr(None),
+            draft_deg: self.draft.expr(None),
+            offset,
+            exclude: self.holes.iter().filter(|h| !h.on).map(|h| h.center).collect(),
+            gussets: self.gussets.then(|| Gussets {
+                thickness: Expr::new(if has("wall") { "wall * 0.75" } else { "1.5" }),
+                height: None,
+                max_length: Expr::new("25"),
+            }),
+            lid_holes: self.lid_holes.then(|| LidHoles {
                 body: None,
-                source,
-                plane,
-                od: self.od.expr(None),
-                hole_dia: self.hole.expr(fit),
-                height: self.height.expr(None),
-                base_fillet: self.base_fillet.expr(None),
-                draft_deg: self.draft.expr(None),
-                offset: offset.clone(),
-                exclude: Vec::new(),
-                gussets: None,
-                lid_holes: None,
-            }
-        } else {
-            let pts: Vec<DVec2> = self
-                .holes
-                .iter()
-                .filter(|h| h.on)
-                .map(|h| h.center)
-                .collect();
-            if pts.is_empty() {
-                return Err("tick at least one mounting hole".into());
-            }
-            FeatureKind::ScrewBoss {
-                body: None,
-                plane,
-                points: pts,
-                od: self.od.expr(None),
-                hole_dia: self.hole.expr(fit),
-                height: self.height.expr(None),
-                hole_depth: None,
-                base_fillet: self.base_fillet.expr(None),
-                draft_deg: self.draft.expr(None),
-                offset,
-            }
+                hole_dia: Expr::new("3.4"),
+                cbore_dia: Expr::new("6.5"),
+                cbore_depth: Expr::new("3"),
+            }),
         };
         Ok(vec![Feature {
             id,
@@ -447,7 +446,7 @@ impl StandoffsD {
         if used < self.holes.len() && used > 0 {
             ui.label(
                 RichText::new(
-                    "Some holes unticked: placed as plain bosses (not linked to the board file).",
+                    "Unticked holes get no standoff; the rest stay linked to the board file.",
                 )
                 .size(11.0)
                 .color(theme::ORANGE_SOFT),
@@ -522,23 +521,18 @@ impl StandoffsD {
         ch |= self.base_fillet.row(ui, id.with("bf"), "Base fillet", env);
         ch |= self.draft.row(ui, id.with("dr"), "Draft", env);
         widgets::divider(ui);
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut self.gussets, "Gusset ribs to nearest wall"),
-        )
-        .on_disabled_hover_text("Needs engine support (GUI_NEEDS)");
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut self.lid_holes, "Matching counterbored holes in lid"),
-        )
-        .on_disabled_hover_text("Needs engine support (GUI_NEEDS)");
-        let linked = used == self.holes.len();
-        let mut l = linked;
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut l, "Stay linked to the PCB file"),
-        )
-        .on_disabled_hover_text("Linked when every hole is used");
+        ch |= ui
+            .checkbox(&mut self.gussets, "Gusset ribs to nearest wall")
+            .on_hover_text("Ribs from each standoff to the closest wall (up to 25 mm away)")
+            .changed();
+        ch |= ui
+            .checkbox(&mut self.lid_holes, "Matching counterbored holes in lid")
+            .on_hover_text("M3 clearance holes, counterbored for the head, through the lid above each standoff")
+            .changed();
+        let _ = used;
+        let mut l = true;
+        ui.add_enabled(false, egui::Checkbox::new(&mut l, "Stay linked to the PCB file"))
+            .on_disabled_hover_text("Always linked: unticked holes are excluded, not unlinked");
         ch
     }
 }
