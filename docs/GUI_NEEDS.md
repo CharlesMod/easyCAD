@@ -5,33 +5,22 @@ today (adapter or limitation) and what would replace it.
 
 ## Model / features
 
-1. **Expression-driven planes.** `Split.plane`, `Draft.neutral`, `ScrewBoss.plane`
-   and `StandoffsFromPcb.plane` are numeric `Plane`s, but users write
-   "Split @ lid_split". *Adapter:* `crates/app/src/adapters.rs` stores the
-   expression in `DocData::meta["gui.bind.<feature id>"]` and rewrites the plane's
-   offset inside every parameter edit (same undo step) and before each regen.
-   *Want:* an `offset: Expr` on these features (like `PartingJoint.offset`).
-2. **Rollback marker in the document.** The history strip's "roll back to here" is
-   GUI state; the worker gets a truncated feature list. *Want:* `DocData.rollback:
-   Option<usize>` (saved, synced, undoable), so a reopened file keeps it.
-3. **Several radii in one fillet.** The dialog has edge sets with their own radius
-   expression; each set becomes its own `Fillet` feature (committed in one undo
-   step). *Want:* `Fillet { sets: Vec<(Vec<EdgeSelector>, Expr, auto_reduce)> }`,
-   a persisted "skipped edges" list (shown in the report), and setback corners
-   (the "Setback" toggle is disabled).
-4. **Report edges in request terms.** `DressUpReport` outcomes name edges on the
-   feature's *input* shape, so the GUI asks the worker for the bodies after each
-   prefix and matches midpoints to map outcomes back to picks. *Want:* the request
-   index of the selector that produced each outcome edge.
+1. ~~Expression-driven planes~~ — done by the engine: `offset: Expr` on `Split`,
+   `Draft` (neutral), `ScrewBoss`, `StandoffsFromPcb`.
+2. ~~Rollback marker~~ — done by the engine: `DocData.rollback`,
+   `Document::set_rollback`, `FeatureReport.rolled_back`; new features insert at it.
+3. ~~Several radii in one fillet~~ — done by the engine: `Fillet/Chamfer.sets`
+   (`EdgeSet { edges, size, auto_reduce }`), `skipped` (+ `FeatureReport.skipped_edges`).
+   `setback` is accepted with a warning (kernel TODO).
+4. ~~Report edges in request terms~~ — done by the engine:
+   `FeatureReport.edge_requests[outcome.request] = EdgeRequest { set, selector }`.
 5. ~~Shell with no open faces~~ — done by the engine; the "New enclosure from PCB"
    wizard uses a closed shell + parting joint. (The sample still has the old
    "open bottom + floor plate" history so the E2E coordinates stay put.)
-6. **Default fits per field.** The GUI mirrors `regen.rs` (boss/standoff hole =
-   Hole/Snug) to show the chip. *Want:* `FeatureKind::default_fit(field) -> Option<Fit>`.
-7. **Standoffs.** *Want:* a per-hole exclusion list on `StandoffsFromPcb` (the GUI
-   falls back to an unlinked `ScrewBoss` at the ticked holes), gusset ribs to the
-   nearest wall, and matching counterbored holes in the lid (both checkboxes are
-   disabled).
+6. ~~Default fits per field~~ — done by the engine: `FeatureKind::default_fit(field)`.
+7. ~~Standoffs~~ — done by the engine: `StandoffsFromPcb.{exclude, gussets,
+   lid_holes}` (lid holes with `body: None` go through the closed shell above each
+   standoff, before the parting joint splits off the lid).
 8. **Face provenance for labels.** The pick stack says "Planar face · facing up";
    the mock says "Boss top", "Floor". *Want:* the creating feature (and role, e.g.
    cap/side) per face in `RegenResult`.
@@ -39,8 +28,8 @@ today (adapter or limitation) and what would replace it.
    at sketch plane" are disabled. *Want:* `Shape::section(plane)` exposed for display
    (it exists for joints) and a cap-face mesh.
 10. ~~Concurrency contract~~ — done; the GUI's kernel mutex is gone.
-11. **BOM without a `Document`.** `Document::bom()` only reads `DocData`; the worker
-    builds a throwaway `Document` to feed `drawing::compute`. *Want:* `DocData::bom()`.
+11. ~~BOM without a `Document`~~ — done by the engine: `DocData::bom(&AssemblyResult)`
+    (`AssemblyResult::flat(regen)` for a plain `RegenResult`), `DocData::bom_tree`.
 
 12a. ~~Fractional inches~~ — done by the engine. `units::normalize_input` still
     rewrites them (same value, harmless); it can shrink to the inch-mode suffix.
@@ -80,8 +69,8 @@ today (adapter or limitation) and what would replace it.
 
 15. **View orbit.** "Drag inside the view with Shift+MMB" from the mock is not
     wired; the custom rotation fields build a `ViewOrientation::Rotation`.
-16. **DimRef from HLR output.** The GUI maps `ViewEdge.source` (body, edge index)
-    to an `EdgeInfo` and builds a hint selector. *Want:* `DimRef::from_view_edge`.
+16. ~~DimRef from HLR output~~ — done by the engine: `ViewEdge.reference` /
+    `DimRef::from_view_edge(&edge)` (also `Placed` for assembly views).
 
 ## Coming (per the engine worker), not wired yet
 

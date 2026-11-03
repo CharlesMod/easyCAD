@@ -429,6 +429,7 @@ impl DocData {
         d.imports = c.imports.clone();
         d.body_orientations.clear();
         d.teardrop_overrides.clear();
+        d.rollback = None; // the rollback marker is the root history's
         if let Some(p) = &c.process {
             d.active_profile = p.clone();
         }
@@ -916,7 +917,7 @@ fn step_component(blob: &str, node: u32, reference: bool, blobs: &BlobStore, cac
                 out.bodies.push(Body { id: crate::feature::BodyId::of(fid), name: n.name, reference, part: None, geom: BodyGeom::with_appearance(shape, app) });
             }
         }
-        Err(e) => out.reports.push(FeatureReport { feature: fid, status: FeatureStatus::Error(e), dressup: None, sketch: None, joint: None, cached: false, elapsed_ms: 0.0 }),
+        Err(e) => out.reports.push(FeatureReport::new(fid, FeatureStatus::Error(e))),
     }
     out
 }
@@ -1921,5 +1922,186 @@ impl Document {
             o.in_bom = false;
             Ok([out[0], out[1]])
         })
+    }
+}
+
+// ---------------------------------------------------------------- scopes (drawings, export, BOM)
+
+/// What a drawing view or an export covers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scope {
+    /// The root component's own bodies (what `Document::regenerate` returns).
+    #[default]
+    Root,
+    /// Everything: the root's bodies and every visible occurrence, in world frame.
+    Assembly,
+    /// One component definition with its sub-tree, in the component's own frame.
+    Component(ComponentId),
+    /// The component at this occurrence path with its sub-tree, in its own frame.
+    /// Item paths are relative to the occurrence.
+    Occurrence(OccPath),
+}
+
+/// One placed body of a scope.
+#[derive(Clone, Debug)]
+pub struct ScopeItem {
+    /// Occurrence path relative to the scope's top (`[]` = the top's own bodies).
+    pub path: OccPath,
+    pub component: ComponentId,
+    /// The body in its component's frame.
+    pub body: Body,
+    /// Component frame → scope frame.
+    pub transform: Transform,
+}
+
+impl ScopeItem {
+    /// The body's shape in the scope's frame.
+    pub fn placed_shape(&self) -> occt::Result<Shape> {
+        if self.transform.is_identity() {
+            Ok(self.body.shape().clone())
+        } else {
+            self.transform.apply(self.body.shape())
+        }
+    }
+}
+
+/// The bodies a scope covers, placed in the scope's frame. Hidden occurrences (and
+/// everything under them) are skipped below the top; `exploded` applies the explode
+/// offsets. `Scope::Root` gives the root's own bodies with identity transforms.
+pub fn scope_items(d: &DocData, r: &AssemblyResult, scope: &Scope, exploded: bool) -> Result<Vec<ScopeItem>, String> {
+    let top = match scope {
+        Scope::Root => {
+            let cr = r.component(ComponentId::ROOT).ok_or("the root component was not regenerated")?;
+            return Ok(cr.regen.bodies.iter().map(|b| ScopeItem { path: Vec::new(), component: ComponentId::ROOT, body: b.clone(), transform: Transform::IDENTITY }).collect());
+        }
+        Scope::Assembly => ComponentId::ROOT,
+        Scope::Component(c) => {
+            if *c != ComponentId::ROOT && d.component(*c).is_none() {
+                return Err(format!("component {c:?} does not exist"));
+            }
+            *c
+        }
+        Scope::Occurrence(p) => d.component_at(p)?,
+    };
+    let mut out = Vec::new();
+    let mut stack: Vec<(ComponentId, OccPath, Transform)> = vec![(top, Vec::new(), Transform::IDENTITY)];
+    while let Some((c, path, t)) = stack.pop() {
+        if path.len() > 64 {
+            continue;
+        }
+        if let Some(cr) = r.component(c) {
+            for b in &cr.regen.bodies {
+                out.push(ScopeItem { path: path.clone(), component: c, body: b.clone(), transform: t });
+            }
+        }
+        for o in d.children_of(c).unwrap_or(&[]).iter().rev().filter(|o| o.visible) {
+            let mut p = path.clone();
+            p.push(o.id);
+            let local = if exploded { Transform::translation(o.explode).mul(&o.transform) } else { o.transform };
+            stack.push((o.component, p, t.mul(&local)));
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+impl AssemblyResult {
+    /// The assembly result of a flat document from its root regeneration (for
+    /// callers that only ran a `Regenerator`).
+    pub fn flat(root: RegenResult) -> AssemblyResult {
+        let instances = root
+            .bodies
+            .iter()
+            .map(|b| Instance { path: Vec::new(), component: ComponentId::ROOT, body: b.clone(), transform: Transform::IDENTITY, display: Transform::IDENTITY, visible: true, in_bom: true })
+            .collect();
+        AssemblyResult { components: vec![ComponentResult { component: ComponentId::ROOT, name: String::new(), regen: root }], instances, issues: Vec::new(), notes: Vec::new() }
+    }
+}
+
+impl DocData {
+    /// Purchased parts of the whole assembly, one line per (source, part, size):
+    /// library parts inserted by features (in every placed occurrence) and
+    /// purchased components (library part components, STEP references), counting
+    /// occurrences with `in_bom`. Sorted by (name, size). For a flat document this
+    /// is the root's part bodies; pass `AssemblyResult::flat(regen)` when you only
+    /// have a `RegenResult`.
+    pub fn bom(&self, r: &AssemblyResult) -> Vec<crate::document::BomLine> {
+        use crate::document::BomLine;
+        fn add(lines: &mut Vec<BomLine>, p: &PartRef, n: usize) {
+            match lines.iter_mut().find(|l| l.source == p.source && l.part == p.id && l.size == p.size) {
+                Some(l) => l.qty += n,
+                None => lines.push(BomLine {
+                    source: p.source.clone(),
+                    part: p.id.clone(),
+                    name: p.name.clone(),
+                    size: p.size.clone(),
+                    qty: n,
+                    vendor: p.vendor.clone(),
+                    part_number: p.part_number.clone(),
+                }),
+            }
+        }
+        fn rec(d: &DocData, r: &AssemblyResult, comp: ComponentId, depth: usize, lines: &mut Vec<BomLine>) {
+            if depth > 64 {
+                return;
+            }
+            if let Some(cr) = r.component(comp) {
+                for b in &cr.regen.bodies {
+                    if let Some(pu) = &b.part {
+                        add(lines, &pu.part, 1);
+                    }
+                }
+            }
+            for o in d.children_of(comp).unwrap_or(&[]).iter().filter(|o| o.in_bom) {
+                match d.component(o.component).and_then(|c| c.purchased.as_ref()) {
+                    Some(p) => add(lines, p, 1),
+                    None => rec(d, r, o.component, depth + 1, lines),
+                }
+            }
+        }
+        let mut lines = Vec::new();
+        rec(self, r, ComponentId::ROOT, 0, &mut lines);
+        lines.sort_by(|a, b| (&a.name, &a.size).cmp(&(&b.name, &b.size)));
+        lines
+    }
+
+    /// Indented + flat assembly BOM (see [`bom`]).
+    pub fn bom_tree(&self, r: &AssemblyResult) -> AssemblyBom {
+        bom(self, r)
+    }
+
+    /// The component an occurrence path ends in, starting at component `top`.
+    pub fn component_at_from(&self, top: ComponentId, path: &[OccurrenceId]) -> Result<ComponentId, String> {
+        let mut cur = top;
+        for id in path {
+            let kids = self.children_of(cur).ok_or_else(|| format!("component {cur:?} does not exist"))?;
+            cur = kids.iter().find(|o| o.id == *id).ok_or_else(|| format!("occurrence {id:?} is not a child of {}", self.component_name(cur)))?.component;
+        }
+        Ok(cur)
+    }
+
+    /// The flat-BOM row (index into `AssemblyBom::flat`) of a placed body: the part
+    /// row for a library-part body, else the first purchased component on the path,
+    /// else the component at the end of the path. `path` starts at component `top`
+    /// (`ROOT` for absolute paths).
+    pub fn bom_item(&self, flat: &[AsmBomRow], top: ComponentId, path: &[OccurrenceId], part: Option<&PartRef>) -> Result<usize, String> {
+        if let Some(p) = part {
+            let k = part_kind(p);
+            return flat.iter().position(|r| r.component.is_none() && r.kind == k).ok_or_else(|| format!("`{} {}` is not in the BOM", p.name, p.size));
+        }
+        let mut comp = None;
+        for i in 1..=path.len() {
+            let c = self.component_at_from(top, &path[..i])?;
+            comp = Some(c);
+            if self.component(c).is_some_and(|c| c.purchased.is_some()) {
+                break;
+            }
+        }
+        let c = match comp {
+            Some(c) => c,
+            None if top != ComponentId::ROOT => top,
+            None => return Err("the root component's own bodies are not a BOM item".into()),
+        };
+        flat.iter().position(|r| r.component == Some(c)).ok_or_else(|| format!("`{}` is not in the BOM (in_bom is off)", self.component_name(c)))
     }
 }

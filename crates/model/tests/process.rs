@@ -145,7 +145,7 @@ fn profile_switch_invalidates_cache_and_fits_apply() {
     ));
     doc.add_feature(
         "Boss",
-        FeatureKind::ScrewBoss { body: Some(b), plane: Plane::XY.offset(3.0), points: vec![DVec2::ZERO], od: 7.0.into(), hole_dia: 2.5.into(), height: 10.0.into(), hole_depth: None, base_fillet: 0.0.into(), draft_deg: 0.0.into() },
+        FeatureKind::ScrewBoss { body: Some(b), plane: Plane::XY.offset(3.0), points: vec![DVec2::ZERO], od: 7.0.into(), hole_dia: 2.5.into(), height: 10.0.into(), hole_depth: None, base_fillet: 0.0.into(), draft_deg: 0.0.into(), offset: 0.0.into() },
     );
     let v_m = vol(&mut doc, b);
     doc.set_active_profile(FDM).unwrap();

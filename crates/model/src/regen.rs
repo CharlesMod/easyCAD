@@ -195,6 +195,44 @@ pub struct FeatureReport {
     /// Time spent computing this feature (0 when cached).
     #[serde(default)]
     pub elapsed_ms: f64,
+    /// Fillet/chamfer: for each `dressup.outcomes[k].request`, the edge set
+    /// (index into `FeatureKind::edge_sets()`) and the selector within that set
+    /// that produced the edge.
+    #[serde(default)]
+    pub edge_requests: Vec<EdgeRequest>,
+    /// Fillet/chamfer: input-shape edges left out because they match the
+    /// feature's `skipped` list.
+    #[serde(default)]
+    pub skipped_edges: Vec<u32>,
+    /// The feature is after the document's rollback marker (not computed).
+    #[serde(default)]
+    pub rolled_back: bool,
+}
+
+/// Where a fillet/chamfer request edge came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct EdgeRequest {
+    /// Index into `FeatureKind::edge_sets()`.
+    pub set: usize,
+    /// Index into that set's `edges`.
+    pub selector: usize,
+}
+
+impl FeatureReport {
+    pub fn new(feature: FeatureId, status: FeatureStatus) -> Self {
+        FeatureReport {
+            feature,
+            status,
+            dressup: None,
+            sketch: None,
+            joint: None,
+            cached: false,
+            elapsed_ms: 0.0,
+            edge_requests: Vec::new(),
+            skipped_edges: Vec::new(),
+            rolled_back: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -423,7 +461,8 @@ impl Regenerator {
         let mut state: Arc<ModelState> = Arc::new(ModelState::default());
         let mut reports = Vec::new();
         let (mut recomputed, mut reused) = (0, 0);
-        for f in &doc.features {
+        let live = doc.rollback.map_or(doc.features.len(), |r| r.min(doc.features.len()));
+        for f in &doc.features[..live] {
             let mut h = DefaultHasher::new();
             key.hash(&mut h);
             fingerprint(f, doc, &vals).hash(&mut h);
@@ -445,22 +484,37 @@ impl Regenerator {
             recomputed += 1;
             let t0 = std::time::Instant::now();
             let (next, report) = if f.suppressed {
-                ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, joint: None, cached: false, elapsed_ms: 0.0 })
+                ((*state).clone(), FeatureReport::new(f.id, FeatureStatus::Suppressed))
             } else {
-                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None, joint: None, xf: Vec::new(), target_default: None };
+                let mut ctx = Ctx {
+                    doc,
+                    vals: &vals,
+                    profile: &profile,
+                    blobs,
+                    lib,
+                    regen: self,
+                    report: None,
+                    sketch_report: None,
+                    warning: None,
+                    joint: None,
+                    xf: Vec::new(),
+                    target_default: None,
+                    edge_requests: Vec::new(),
+                    skipped_edges: Vec::new(),
+                };
                 let res = ctx.exec(f, &state);
                 let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
+                let (edge_requests, skipped_edges) = (std::mem::take(&mut ctx.edge_requests), std::mem::take(&mut ctx.skipped_edges));
                 match res {
                     Ok(s) => (
                         s,
                         FeatureReport {
-                            feature: f.id,
-                            status: warning.map(FeatureStatus::Warning).unwrap_or(FeatureStatus::Ok),
                             dressup,
                             sketch,
                             joint,
-                            cached: false,
-                            elapsed_ms: 0.0,
+                            edge_requests,
+                            skipped_edges,
+                            ..FeatureReport::new(f.id, warning.map(FeatureStatus::Warning).unwrap_or(FeatureStatus::Ok))
                         },
                     ),
                     Err(Fail { msg, unresolved }) => {
@@ -471,7 +525,7 @@ impl Regenerator {
                                 None => msg,
                             }),
                         };
-                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, joint, cached: false, elapsed_ms: 0.0 })
+                        ((*state).clone(), FeatureReport { dressup, sketch, joint, edge_requests, skipped_edges, ..FeatureReport::new(f.id, status) })
                     }
                 }
             };
@@ -481,6 +535,9 @@ impl Regenerator {
             self.insert(key, step.clone());
             state = Arc::new(step.0.clone());
             reports.push(step.1.clone());
+        }
+        for f in &doc.features[live..] {
+            reports.push(FeatureReport { rolled_back: true, ..FeatureReport::new(f.id, FeatureStatus::Suppressed) });
         }
         // Final process stage (teardrops), cached on the final model key plus the
         // profile's process settings, orientations and overrides.
@@ -533,6 +590,8 @@ struct Ctx<'a> {
     xf: Vec<Xf>,
     /// Target used when a re-executed feature has `None` as its target.
     target_default: Option<BodyId>,
+    edge_requests: Vec<EdgeRequest>,
+    skipped_edges: Vec<u32>,
 }
 
 fn frame(p: &Plane) -> Frame {
@@ -737,27 +796,70 @@ impl Ctx<'_> {
                 let tool = self.tx(fuse_many(&tools)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
-            FeatureKind::Fillet { body, edges, radius, auto_reduce } | FeatureKind::Chamfer { body, edges, distance: radius, auto_reduce } => {
+            FeatureKind::Fillet { body, skipped, .. } | FeatureKind::Chamfer { body, skipped, .. } => {
+                let is_fillet = matches!(kind, FeatureKind::Fillet { .. });
                 let i = self.target(st, *body)?;
-                let r = self.ev(radius)?;
                 let shape = st.bodies[i].shape().clone();
-                let ids = resolve_edges(&shape, edges)?;
-                let req: Vec<(u32, f64)> = ids.iter().map(|e| (*e, r)).collect();
-                let opts = dressup::DressUpOptions { auto_reduce: *auto_reduce, ..Default::default() };
-                let (out, rep) = if matches!(kind, FeatureKind::Fillet { .. }) {
-                    dressup::fillet(&shape, &req, &opts)?
-                } else {
-                    dressup::chamfer(&shape, &req, &opts)?
-                };
+                // skipped edges that no longer exist need no skipping
+                let mut skip: Vec<u32> = skipped.iter().filter_map(|sel| sel.resolve(&shape).ok()).flatten().collect();
+                skip.sort_unstable();
+                skip.dedup();
+                let mut req: Vec<(u32, f64, bool)> = Vec::new();
+                let mut map: Vec<EdgeRequest> = Vec::new();
+                let mut skipped_hit: Vec<u32> = Vec::new();
+                for (si, set) in kind.edge_sets().iter().enumerate() {
+                    let r = self.ev(&set.size)?;
+                    for (ki, sel) in set.edges.iter().enumerate() {
+                        for e in resolve_edges(&shape, std::slice::from_ref(sel))? {
+                            if skip.contains(&e) {
+                                if !skipped_hit.contains(&e) {
+                                    skipped_hit.push(e);
+                                }
+                                continue;
+                            }
+                            // an edge in two sets: the later set wins
+                            match req.iter().position(|q| q.0 == e) {
+                                Some(k) => {
+                                    req[k] = (e, r, set.auto_reduce);
+                                    map[k] = EdgeRequest { set: si, selector: ki };
+                                }
+                                None => {
+                                    req.push((e, r, set.auto_reduce));
+                                    map.push(EdgeRequest { set: si, selector: ki });
+                                }
+                            }
+                        }
+                    }
+                }
+                self.skipped_edges = skipped_hit.clone();
+                if req.is_empty() {
+                    return fail(if skipped_hit.is_empty() { "no edges to dress" } else { "every edge is in the skipped list" });
+                }
+                let opts = dressup::DressUpOptions::default();
+                let dk = if is_fillet { dressup::DressUpKind::Fillet } else { dressup::DressUpKind::Chamfer };
+                let (out, rep) = dressup::dress(dk, &shape, &req, &opts)?;
                 let applied = rep.applied_count();
-                let summary = rep.summary();
+                let mut summary = rep.summary();
+                if !skipped_hit.is_empty() {
+                    summary += &format!(" · {} skipped", skipped_hit.len());
+                }
                 let all = rep.all_applied();
                 self.report = Some(rep);
+                self.edge_requests = map;
                 if applied == 0 {
                     return fail(summary);
                 }
+                let mut warn = Vec::new();
                 if !all {
-                    self.warning = Some(summary);
+                    warn.push(summary);
+                }
+                if matches!(kind, FeatureKind::Fillet { setback: true, .. }) {
+                    // TODO: setback vertex blends (OCCT's MakeFillet has no setback corner
+                    // option; would need a custom corner patch).
+                    warn.push("setback corners are not supported yet; corners use the kernel's rolling-ball blend".into());
+                }
+                if !warn.is_empty() {
+                    self.warning = Some(warn.join("; "));
                 }
                 st.bodies[i].geom = BodyGeom::new(out);
             }
@@ -768,9 +870,10 @@ impl Ctx<'_> {
                 let faces = resolve_faces(&shape, open_faces)?;
                 st.bodies[i].geom = BodyGeom::new(shape.shell(&faces, t, *outward)?);
             }
-            FeatureKind::Draft { body, faces, neutral, pull, angle_deg } => {
+            FeatureKind::Draft { body, faces, neutral, pull, angle_deg, offset } => {
                 let i = self.target(st, *body)?;
                 let a = self.ev(angle_deg)?;
+                let neutral = &neutral.offset(self.ev(offset)?);
                 let shape = st.bodies[i].shape().clone();
                 let ids = resolve_faces(&shape, faces)?;
                 st.bodies[i].geom = BodyGeom::new(shape.draft(&ids, *pull, a, &frame(neutral))?);
@@ -846,8 +949,11 @@ impl Ctx<'_> {
                 };
                 self.apply_op(st, fid, name, BoolOp::Join, *body, tool)?;
             }
-            FeatureKind::ScrewBoss { body, plane, points, od, hole_dia, height, hole_depth, base_fillet, draft_deg } => {
+            FeatureKind::ScrewBoss { body, plane, points, od, hole_dia, height, hole_depth, base_fillet, draft_deg, offset } => {
+                let plane = &plane.offset(self.ev(offset)?);
                 let spec = BossSpec {
+                    gussets: None,
+                    lid: None,
                     od: self.ev(od)?,
                     hole: self.ev_fit(hole_dia, Fit::hole(FitClass::Snug))?,
                     height: self.ev(height)?,
@@ -857,12 +963,31 @@ impl Ctx<'_> {
                 };
                 self.bosses(st, fid, *body, plane, points, &spec)?;
             }
-            FeatureKind::StandoffsFromPcb { body, source, plane, od, hole_dia, height, base_fillet, draft_deg } => {
-                let pts = self.pcb_points(st, source, plane)?;
+            FeatureKind::StandoffsFromPcb { body, source, plane, od, hole_dia, height, base_fillet, draft_deg, offset, exclude, gussets, lid_holes } => {
+                let plane = &plane.offset(self.ev(offset)?);
+                let mut pts = self.pcb_points(st, source, plane)?;
                 if pts.is_empty() {
                     return fail("no mounting holes found in the PCB within the diameter range");
                 }
+                pts.retain(|p| !exclude.iter().any(|x| x.distance(*p) < 0.5));
+                if pts.is_empty() {
+                    return fail("every mounting hole is excluded");
+                }
+                let h = self.ev(height)?;
                 let spec = BossSpec {
+                    gussets: match gussets {
+                        Some(g) => Some((self.ev(&g.thickness)?, g.height.as_ref().map(|e| self.ev(e)).transpose()?.unwrap_or(0.6 * h), self.ev(&g.max_length)?)),
+                        None => None,
+                    },
+                    lid: match lid_holes {
+                        Some(l) => Some((
+                            l.body,
+                            self.ev_fit(&l.hole_dia, Fit::hole(FitClass::Snug))?,
+                            self.ev_fit(&l.cbore_dia, Fit::hole(FitClass::Snug))?,
+                            self.ev(&l.cbore_depth)?,
+                        )),
+                        None => None,
+                    },
                     od: self.ev(od)?,
                     hole: self.ev_fit(hole_dia, Fit::hole(FitClass::Snug))?,
                     height: self.ev(height)?,
@@ -890,8 +1015,9 @@ impl Ctx<'_> {
             FeatureKind::Mirror { source, plane } => {
                 self.replicate(st, fid, name, source, &[Xf::Mirror(plane.origin, plane.normal)])?;
             }
-            FeatureKind::Split { body, plane, new_name } => {
+            FeatureKind::Split { body, plane, new_name, offset } => {
                 let i = self.target(st, *body)?;
+                let plane = &plane.offset(self.ev(offset)?);
                 let (below, above) = st.bodies[i].shape().split(plane.origin, plane.normal)?;
                 let (Some(below), Some(above)) = (below, above) else {
                     return fail("the split plane does not cut the body");
@@ -1197,8 +1323,39 @@ impl Ctx<'_> {
         if r_top <= b.hole / 2.0 {
             return fail("draft makes the boss top narrower than the hole");
         }
+        let pre = self.target(st, body).map(|i| st.bodies[i].shape().clone());
         let mut bosses = Vec::new();
         let mut holes = Vec::new();
+        let mut notes = Vec::new();
+        if let (Some((t, hg, reach)), Ok(pre)) = (b.gussets, &pre) {
+            let u = self.tx_dir(plane.x_dir).normalize();
+            let v = n.cross(u);
+            let r = b.od / 2.0;
+            let hg = hg.clamp(0.1, b.height);
+            let mut missing = 0;
+            for &base in &bases {
+                // probe the four in-plane directions for the nearest wall
+                let mut best: Option<(f64, DVec3)> = None;
+                for dir in [u, -u, v, -v] {
+                    if reach <= r + 0.2 {
+                        break;
+                    }
+                    let probe = oriented_box(base, dir, n, (r, reach), t / 2.0, (0.1 * hg, 0.9 * hg))?;
+                    let Ok(hit) = pre.common(&probe) else { continue };
+                    let d = hit.edges().unwrap_or_default().iter().flat_map(|e| [e.start, e.end]).map(|p| (p - base).dot(dir)).fold(f64::INFINITY, f64::min);
+                    if d.is_finite() && d > r + 0.2 && best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, dir));
+                    }
+                }
+                match best {
+                    Some((d, dir)) => bosses.push(oriented_box(base, dir, n, (0.0, d + 0.3), t / 2.0, (0.0, hg))?),
+                    None => missing += 1,
+                }
+            }
+            if missing > 0 {
+                notes.push(format!("gussets: no wall within {reach:.1} mm of {missing} standoff(s)"));
+            }
+        }
         for &base in &bases {
             bosses.push(if b.draft.abs() > 1e-9 {
                 Shape::cone(base, n, b.od / 2.0, r_top, b.height)?
@@ -1235,6 +1392,40 @@ impl Ctx<'_> {
             }
         }
         self.apply_op(st, fid, "", BoolOp::Cut, Some(tid), fuse_many(&holes)?)?;
+        if let Some((lid, hole, cbd, cbh)) = b.lid {
+            let li = self.target(st, lid.or(Some(tid)))?;
+            let lid_shape = st.bodies[li].shape().clone();
+            let reach = lid_shape.bbox()?.size().length() + 10.0;
+            let start = b.height + 0.3;
+            let mut cuts = Vec::new();
+            let mut missing = 0;
+            for &base in &bases {
+                let probe = Shape::cylinder(base + n * start, n, hole / 2.0, reach)?;
+                let top = lid_shape.common(&probe).ok().and_then(|h| h.edges().ok()).unwrap_or_default().iter().flat_map(|e| [e.start, e.end]).map(|p| (p - base).dot(n)).fold(f64::NEG_INFINITY, f64::max);
+                if !top.is_finite() || top <= start {
+                    missing += 1;
+                    continue;
+                }
+                cuts.push(Shape::cylinder(base + n * start, n, hole / 2.0, top - start + 1.0)?);
+                if cbd > hole && cbh > 0.0 {
+                    cuts.push(Shape::cylinder(base + n * (top - cbh), n, cbd / 2.0, cbh + 1.0)?);
+                }
+            }
+            if !cuts.is_empty() {
+                let lid_id = st.bodies[li].id;
+                self.apply_op(st, fid, "", BoolOp::Cut, Some(lid_id), fuse_many(&cuts)?)?;
+            }
+            if missing > 0 {
+                notes.push(format!("lid holes: no material above {missing} standoff(s)"));
+            }
+        }
+        if !notes.is_empty() {
+            let w = notes.join("; ");
+            self.warning = Some(match self.warning.take() {
+                Some(x) => format!("{x}; {w}"),
+                None => w,
+            });
+        }
         Ok(())
     }
 
@@ -1293,7 +1484,18 @@ impl Ctx<'_> {
     }
 }
 
+/// A box in the frame (x = `dir`, z = `n`): x in `xs`, y in ±`half_y`, z in `zs`.
+fn oriented_box(base: DVec3, dir: DVec3, n: DVec3, xs: (f64, f64), half_y: f64, zs: (f64, f64)) -> R<Shape> {
+    let b = Shape::make_box(DVec3::new(xs.0, -half_y, zs.0), DVec3::new(xs.1 - xs.0, 2.0 * half_y, zs.1 - zs.0))?;
+    let q = glam::DQuat::from_mat3(&glam::DMat3::from_cols(dir, n.cross(dir), n));
+    Ok(crate::assembly::Transform::new(q, base).apply(&b)?)
+}
+
 struct BossSpec {
+    /// (thickness, height, max length) of gussets to the nearest wall.
+    gussets: Option<(f64, f64, f64)>,
+    /// (lid body, hole, counterbore diameter, counterbore depth).
+    lid: Option<(Option<BodyId>, f64, f64, f64)>,
     od: f64,
     hole: f64,
     height: f64,

@@ -35,7 +35,7 @@ fn block_doc() -> (Document, BodyId, FeatureId) {
     );
     doc.add_feature(
         "Round",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 2.0.into(), auto_reduce: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::top())], radius: 2.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
     );
     (doc, BodyId::of(f), f)
 }
@@ -77,7 +77,7 @@ fn undo_redo_hits_the_prefix_cache() {
     assert!((vol(&mut doc, body) - v60).abs() < 1e-9);
 
     // appending a feature only computes the new one
-    doc.add_feature("Chamfer", FeatureKind::Chamfer { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::bottom())], distance: 1.0.into(), auto_reduce: false });
+    doc.add_feature("Chamfer", FeatureKind::Chamfer { body: None, edges: vec![EdgeSelector::OfFace(FaceSelector::bottom())], distance: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() });
     let r = doc.regenerate();
     assert_eq!((r.recomputed, r.reused), (1, 2));
     // the mesh of a cached body is computed once and shared
@@ -92,7 +92,7 @@ fn failing_feature_is_isolated() {
     let (mut doc, body, _) = block_doc();
     let bad = doc.add_feature(
         "Huge fillet",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 50.0.into(), auto_reduce: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 50.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
     );
     let ok = doc.add_feature(
         "Shell",
@@ -200,6 +200,7 @@ fn revolve_draft_chamfer_circular_pattern() {
             neutral: Plane::XY,
             pull: DVec3::Z,
             angle_deg: 5.0.into(),
+            offset: 0.0.into(),
         },
     );
     let v = vol(&mut doc, blk);
@@ -207,7 +208,7 @@ fn revolve_draft_chamfer_circular_pattern() {
     assert!((v - want).abs() < 1e-3, "{v} vs {want}");
     doc.add_feature(
         "Chamfer",
-        FeatureKind::Chamfer { body: Some(blk), edges: vec![EdgeSelector::Between(FaceSelector::top(), FaceSelector::AllWithNormal { normal: DVec3::Y })], distance: 1.0.into(), auto_reduce: false },
+        FeatureKind::Chamfer { body: Some(blk), edges: vec![EdgeSelector::Between(FaceSelector::top(), FaceSelector::AllWithNormal { normal: DVec3::Y })], distance: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() },
     );
     let v2 = vol(&mut doc, blk);
     assert!(v2 < v && v - v2 < 10.0);

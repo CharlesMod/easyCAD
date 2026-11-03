@@ -23,7 +23,7 @@ fn plate(doc: &mut Document, size: DVec2, t: f64) -> BodyId {
 }
 
 fn boss(points: Vec<DVec2>, b: BodyId) -> FeatureKind {
-    FeatureKind::ScrewBoss { body: Some(b), plane: Plane::XY.offset(3.0), points, od: 7.0.into(), hole_dia: 2.5.into(), height: 8.0.into(), hole_depth: None, base_fillet: 1.0.into(), draft_deg: 0.0.into() }
+    FeatureKind::ScrewBoss { body: Some(b), plane: Plane::XY.offset(3.0), points, od: 7.0.into(), hole_dia: 2.5.into(), height: 8.0.into(), hole_depth: None, base_fillet: 1.0.into(), draft_deg: 0.0.into(), offset: 0.0.into() }
 }
 
 fn vol(doc: &mut Document, b: BodyId) -> f64 {
@@ -104,7 +104,7 @@ fn patterned_holes_get_fits_and_teardrops() {
     assert!(out.errors().is_empty(), "{:?}", out.errors());
     assert_eq!(out.process.teardropped.len(), 3, "{:?}", out.process);
     // non-patternable sources give a clear error
-    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![casework_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false });
+    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![casework_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
     let bad = doc.add_feature("Bad", FeatureKind::Pattern { source: PatternSource::Features(vec![fillet]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 5.0.into(), count: Expr::from(2) } });
     assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("cannot be patterned")));
 }

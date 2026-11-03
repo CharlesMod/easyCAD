@@ -456,7 +456,7 @@ fn pcb_step_is_a_locked_reference_component_with_sub_parts() {
     assert!((bb.min - DVec3::new(30.0, 10.0, 1.6)).length() < 1e-6, "{bb:?}");
     assert!(u2.body.appearance().unwrap().parts[0].color.is_some());
     // locked: no features; BOM: one purchased line, not expanded
-    let e = doc.add_feature_in(pcb, "x", FeatureKind::Split { body: None, plane: Plane::XY, new_name: "x".into() }).unwrap_err();
+    let e = doc.add_feature_in(pcb, "x", FeatureKind::Split { body: None, plane: Plane::XY, new_name: "x".into(), offset: 0.0.into() }).unwrap_err();
     assert!(e.to_string().contains("locked"), "{e}");
     let bom = doc.bom_tree();
     assert_eq!(bom.indented.len(), 1);
@@ -729,4 +729,135 @@ fn in_context_frame_is_selectable() {
     doc.edit_component(lid, "context", |c| c.context = Some(vec![ob])).unwrap();
     assert!(doc.regenerate_assembly().issues.iter().any(|i| i.message.contains("context occurrence")));
     let _ = (base, ol);
+}
+
+/// Drawings, export and BOM of the whole assembly: views of the assembly / one
+/// component / one occurrence, hidden lines between parts, dimensions on placed
+/// edges, item balloons and a BOM table from the assembly BOM.
+#[test]
+fn assembly_drawings_exports_and_bom() {
+    use casework_model::document::{ExportFormat, ExportOptions};
+    use casework_model::drawing::*;
+    use casework_model::process::CubeFace;
+    let (mut doc, bracket, screw, [a, b]) = bracket_assembly();
+    let r = doc.regenerate_assembly().clone();
+    // purchased BOM spans the assembly: 8 screws (4 per bracket × 2)
+    let bom = doc.bom();
+    assert_eq!(bom.len(), 1, "{bom:?}");
+    assert_eq!(bom[0].qty, 8);
+    assert_eq!(doc.data.bom(&r), bom);
+    let flat = doc.data.bom_tree(&r).flat;
+    assert_eq!(flat.len(), 2);
+
+    let dr = doc.add_drawing("Assembly", Sheet::new(PaperSize::A3, PaperOrientation::Landscape));
+    let (top, front, comp, occ) = doc
+        .edit_drawing(dr, "views", |d| {
+            let top = d.add_view("Top", ViewOrientation::Face(CubeFace::PosZ), DVec2::new(120.0, 220.0), 1.0);
+            let front = d.add_view("Front", ViewOrientation::Face(CubeFace::NegY), DVec2::new(120.0, 120.0), 1.0);
+            let comp = d.add_view("Bracket", ViewOrientation::Face(CubeFace::PosZ), DVec2::new(300.0, 220.0), 1.0);
+            let occ = d.add_view("Bracket:2", ViewOrientation::Face(CubeFace::PosZ), DVec2::new(300.0, 120.0), 1.0);
+            d.view_mut(top).unwrap().scope = Scope::Assembly;
+            d.view_mut(front).unwrap().scope = Scope::Assembly;
+            d.view_mut(comp).unwrap().scope = Scope::Component(bracket);
+            d.view_mut(occ).unwrap().scope = Scope::Occurrence(vec![b]);
+            (top, front, comp, occ)
+        })
+        .unwrap();
+    let res = doc.drawing_result(dr).unwrap();
+    for v in &res.views {
+        assert!(v.error.is_none(), "{:?}", v.error);
+    }
+    let ext = |id| {
+        let v = res.view(id).unwrap();
+        v.max - v.min
+    };
+    // bracket 1: 40 × 30 at the origin; bracket 2: turned 90° at x = 100 (30 × 40)
+    let e = ext(top);
+    assert!((e.x - 135.0).abs() < 0.1 && (e.y - 40.0).abs() < 0.1, "{e}");
+    // a component or an occurrence is drawn in its own frame
+    for id in [comp, occ] {
+        let e = ext(id);
+        assert!((e.x - 40.0).abs() < 0.1 && (e.y - 30.0).abs() < 0.1, "{e}");
+    }
+    let ov = res.view(occ).unwrap();
+    assert!(ov.edges.iter().any(|e| e.path.len() == 1), "screws inside the occurrence have relative paths");
+
+    // front view: the screw shanks inside the plates (z 0..4) are hidden by the plates
+    let fv = res.view(front).unwrap();
+    let zmin = r.instances.iter().map(|i| i.world_shape().unwrap().bbox().unwrap().min.z).fold(f64::INFINITY, f64::min);
+    let to_model = |p: DVec2| DVec2::new(p.x - fv.min.x - 20.0, p.y - fv.min.y + zmin);
+    let in_plate = |m: DVec2| m.y > 0.6 && m.y < 3.4 && [-15.0, 15.0, 90.0, 110.0].iter().any(|x| (m.x - x).abs() < 1.6);
+    let pts = |vis: bool| fv.edges.iter().filter(move |e| e.visible == vis).flat_map(|e| e.points.windows(2).flat_map(|w| [w[0], (w[0] + w[1]) / 2.0, w[1]])).map(to_model);
+    assert_eq!(pts(true).filter(|m| in_plate(*m)).count(), 0, "screw geometry inside a plate is drawn visible");
+    assert!(pts(false).any(in_plate), "no hidden screw lines inside the plates");
+
+    // a dimension on a placed edge (bracket 2's long straight side: 40 − 2·0.5)
+    let tv = res.view(top).unwrap();
+    let long = tv
+        .edges
+        .iter()
+        .filter(|e| e.visible && e.path == vec![b] && e.points.len() == 2)
+        .max_by(|p, q| p.points[0].distance(p.points[1]).total_cmp(&q.points[0].distance(q.points[1])))
+        .unwrap();
+    let dref = DimRef::from_view_edge(long).unwrap();
+    assert!(matches!(&dref, DimRef::Placed { path, .. } if *path == vec![b]));
+    let (dim, b1, b2, table) = doc
+        .edit_drawing(dr, "annotate", |d| {
+            let dim = d.annotate(AnnotationKind::Linear { view: top, a: dref.clone(), b: None, kind: LinearKind::Aligned, offset: 8.0 });
+            let s1 = doc_child(&r, a, screw);
+            let b1 = d.annotate(AnnotationKind::ItemBalloon { view: top, path: vec![a], body: None, position: DVec2::new(60.0, 260.0) });
+            let b2 = d.annotate(AnnotationKind::ItemBalloon { view: top, path: s1, body: None, position: DVec2::new(80.0, 260.0) });
+            let t = d.annotate(AnnotationKind::BomTable { position: DVec2::new(20.0, 80.0), indented: true });
+            (dim, b1, b2, t)
+        })
+        .unwrap();
+    let res = doc.drawing_result(dr).unwrap();
+    let st = |id| res.annotation(id).unwrap();
+    assert_eq!(st(dim).status, AnnotationStatus::Ok, "{:?}", st(dim).status);
+    assert!((st(dim).value.unwrap() - 39.0).abs() < 0.05, "{:?}", st(dim).value);
+    assert_eq!(st(b1).text, "1", "{:?}", st(b1).status);
+    assert_eq!(st(b2).text, "2", "{:?}", st(b2).status);
+    assert_eq!(st(table).status, AnnotationStatus::Ok);
+    let texts: Vec<&str> = st(table).prims.iter().filter_map(|p| if let Prim::Text { text, .. } = p { Some(text.as_str()) } else { None }).collect();
+    assert!(texts.contains(&"Bracket") && texts.iter().any(|t| t.contains("cap screw")), "{texts:?}");
+    // the dimension follows bracket 2 when it moves, and goes dangling when hidden
+    doc.edit_occurrence(b, "move", |o| o.transform.translation.y = 40.0).unwrap();
+    let res2 = doc.drawing_result(dr).unwrap();
+    assert_eq!(res2.annotation(dim).unwrap().status, AnnotationStatus::Ok);
+    doc.edit_occurrence(b, "hide", |o| o.visible = false).unwrap();
+    let res3 = doc.drawing_result(dr).unwrap();
+    assert!(matches!(res3.annotation(dim).unwrap().status, AnnotationStatus::Dangling(_)));
+    doc.undo();
+    doc.undo();
+    // without the assembly, an assembly view says so instead of drawing nothing silently
+    let root = doc.regenerate().clone();
+    let plain = compute(&doc.data, &root, &[], doc.data.drawing(dr).unwrap(), &mut DrawingCache::default());
+    assert!(plain.view(top).unwrap().error.as_deref().unwrap_or("").contains("assembly"));
+    let dir = tempfile::tempdir().unwrap();
+    doc.export_drawing(dr, &dir.path().join("asm.svg")).unwrap();
+
+    // Document::export covers the assembly: STEP with references = 2 plates + 8 screws
+    let p = dir.path().join("asm.step");
+    doc.export(ExportFormat::Step, &p, &ExportOptions { include_reference: true, ..Default::default() }).unwrap();
+    let back = casework_model::occt::Shape::read_step(&p).unwrap();
+    assert_eq!(back.solids().unwrap().len(), 10);
+    let bb = back.bbox().unwrap();
+    assert!((bb.max.x - 115.0).abs() < 0.1, "placed in world: {bb:?}");
+    // STL: printable bodies only (the screws are purchased reference bodies)
+    let p = dir.path().join("asm.stl");
+    doc.export(ExportFormat::Stl, &p, &ExportOptions::default()).unwrap();
+    let mesh_bytes = std::fs::metadata(&p).unwrap().len();
+    // one component: 1 plate + 4 screws
+    let p = dir.path().join("bracket.step");
+    doc.export_scoped(ExportFormat::Step, &p, &ExportOptions { include_reference: true, ..Default::default() }, &Scope::Component(bracket)).unwrap();
+    assert_eq!(casework_model::occt::Shape::read_step(&p).unwrap().solids().unwrap().len(), 5);
+    let p = dir.path().join("bracket.stl");
+    doc.export_scoped(ExportFormat::Stl, &p, &ExportOptions::default(), &Scope::Component(bracket)).unwrap();
+    let one = std::fs::metadata(&p).unwrap().len();
+    assert_eq!((mesh_bytes - 84) / 50, 2 * ((one - 84) / 50), "two plates vs one");
+}
+
+/// Path of the first screw occurrence inside bracket occurrence `a`.
+fn doc_child(r: &AssemblyResult, a: OccurrenceId, screw: ComponentId) -> OccPath {
+    r.instances.iter().find(|i| i.component == screw && i.path[0] == a).unwrap().path.clone()
 }

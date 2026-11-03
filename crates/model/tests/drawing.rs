@@ -38,6 +38,8 @@ fn part() -> (Document, BodyId, FeatureId) {
             edges: vec![EdgeSelector::Between(FaceSelector::top(), FaceSelector::AllWithNormal { normal: DVec3::NEG_Y })],
             distance: 2.0.into(),
             auto_reduce: false,
+            sets: Vec::new(),
+            skipped: Vec::new(),
         },
     );
     assert!(doc.regenerate().errors().is_empty());
@@ -256,7 +258,7 @@ fn title_block_notes_balloons_parting_line_and_exports() {
             target: Some(b),
         },
     );
-    let split = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY.offset(12.0), new_name: "Lid".into() });
+    let split = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY.offset(12.0), new_name: "Lid".into(), offset: 0.0.into() });
     let lid = BodyId::of(split);
     let d = doc.add_drawing("Sheet 1", sheet());
     let (front, note, balloon, pl, pl_top) = doc

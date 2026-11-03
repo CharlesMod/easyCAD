@@ -70,7 +70,7 @@ fn enclosure_end_to_end() {
     // Fillet the vertical edges, r = 6
     doc.add_feature(
         "Corners",
-        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: "r".into(), auto_reduce: false },
+        FeatureKind::Fillet { body: None, edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: "r".into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false },
     );
     let a_out = 80.0 * 60.0 - (4.0 - PI) * 36.0;
     let v = doc.regenerate().body_by_id(base_id).unwrap().shape().volume().unwrap();
@@ -89,7 +89,7 @@ fn enclosure_end_to_end() {
     // Split into base + lid at z = 25
     let split = doc.add_feature(
         "Split",
-        FeatureKind::Split { body: Some(base_id), plane: Plane::XY.offset(25.0), new_name: "Lid".into() },
+        FeatureKind::Split { body: Some(base_id), plane: Plane::XY.offset(25.0), new_name: "Lid".into(), offset: 0.0.into() },
     );
     let lid_id = BodyId::of(split);
     {
@@ -116,6 +116,7 @@ fn enclosure_end_to_end() {
             hole_depth: None,
             base_fillet: 1.0.into(),
             draft_deg: 0.0.into(),
+            offset: 0.0.into(),
         },
     );
     let before = a_out * 25.0 - a_in * 23.0;

@@ -138,6 +138,10 @@ fn standoffs_from_dxf() {
             height: 5.0.into(),
             base_fillet: 0.0.into(),
             draft_deg: 0.0.into(),
+            offset: 0.0.into(),
+            exclude: Vec::new(),
+            gussets: None,
+            lid_holes: None,
         },
     );
     let out = doc.regenerate();
@@ -177,6 +181,10 @@ fn standoffs_from_step_pcb() {
             height: 5.0.into(),
             base_fillet: 0.5.into(),
             draft_deg: 1.0.into(),
+            offset: 0.0.into(),
+            exclude: Vec::new(),
+            gussets: None,
+            lid_holes: None,
         },
     );
     let out = doc.regenerate();

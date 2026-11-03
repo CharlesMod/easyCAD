@@ -32,7 +32,7 @@ pub fn enclosure_doc() -> (Document, BodyId) {
     let pts = [(-28.0, -18.0), (28.0, -18.0), (28.0, 18.0), (-28.0, 18.0)].map(|p| DVec2::new(p.0, p.1)).to_vec();
     doc.add_feature(
         "Bosses",
-        FeatureKind::ScrewBoss { body: Some(body), plane: Plane::XY.offset(2.0), points: pts, od: 7.0.into(), hole_dia: 2.5.into(), height: 12.0.into(), hole_depth: None, base_fillet: 0.8.into(), draft_deg: 0.0.into() },
+        FeatureKind::ScrewBoss { body: Some(body), plane: Plane::XY.offset(2.0), points: pts, od: 7.0.into(), hole_dia: 2.5.into(), height: 12.0.into(), hole_depth: None, base_fillet: 0.8.into(), draft_deg: 0.0.into(), offset: 0.0.into() },
     );
     let mut rib = Sketch::new("Rib", Plane::XY.offset(2.0));
     rib.line(DVec2::new(-15.0, 0.0), DVec2::new(15.0, 0.0));

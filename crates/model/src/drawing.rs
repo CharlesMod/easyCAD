@@ -15,6 +15,7 @@ use glam::{DQuat, DVec2, DVec3};
 use occt::{CurveKind, EdgeInfo, HlrKind};
 use serde::{Deserialize, Serialize};
 
+use crate::assembly::{AssemblyBom, AssemblyResult, OccPath, Scope, ScopeItem, Transform};
 use crate::document::{BomLine, DocData};
 use crate::feature::{BodyId, FeatureId, FeatureKind};
 use crate::params::Values;
@@ -190,6 +191,15 @@ pub struct View {
     /// Draw tangent (smooth) edges.
     #[serde(default)]
     pub smooth_edges: bool,
+    /// What the view shows: the root's bodies (default), the whole assembly, one
+    /// component or one occurrence (see [`Scope`]). Non-root scopes draw every
+    /// visible body including reference bodies (purchased parts) and hide lines
+    /// between parts; `bodies` then filters by body id in every component.
+    #[serde(default)]
+    pub scope: Scope,
+    /// Non-root scopes: apply the occurrences' explode offsets.
+    #[serde(default)]
+    pub exploded: bool,
 }
 
 fn yes() -> bool {
@@ -202,6 +212,32 @@ pub enum DimRef {
     Edge { body: BodyId, edge: EdgeSelector },
     /// A model vertex (edge endpoint) near this point.
     Vertex { body: BodyId, near: DVec3 },
+    /// `base` (an `Edge` or `Vertex`, in its component's frame) on the instance at
+    /// `path` of an assembly-scoped view (path relative to the view's scope).
+    Placed { path: OccPath, base: Box<DimRef> },
+}
+
+impl DimRef {
+    /// The reference for an edge of a computed view (GUI_NEEDS #16): an edge hint
+    /// selector on the source edge, `Placed` when the view shows an assembly.
+    /// `None` for silhouettes (no source edge).
+    pub fn from_view_edge(e: &ViewEdge) -> Option<DimRef> {
+        e.reference.clone()
+    }
+    /// Wrap a body reference for the instance at `path` (`[]` = unchanged).
+    pub fn placed(path: OccPath, base: DimRef) -> DimRef {
+        if path.is_empty() {
+            base
+        } else {
+            DimRef::Placed { path, base: Box::new(base) }
+        }
+    }
+    fn split(&self) -> (&[crate::assembly::OccurrenceId], &DimRef) {
+        match self {
+            DimRef::Placed { path, base } => (path, base),
+            r => (&[], r),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +270,36 @@ pub enum AnnotationKind {
     Centerline { view: ViewId, a: DimRef, b: DimRef },
     /// The parting plane of a `PartingJoint` / `Split` feature, seen edge-on.
     PartingLine { view: ViewId, feature: FeatureId },
+    /// Balloon numbered by the flat assembly BOM (`bom_tree().flat` row + 1):
+    /// the occurrence at `path` (relative to the view's scope), or, with `body`, that
+    /// body of it (a library-part body gets its part's row).
+    ItemBalloon { view: ViewId, path: OccPath, body: Option<BodyId>, position: DVec2 },
+    /// Bill of materials table (item, qty, name, kind / part number) from the
+    /// assembly BOM; `position` is its top-left corner on the sheet. Items are the
+    /// flat BOM rows (the numbers `ItemBalloon`s show); `indented` lists the tree
+    /// with per-parent quantities instead.
+    BomTable { position: DVec2, indented: bool },
+}
+
+impl AnnotationKind {
+    /// The view an annotation belongs to (`None` for sheet-level ones).
+    pub fn view(&self) -> Option<ViewId> {
+        use AnnotationKind as K;
+        match self {
+            K::Linear { view, .. }
+            | K::Ordinate { view, .. }
+            | K::Radius { view, .. }
+            | K::Angle { view, .. }
+            | K::Chamfer { view, .. }
+            | K::Leader { view, .. }
+            | K::Balloon { view, .. }
+            | K::CenterMark { view, .. }
+            | K::Centerline { view, .. }
+            | K::PartingLine { view, .. }
+            | K::ItemBalloon { view, .. } => Some(*view),
+            K::Note { .. } | K::BomTable { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -281,6 +347,8 @@ impl Drawing {
             hidden_lines: false,
             exact: true,
             smooth_edges: false,
+            scope: Scope::Root,
+            exploded: false,
         });
         id
     }
@@ -335,6 +403,12 @@ pub struct ViewEdge {
     /// Source model edge (body, edge index in that body's shape) — `None` for
     /// silhouettes of curved faces.
     pub source: Option<(BodyId, u32)>,
+    /// Occurrence path of the source body, relative to the view's scope (`[]` for
+    /// root views and the scope's own bodies).
+    pub path: OccPath,
+    /// A ready-made annotation reference to the source edge
+    /// ([`DimRef::from_view_edge`]).
+    pub reference: Option<DimRef>,
 }
 
 /// Serializable mirror of `occt::HlrKind`.
@@ -424,7 +498,6 @@ impl ViewFrame {
     }
 }
 
-type LocalEdge = (Vec<DVec2>, bool, HlrKindS, Option<(BodyId, u32)>);
 
 /// HLR output of one body in one orientation (local coordinates), with sources.
 struct HlrBody {
@@ -433,22 +506,113 @@ struct HlrBody {
     poly: bool,
 }
 
-/// Caches hidden-line results per (body geometry, orientation, algorithm).
+/// HLR output of several placed bodies hidden against each other.
+struct HlrSet {
+    _geoms: Vec<Arc<BodyGeom>>,
+    edges: Vec<PlacedEdge>,
+    poly: bool,
+}
+
+/// Caches hidden-line results per (body geometry, orientation, algorithm), and per
+/// placed set for assembly views.
 #[derive(Default)]
 pub struct DrawingCache {
     hlr: HashMap<(usize, [u64; 6], bool), Arc<HlrBody>>,
+    sets: HashMap<u64, Arc<HlrSet>>,
 }
 
 impl DrawingCache {
     pub fn clear(&mut self) {
         self.hlr.clear();
+        self.sets.clear();
     }
     pub fn len(&self) -> usize {
-        self.hlr.len()
+        self.hlr.len() + self.sets.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.hlr.is_empty()
+        self.hlr.is_empty() && self.sets.is_empty()
     }
+}
+
+/// HLR of one body placed by `t`: computed in the body's frame (cached per body
+/// geometry and local direction) and offset by the translation.
+fn hlr_placed(cache: &mut DrawingCache, body: &Body, t: Transform, n: DVec3, x: DVec3, exact: bool) -> Result<(Arc<HlrBody>, DVec2), String> {
+    let inv = t.rotation.inverse();
+    let h = hlr_body(cache, body, inv * n, inv * x, exact)?;
+    let up = n.cross(x);
+    Ok((h, DVec2::new(t.translation.dot(x), t.translation.dot(up))))
+}
+
+/// HLR of all items together (parts hide each other), sources matched per item.
+fn hlr_combined(cache: &mut DrawingCache, items: &[ScopeItem], n: DVec3, x: DVec3, exact: bool) -> Result<Arc<HlrSet>, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    for it in items {
+        (Arc::as_ptr(&it.body.geom) as usize).hash(&mut hs);
+        it.transform.to_rows().iter().for_each(|v| v.to_bits().hash(&mut hs));
+    }
+    [n.x, n.y, n.z, x.x, x.y, x.z].iter().for_each(|v| v.to_bits().hash(&mut hs));
+    exact.hash(&mut hs);
+    let key = hs.finish();
+    if let Some(h) = cache.sets.get(&key) {
+        return Ok(h.clone());
+    }
+    let shapes: Vec<occt::Shape> = items.iter().map(|i| i.placed_shape()).collect::<Result<_, _>>().map_err(|e| e.0)?;
+    let refs: Vec<&occt::Shape> = shapes.iter().collect();
+    let comp = occt::Shape::compound(&refs).map_err(|e| e.0)?;
+    let diag = comp.bbox().map_err(|e| e.0)?.size().length().max(1.0);
+    let (edges, poly) = comp.hlr(n, x, exact, (diag * 2e-4).max(0.002)).map_err(|e| e.0)?;
+    let up = n.cross(x);
+    struct Src {
+        item: usize,
+        edge: u32,
+        pts: Vec<DVec2>,
+        depth: f64,
+        lo: DVec2,
+        hi: DVec2,
+    }
+    let mut srcs = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let infos = it.body.shape().edges().map_err(|e| e.0)?;
+        let mesh = it.body.mesh().ok();
+        for (k, pl) in source_polylines(&infos, mesh.as_deref()).into_iter().enumerate() {
+            let w: Vec<DVec3> = pl.iter().map(|p| it.transform.point(*p)).collect();
+            let depth = w.iter().map(|p| p.dot(n)).sum::<f64>() / w.len().max(1) as f64;
+            let pts: Vec<DVec2> = w.iter().map(|p| DVec2::new(p.dot(x), p.dot(up))).collect();
+            let lo = pts.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
+            let hi = pts.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+            srcs.push(Src { item: i, edge: k as u32, pts, depth, lo, hi });
+        }
+    }
+    let tol = diag * 1e-4 + 0.005;
+    let out = edges
+        .into_iter()
+        .filter(|e| !e.points.is_empty())
+        .map(|e| {
+            let pts: Vec<DVec2> = e.points.iter().map(|p| DVec2::new(p[0], p[1])).collect();
+            let kind = match e.kind {
+                HlrKind::Sharp => HlrKindS::Sharp,
+                HlrKind::Smooth => HlrKindS::Smooth,
+                HlrKind::Outline => HlrKindS::Outline,
+            };
+            let source = if kind == HlrKindS::Outline {
+                None
+            } else {
+                let samples = [pts[0], pts[pts.len() / 2], pts[pts.len() - 1]];
+                let sign = if e.visible { 1.0 } else { -1.0 };
+                srcs.iter()
+                    .filter(|s| samples.iter().all(|p| p.x >= s.lo.x - tol && p.y >= s.lo.y - tol && p.x <= s.hi.x + tol && p.y <= s.hi.y + tol))
+                    .map(|s| (s, samples.iter().map(|p| dist_point_polyline(*p, &s.pts)).fold(0.0, f64::max)))
+                    .filter(|(_, d)| *d < tol)
+                    .max_by(|a, b| (sign * a.0.depth).total_cmp(&(sign * b.0.depth)).then(b.1.total_cmp(&a.1)))
+                    .map(|(s, _)| (s.item, s.edge))
+            };
+            (pts, e.visible, kind, source)
+        })
+        .collect();
+    let h = Arc::new(HlrSet { _geoms: items.iter().map(|i| i.body.geom.clone()).collect(), edges: out, poly });
+    cache.sets.insert(key, h.clone());
+    Ok(h)
 }
 
 fn source_polylines(info: &[EdgeInfo], mesh: Option<&occt::Mesh>) -> Vec<Vec<DVec3>> {
@@ -616,35 +780,67 @@ impl Resolved {
     }
 }
 
+struct ViewCtx<'a> {
+    frame: ViewFrame,
+    /// The bodies drawn in this view, placed in the view's scope frame.
+    items: Vec<ScopeItem>,
+    view: &'a View,
+}
+
+/// What a drawing is computed against.
+pub struct DrawingSources<'a> {
+    /// The root component's regeneration (root-scope views, `Balloon`, `PartingLine`).
+    pub regen: &'a RegenResult,
+    /// Purchased-part BOM (`Balloon` numbers).
+    pub bom: &'a [BomLine],
+    /// The assembly, for views with a non-root [`Scope`].
+    pub assembly: Option<&'a AssemblyResult>,
+    /// The assembly BOM, for `ItemBalloon` and `BomTable`.
+    pub bom_tree: Option<&'a AssemblyBom>,
+}
+
 struct Ctx<'a> {
     data: &'a DocData,
     regen: &'a RegenResult,
-    frames: HashMap<ViewId, (ViewFrame, Vec<BodyId>, &'a View)>,
-    view_sources: HashMap<ViewId, Vec<(BodyId, u32)>>,
+    bom_tree: Option<&'a AssemblyBom>,
+    views: HashMap<ViewId, ViewCtx<'a>>,
+    view_sources: HashMap<ViewId, std::collections::HashSet<(OccPath, BodyId, u32)>>,
 }
 
 impl Ctx<'_> {
-    fn frame(&self, v: ViewId) -> Result<(ViewFrame, &Vec<BodyId>), String> {
-        self.frames.get(&v).map(|(f, b, _)| (*f, b)).ok_or_else(|| format!("view {v:?} does not exist"))
+    fn view(&self, v: ViewId) -> Result<&ViewCtx<'_>, String> {
+        self.views.get(&v).ok_or_else(|| format!("view {v:?} does not exist"))
+    }
+    fn frame(&self, v: ViewId) -> Result<ViewFrame, String> {
+        self.view(v).map(|c| c.frame)
     }
 
     fn resolve(&self, view: ViewId, r: &DimRef) -> Result<Resolved, String> {
-        let (f, bodies) = self.frame(view)?;
-        let body_id = match r {
+        let vc = self.view(view)?;
+        let f = vc.frame;
+        let (path, base) = r.split();
+        let body_id = match base {
             DimRef::Edge { body, .. } | DimRef::Vertex { body, .. } => *body,
+            DimRef::Placed { .. } => return Err("a placed reference cannot contain another one".into()),
         };
-        if !bodies.contains(&body_id) {
-            return Err("the referenced body is not shown in this view".into());
-        }
-        let body = self.regen.body_by_id(body_id).ok_or("the referenced body no longer exists")?;
-        let shape = body.shape();
-        match r {
+        let item = vc.items.iter().find(|i| i.path == path && i.body.id == body_id).ok_or_else(|| {
+            if path.is_empty() && vc.view.scope == Scope::Root && vc.view.bodies.contains(&body_id) {
+                "the referenced body no longer exists".to_string()
+            } else {
+                "the referenced body is not shown in this view".to_string()
+            }
+        })?;
+        let t = item.transform;
+        let shape = item.body.shape();
+        let sh = |p: DVec3| f.sheet(t.point(p));
+        match base {
             DimRef::Edge { edge, .. } => {
                 let ids = edge.resolve(shape).map_err(|e| format!("reference lost: {e}"))?;
                 let infos = shape.edges().map_err(|e| e.0)?;
                 let e = &infos[ids[0] as usize];
-                let shown = self.view_sources.get(&view).is_some_and(|s| s.contains(&(body_id, e.index)));
-                let face_on_circle = matches!(e.circle, Some((_, ax, _)) if ax.normalize().dot(f.n).abs() > 0.999);
+                let shown = self.view_sources.get(&view).is_some_and(|s| s.contains(&(path.to_vec(), body_id, e.index)));
+                let circle = e.circle.map(|(c, ax, r)| (c, t.vector(ax).normalize(), r));
+                let face_on_circle = matches!(circle, Some((_, ax, _)) if ax.dot(f.n).abs() > 0.999);
                 if !shown && !face_on_circle {
                     return Err(if e.circle.is_some() {
                         "the circle is not seen face-on in this view".into()
@@ -652,12 +848,10 @@ impl Ctx<'_> {
                         "the referenced edge is not drawn in this view".into()
                     });
                 }
-                Ok(match (e.kind, e.circle) {
-                    (CurveKind::Line, _) => Resolved::Line { a: f.sheet(e.start), b: f.sheet(e.end) },
-                    (CurveKind::Circle, Some((c, ax, r))) => {
-                        Resolved::Circle { c: f.sheet(c), r: r * f.scale, face_on: ax.normalize().dot(f.n).abs() > 0.999 }
-                    }
-                    _ => Resolved::Other { mid: f.sheet(e.midpoint) },
+                Ok(match (e.kind, circle) {
+                    (CurveKind::Line, _) => Resolved::Line { a: sh(e.start), b: sh(e.end) },
+                    (CurveKind::Circle, Some((c, ax, r))) => Resolved::Circle { c: sh(c), r: r * f.scale, face_on: ax.dot(f.n).abs() > 0.999 },
+                    _ => Resolved::Other { mid: sh(e.midpoint) },
                 })
             }
             DimRef::Vertex { near, .. } => {
@@ -669,9 +863,10 @@ impl Ctx<'_> {
                     .map(|p| (p, p.distance(*near)))
                     .filter(|(_, d)| *d <= tol)
                     .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(p, _)| Resolved::Point(f.sheet(p)))
+                    .map(|(p, _)| Resolved::Point(sh(p)))
                     .ok_or_else(|| "the referenced vertex no longer exists".into())
             }
+            DimRef::Placed { .. } => unreachable!(),
         }
     }
 }
@@ -691,33 +886,86 @@ fn arrow(tip: DVec2, dir: DVec2) -> Prim {
     Prim::Arrow { tip, dir: dir.normalize_or_zero(), size: ARROW }
 }
 
-/// Compute a drawing against a regenerated model.
+/// Compute a drawing against a regenerated model (root-scope views only; views of
+/// the assembly report an error, use [`compute_with`]).
 pub fn compute(data: &DocData, regen: &RegenResult, bom: &[BomLine], drawing: &Drawing, cache: &mut DrawingCache) -> DrawingResult {
+    compute_with(data, &DrawingSources { regen, bom, assembly: None, bom_tree: None }, drawing, cache)
+}
+
+type PlacedEdge = (Vec<DVec2>, bool, HlrKindS, Option<(usize, u32)>);
+
+/// HLR of each item on its own (no hiding between items).
+fn hlr_each(cache: &mut DrawingCache, items: &[ScopeItem], n: DVec3, x: DVec3, exact: bool, out: &mut Vec<PlacedEdge>, err: &mut Option<String>) -> bool {
+    let mut poly = false;
+    for (i, it) in items.iter().enumerate() {
+        match hlr_placed(cache, &it.body, it.transform, n, x, exact) {
+            Ok((h, off)) => {
+                poly |= h.poly;
+                for (pts, vis, kind, src) in &h.edges {
+                    out.push((pts.iter().map(|p| *p + off).collect(), *vis, *kind, src.map(|s| (i, s))));
+                }
+            }
+            Err(e) => *err = Some(e),
+        }
+    }
+    poly
+}
+
+/// Compute a drawing; views may show the assembly, a component or an occurrence.
+pub fn compute_with(data: &DocData, src: &DrawingSources, drawing: &Drawing, cache: &mut DrawingCache) -> DrawingResult {
+    let regen = src.regen;
     let vals = data.values().unwrap_or_default();
     let size = drawing.sheet.size_mm();
     let mut views = Vec::new();
-    let mut ctx = Ctx { data, regen, frames: HashMap::new(), view_sources: HashMap::new() };
+    let mut ctx = Ctx { data, regen, bom_tree: src.bom_tree, views: HashMap::new(), view_sources: HashMap::new() };
     for v in &drawing.views {
         let (n, x, up) = v.orientation.basis();
-        let bodies: Vec<BodyId> = if v.bodies.is_empty() { regen.solids().map(|b| b.id).collect() } else { v.bodies.clone() };
-        let mut local: Vec<LocalEdge> = Vec::new();
         let mut err = None;
-        let mut poly = false;
-        for bid in &bodies {
-            let Some(b) = regen.body_by_id(*bid) else {
-                err = Some(format!("body {bid:?} no longer exists"));
-                continue;
-            };
-            match hlr_body(cache, b, n, x, v.exact) {
-                Ok(h) => {
-                    poly |= h.poly;
-                    for (pts, vis, kind, src) in &h.edges {
-                        local.push((pts.clone(), *vis, *kind, src.map(|s| (*bid, s))));
-                    }
-                }
-                Err(e) => err = Some(e),
+        let items: Vec<ScopeItem> = match (&v.scope, src.assembly) {
+            (Scope::Root, _) => {
+                let ids: Vec<BodyId> = if v.bodies.is_empty() { regen.solids().map(|b| b.id).collect() } else { v.bodies.clone() };
+                ids.iter()
+                    .filter_map(|bid| match regen.body_by_id(*bid) {
+                        Some(b) => Some(ScopeItem { path: Vec::new(), component: crate::assembly::ComponentId::ROOT, body: b.clone(), transform: Transform::IDENTITY }),
+                        None => {
+                            err = Some(format!("body {bid:?} no longer exists"));
+                            None
+                        }
+                    })
+                    .collect()
             }
-        }
+            (_, None) => {
+                err = Some("this view shows the assembly: compute the drawing with the assembly result (Document::drawing_result or drawing::compute_with)".into());
+                Vec::new()
+            }
+            (scope, Some(a)) => match crate::assembly::scope_items(data, a, scope, v.exploded) {
+                Ok(mut its) => {
+                    if !v.bodies.is_empty() {
+                        its.retain(|i| v.bodies.contains(&i.body.id));
+                    }
+                    its
+                }
+                Err(e) => {
+                    err = Some(e);
+                    Vec::new()
+                }
+            },
+        };
+        let mut local: Vec<PlacedEdge> = Vec::new();
+        let poly = if v.scope == Scope::Root || items.len() <= 1 {
+            hlr_each(cache, &items, n, x, v.exact, &mut local, &mut err)
+        } else {
+            match hlr_combined(cache, &items, n, x, v.exact) {
+                Ok(h) => {
+                    local.extend(h.edges.iter().cloned());
+                    h.poly
+                }
+                Err(e) => {
+                    err = Some(format!("hidden lines between parts failed ({e}); each part is drawn on its own"));
+                    hlr_each(cache, &items, n, x, v.exact, &mut local, &mut err)
+                }
+            }
+        };
         let (mut lo, mut hi) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
         for (pts, ..) in &local {
             for p in pts {
@@ -727,9 +975,21 @@ pub fn compute(data: &DocData, regen: &RegenResult, bom: &[BomLine], drawing: &D
         }
         let center = if lo.x.is_finite() { (lo + hi) / 2.0 } else { DVec2::ZERO };
         let frame = ViewFrame { n, x, up, rot: v.rotation_deg.to_radians(), scale: v.scale, position: v.position, center };
+        let mut infos: HashMap<usize, Vec<EdgeInfo>> = HashMap::new();
         let edges: Vec<ViewEdge> = local
             .into_iter()
-            .map(|(pts, visible, kind, source)| ViewEdge { points: pts.iter().map(|p| frame.local_to_sheet(*p)).collect(), visible, kind, source })
+            .map(|(pts, visible, kind, s)| {
+                let (source, path, reference) = match s {
+                    Some((i, e)) => {
+                        let it = &items[i];
+                        let inf = infos.entry(i).or_insert_with(|| it.body.shape().edges().unwrap_or_default());
+                        let r = inf.get(e as usize).map(|info| DimRef::placed(it.path.clone(), DimRef::Edge { body: it.body.id, edge: EdgeSelector::from_pick(info) }));
+                        (Some((it.body.id, e)), it.path.clone(), r)
+                    }
+                    None => (None, Vec::new(), None),
+                };
+                ViewEdge { points: pts.iter().map(|p| frame.local_to_sheet(*p)).collect(), visible, kind, source, path, reference }
+            })
             .collect();
         let (mut smin, mut smax) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
         for e in edges.iter().filter(|e| e.visible || v.hidden_lines) {
@@ -738,13 +998,13 @@ pub fn compute(data: &DocData, regen: &RegenResult, bom: &[BomLine], drawing: &D
                 smax = smax.max(*p);
             }
         }
-        ctx.view_sources.insert(v.id, edges.iter().filter_map(|e| e.source).collect());
-        ctx.frames.insert(v.id, (frame, bodies, v));
+        ctx.view_sources.insert(v.id, edges.iter().filter_map(|e| e.source.map(|(b, i)| (e.path.clone(), b, i))).collect());
+        ctx.views.insert(v.id, ViewCtx { frame, items, view: v });
         views.push(ViewResult { id: v.id, edges, min: smin, max: smax, poly_fallback: poly, error: err });
     }
 
     let first_scale = drawing.views.first().map(|v| v.scale).unwrap_or(1.0);
-    let annotations = drawing.annotations.iter().map(|a| annotate(&ctx, a, &vals, bom, first_scale)).collect();
+    let annotations = drawing.annotations.iter().map(|a| annotate(&ctx, a, &vals, src.bom, first_scale)).collect();
 
     // frame and title block
     let m = drawing.sheet.margin;
@@ -797,7 +1057,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
     };
     match &a.kind {
         K::Linear { view, a: ra, b: rb, kind, offset } => {
-            let (f, _) = ctx.frame(*view)?;
+            let f = ctx.frame(*view)?;
             let r1 = ctx.resolve(*view, ra)?;
             let (p1, p2) = match rb {
                 Some(rb) => (r1.point(), ctx.resolve(*view, rb)?.point()),
@@ -833,7 +1093,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             push_text(res, mid + up * 1.5, fmt_value(value), angle);
         }
         K::Ordinate { view, origin, target, axis, offset } => {
-            let (f, _) = ctx.frame(*view)?;
+            let f = ctx.frame(*view)?;
             let o = ctx.resolve(*view, origin)?.point();
             let t = ctx.resolve(*view, target)?.point();
             let (value, end, ang) = match axis {
@@ -846,7 +1106,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             push_text(res, end + dir * 1.5, fmt_value(value), ang);
         }
         K::Radius { view, circle, diameter, leader_deg } => {
-            let (f, _) = ctx.frame(*view)?;
+            let f = ctx.frame(*view)?;
             let Resolved::Circle { c, r, face_on } = ctx.resolve(*view, circle)? else {
                 return Err("radius dimension needs a circular edge".into());
             };
@@ -892,7 +1152,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             push_text(res, x + DVec2::from_angle(a0 + sgn * ang / 2.0) * (radius + 3.0), format!("{}°", fmt_value(ang.to_degrees())), 0.0);
         }
         K::Chamfer { view, edge, offset } => {
-            let (f, _) = ctx.frame(*view)?;
+            let f = ctx.frame(*view)?;
             let Resolved::Line { a: p, b: q } = ctx.resolve(*view, edge)? else {
                 return Err("chamfer callout needs a straight edge".into());
             };
@@ -920,8 +1180,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.text = s;
         }
         K::Balloon { view, body, position } => {
-            let (f, bodies) = ctx.frame(*view)?;
-            let _ = bodies;
+            let f = ctx.frame(*view)?;
             let b = ctx.regen.body_by_id(*body).ok_or("the ballooned body no longer exists")?;
             let pu = b.part.as_ref().ok_or("the ballooned body is not a library part")?;
             let row = bom
@@ -929,13 +1188,73 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
                 .position(|l| l.source == pu.part.source && l.part == pu.part.id && l.size == pu.part.size)
                 .ok_or("the part is not in the BOM")?;
             let anchor = f.sheet(b.shape().bbox().map_err(|e| e.0)?.center());
-            let r = 4.0;
-            let d = (*position - anchor).normalize_or_zero();
-            res.prims.push(line(anchor, *position - d * r, LineStyle::Thin));
-            res.prims.push(Prim::Circle { c: *position, r, style: LineStyle::Thin });
-            res.prims.push(Prim::Circle { c: anchor, r: 0.5, style: LineStyle::Thin });
-            res.value = Some((row + 1) as f64);
-            push_text(res, *position - DVec2::new(0.0, TEXT_H * 0.35), (row + 1).to_string(), 0.0);
+            balloon(res, anchor, *position, row + 1);
+        }
+        K::ItemBalloon { view, path, body, position } => {
+            let vc = ctx.view(*view)?;
+            let flat = &ctx.bom_tree.ok_or("item balloons need the assembly BOM (compute the drawing with the assembly)")?.flat;
+            let items: Vec<&ScopeItem> = vc.items.iter().filter(|i| if let Some(b) = body { i.path == *path && i.body.id == *b } else { i.path.starts_with(path) }).collect();
+            if items.is_empty() {
+                return Err("the ballooned occurrence is not shown in this view".into());
+            }
+            let (top, abs) = match &vc.view.scope {
+                Scope::Root | Scope::Assembly => (crate::assembly::ComponentId::ROOT, path.clone()),
+                Scope::Component(c) => (*c, path.clone()),
+                Scope::Occurrence(p) => (crate::assembly::ComponentId::ROOT, p.iter().chain(path).copied().collect()),
+            };
+            let part = body.and_then(|_| items[0].body.part.as_ref().map(|p| &p.part));
+            let row = ctx.data.bom_item(flat, top, &abs, part)?;
+            let f = vc.frame;
+            let mut sum = DVec2::ZERO;
+            for it in &items {
+                sum += f.sheet(it.transform.point(it.body.shape().bbox().map_err(|e| e.0)?.center()));
+            }
+            balloon(res, sum / items.len() as f64, *position, row + 1);
+        }
+        K::BomTable { position, indented } => {
+            let bt = ctx.bom_tree.ok_or("a BOM table needs the assembly BOM (compute the drawing with the assembly)")?;
+            let item_of = |r: &crate::assembly::AsmBomRow| bt.flat.iter().position(|f| f.component == r.component && (r.component.is_some() || f.kind == r.kind)).map(|i| i + 1);
+            let kind_text = |k: &crate::assembly::BomKind| match k {
+                crate::assembly::BomKind::Made { process } => process.clone(),
+                crate::assembly::BomKind::Assembly => "Assembly".into(),
+                crate::assembly::BomKind::Purchased { source, part, part_number, vendor, .. } => match (part_number, vendor) {
+                    (Some(pn), Some(v)) => format!("{v} {pn}"),
+                    (Some(pn), None) => pn.clone(),
+                    _ => format!("{source} {part}"),
+                },
+            };
+            let mut rows: Vec<[String; 4]> = vec![["Item".into(), "Qty".into(), "Name".into(), "Process / part no.".into()]];
+            if *indented {
+                for r in &bt.indented {
+                    rows.push([item_of(r).map(|i| i.to_string()).unwrap_or_default(), r.qty.to_string(), format!("{}{}", "  ".repeat(r.level), r.name), kind_text(&r.kind)]);
+                }
+            } else {
+                for (i, r) in bt.flat.iter().enumerate() {
+                    rows.push([(i + 1).to_string(), r.total.to_string(), r.name.clone(), kind_text(&r.kind)]);
+                }
+            }
+            let cols = [12.0, 12.0, 70.0, 55.0];
+            let (w, rh): (f64, f64) = (cols.iter().sum(), 6.0);
+            let p0 = *position;
+            let h = rh * rows.len() as f64;
+            res.prims.push(Prim::Polyline { pts: vec![p0, p0 + DVec2::new(w, 0.0), p0 + DVec2::new(w, -h), p0 + DVec2::new(0.0, -h), p0], style: LineStyle::Frame });
+            for i in 1..rows.len() {
+                let y = p0.y - rh * i as f64;
+                res.prims.push(line(DVec2::new(p0.x, y), DVec2::new(p0.x + w, y), LineStyle::Thin));
+            }
+            let mut cx = p0.x;
+            for (ci, cw) in cols.iter().enumerate() {
+                if ci > 0 {
+                    res.prims.push(line(DVec2::new(cx, p0.y), DVec2::new(cx, p0.y - h), LineStyle::Thin));
+                }
+                for (ri, r) in rows.iter().enumerate() {
+                    let pos = DVec2::new(cx + 1.5, p0.y - rh * (ri + 1) as f64 + 1.75);
+                    res.prims.push(Prim::Text { pos, height: 2.5, angle_deg: 0.0, text: r[ci].clone(), anchor: Anchor::Start });
+                }
+                cx += cw;
+            }
+            res.value = Some((rows.len() - 1) as f64);
+            res.text = format!("BOM ({} rows)", rows.len() - 1);
         }
         K::CenterMark { view, circle } => {
             let Resolved::Circle { c, r, face_on } = ctx.resolve(*view, circle)? else {
@@ -957,7 +1276,7 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
             res.prims.push(line(p - d * 2.0, q + d * 2.0, LineStyle::Center));
         }
         K::PartingLine { view, feature } => {
-            let (f, _) = ctx.frame(*view)?;
+            let f = ctx.frame(*view)?;
             let feat = ctx.data.feature(*feature).ok_or("the parting feature no longer exists")?;
             let (plane, off) = match &feat.kind {
                 FeatureKind::PartingJoint { plane, offset, .. } => (*plane, offset.eval(vals).map_err(|e| e.to_string())?),
@@ -986,6 +1305,17 @@ fn annotate_inner(ctx: &Ctx, a: &Annotation, vals: &Values, bom: &[BomLine], sca
         }
     }
     Ok(())
+}
+
+fn balloon(res: &mut AnnotationResult, anchor: DVec2, position: DVec2, n: usize) {
+    let r = 4.0;
+    let d = (position - anchor).normalize_or_zero();
+    res.prims.push(line(anchor, position - d * r, LineStyle::Thin));
+    res.prims.push(Prim::Circle { c: position, r, style: LineStyle::Thin });
+    res.prims.push(Prim::Circle { c: anchor, r: 0.5, style: LineStyle::Thin });
+    res.value = Some(n as f64);
+    res.prims.push(text(position - DVec2::new(0.0, TEXT_H * 0.35), &n.to_string(), 0.0, Anchor::Middle));
+    res.text = n.to_string();
 }
 
 // ---------------------------------------------------------------------------

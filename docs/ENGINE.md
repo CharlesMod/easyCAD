@@ -101,6 +101,37 @@ doc.bom(); doc.blob_refs();
   circular, over features or a body), `Mirror`, `Split`, `ImportStep` (optionally a
   reference body), and `InsertPart`. Bodies are `BodyId { feature, index }`. Split
   keeps the lower side in the original id and makes the upper side `BodyId::of(split)`.
+  - **Expression planes.** `Split`, `Draft` (neutral plane), `ScrewBoss` and
+    `StandoffsFromPcb` have `offset: Expr` (default `"0"`) moving their plane along
+    its normal, like `PartingJoint.offset` (`"lid_split"`).
+  - **Fillet / chamfer edge sets.** `Fillet { body, edges, radius, auto_reduce,
+    sets: Vec<EdgeSet { edges, size, auto_reduce }>, skipped, setback }` (Chamfer
+    the same without `setback`): `kind.edge_sets()` lists `(edges, radius,
+    auto_reduce)` (when `edges` is not empty) then `sets`, all dressed in one
+    pipeline run (`occt::dressup::dress` takes a per-edge auto-reduce; a tangent
+    chain is reduced as a whole only if every edge in it allows it). An edge in two
+    sets takes the later set. `skipped` edge selectors are left sharp
+    (`FeatureReport.skipped_edges`, " · 1 skipped" in the summary; everything
+    skipped is an error). `FeatureReport.edge_requests[outcome.request] =
+    EdgeRequest { set, selector }` maps each `DressUpReport` outcome back to the
+    request. `setback: true` is accepted but gives a warning (TODO: OCCT has no
+    setback vertex blend).
+  - **Standoffs.** `StandoffsFromPcb` gained `exclude: Vec<DVec2>` (hole centres in
+    plane coordinates, 0.5 mm match), `gussets: Option<Gussets { thickness, height
+    (default 60 % of the standoff), max_length (25) }>` (one rib per standoff to the
+    nearest wall in the plane's ±x/±y directions, found by probing the body; none
+    within reach is a warning) and `lid_holes: Option<LidHoles { body, hole_dia,
+    cbore_dia, cbore_depth }>` (coaxial clearance hole + counterbore from the outer
+    face; `body: None` cuts the material above each standoff in the target body,
+    which becomes the lid after a later parting joint).
+  - **Default fits.** `FeatureKind::default_fit(field) -> Option<Fit>` (e.g.
+    `"hole_dia"` → Hole/Snug, `"kind.width"` of a tongue → Pin).
+- **Rollback.** `DocData.rollback: Option<usize>` (saved, undoable via
+  `Document::set_rollback(Option<usize>)`, labels "Roll back to n" / "Roll
+  forward"): only the first `n` root features are computed; the others report
+  `FeatureStatus::Suppressed` with `FeatureReport.rolled_back`. `DocData::add_feature`
+  (and so `Document::add_feature`) inserts at the marker and moves it past the new
+  feature. Components ignore it (root history only).
 - `regen`: `RegenResult { bodies: Vec<Body>, reports: Vec<FeatureReport>, recomputed, reused }`.
   `Body { id, name, reference, part, geom }` exposes `shape()` and `mesh()`. The mesh
   is lazy and computed once per shape, then shared across cached states.
@@ -485,9 +516,16 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
   makes a locked component with `purchased = Some(PartRef)` and one reference body
   at its origin (+Z axis). Place it any number of times with `add_occurrence`.
 - **In-context references.** `FeatureKind::ContextRef { source: OccPath, body:
-  Option<String>, op, target, offset, reference }` brings a body of another
+  Option<String>, op, target, offset, reference, root }` brings a body of another
   occurrence into this component, resolved after the source component regenerates
-  and expressed in the frame of this component's *first* occurrence. With
+  and expressed in the frame of this component's *context occurrence*:
+  `Component.context` (an occurrence path; an invalid one is an issue) or, when
+  unset, its first occurrence depth first. **Rule:** a component is one definition,
+  so it is built once, in one frame; its other occurrences are copies of that
+  result. When a component with in-context features has several occurrences,
+  `AssemblyResult.notes` says which one it is built in ("`Lid` has in-context
+  references and 2 occurrences; it is built in the frame of `Lid:1`"). For
+  occurrences that must differ, make separate components. With
   `op = NewBody` it is a copy (`reference = true`: display only); with
   `Join/Cut/Intersect` it is a tool on `target`; `offset` (mm) offsets it first
   (clearance). Its cache key includes the source geometry and the relative
@@ -586,10 +624,44 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
   they follow every edit of the master. They are placed in the root where the
   source is; the source occurrence is hidden and `in_bom = false`.
 
+- **Scopes: drawings, export and BOM of the assembly.** `assembly::Scope::{Root,
+  Assembly, Component(id), Occurrence(path)}` names what a drawing view or an export
+  covers; `assembly::scope_items(&DocData, &AssemblyResult, &scope, exploded) ->
+  Vec<ScopeItem { path, component, body, transform }>` lists its placed bodies
+  (hidden occurrences skipped below the top; `Component`/`Occurrence` are drawn in
+  the component's own frame with paths relative to it).
+  - Drawings: `View.scope` (default `Root` = unchanged) and `View.exploded`. Views of
+    non-root scopes draw every visible body (reference/purchased bodies included)
+    with hidden lines *between* parts (one HLR of the placed compound, sources
+    matched per instance; cached per placed set). `ViewEdge.path` is the source's
+    occurrence path and `ViewEdge.reference` a ready `DimRef`
+    (`DimRef::from_view_edge(&edge)`); references to placed bodies are
+    `DimRef::Placed { path, base }` (`DimRef::placed(path, base)`), so every
+    dimension kind works on instances and follows them when they move (dangling
+    when hidden). `AnnotationKind::ItemBalloon { view, path, body, position }` is
+    numbered by the flat assembly BOM row (`DocData::bom_item`), and
+    `AnnotationKind::BomTable { position, indented }` draws the BOM table (item,
+    qty, name, process / part number). `drawing::compute_with(data,
+    &DrawingSources { regen, bom, assembly, bom_tree }, drawing, cache)`;
+    `compute` is unchanged and gives assembly views an error naming `compute_with`.
+    `Document::drawing_result` passes the assembly whenever it is needed.
+  - Export: `Document::export` now covers `Scope::Assembly` (the root's bodies and
+    every visible occurrence, placed; instance names "Bracket:1 / Plate"); a flat
+    document exports exactly as before. `Document::export_scoped(format, path,
+    opts, &scope)` for one component or occurrence; `Document::scope_bodies(&scope,
+    profile)`. With `orient_to_plate`, instances are laid out from their component
+    frame (root bodies: their own build orientation; other components: the document
+    default).
+  - BOM: `Document::bom()` counts purchased parts in every occurrence (library-part
+    bodies of `InsertPart` features and purchased components, `in_bom` honoured).
+    `DocData::bom(&AssemblyResult)` and `DocData::bom_tree(&AssemblyResult)` need no
+    `Document`; for a flat regen use `AssemblyResult::flat(regen)`.
+
 Limits (all return clean errors or are documented here): mates solve by
-propagation (a closed loop of mates is checked, not solved; no joint limits); in-context features use the frame of their component's
-first occurrence; drawings, `Document::export` and `Document::bom()` still see the
-root component only; STEP components are read-only.
+propagation (a closed loop of mates is checked, not solved; no joint limits); a
+component with in-context features is built in one occurrence's frame (see the
+rule above); `PartingLine` and the old `Balloon` refer to the root component;
+STEP components are read-only.
 
 ## File format (`.cwk`), sync-friendly
 
@@ -644,6 +716,35 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **GUI_NEEDS #1, #2, #3, #4, #6, #7 (BREAKING for struct literals).**
+  - New fields (serde-defaulted, so files load): `Split/Draft/ScrewBoss/
+    StandoffsFromPcb.offset: Expr`; `Fillet.{sets, skipped, setback}`,
+    `Chamfer.{sets, skipped}`; `StandoffsFromPcb.{exclude, gussets, lid_holes}`;
+    `DocData.rollback`. New types `feature::{EdgeSet, Gussets, LidHoles}`,
+    `regen::EdgeRequest`; `FeatureReport.{edge_requests, skipped_edges,
+    rolled_back}` and `FeatureReport::new(feature, status)`.
+  - New calls: `FeatureKind::{edge_sets, default_fit}`, `Document::set_rollback`,
+    `occt::dressup::dress`.
+  - I added the missing fields to the GUI's struct literals (`offset: 0.0.into()`,
+    `sets: Vec::new()`, ...) in `dialogs/{fillet,mod,standoffs}.rs`, `sample.rs`,
+    `wizard.rs` so the app builds, but did not commit them (those files carry the
+    GUI worker's uncommitted changes). The `adapters.rs` plane-binding adapter can
+    now write `offset` instead, and the fillet dialog's sets can become one feature.
+
+- **Assembly drawings, export, BOM (GUI_NEEDS #11, #16).** See "Scopes" under
+  Assemblies.
+  - New: `assembly::{Scope, ScopeItem, scope_items}`, `AssemblyResult::flat`,
+    `DocData::{bom, bom_tree, bom_item, component_at_from}`,
+    `Document::{export_scoped, scope_bodies}`, `drawing::{DrawingSources,
+    compute_with}`, `DimRef::{from_view_edge, placed}`, `AnnotationKind::view()`.
+  - New serde-defaulted fields: `View.{scope, exploded}`. New result fields:
+    `ViewEdge.{path, reference}`.
+  - New enum variants (exhaustive matches need arms): `DimRef::Placed`,
+    `AnnotationKind::{ItemBalloon, BomTable}`.
+  - Behaviour: `Document::export` and `Document::bom()` span the assembly when the
+    document has occurrences (flat documents unchanged). The worker's throwaway
+    `Document` for the balloon BOM can become `data.bom(&AssemblyResult::flat(result.clone()))`.
 
 - **In-context frame and linked assemblies.** New serde-defaulted fields:
   `Component.{context, owner, link_ids}`, `ContextRef.root` (add `root: None` to

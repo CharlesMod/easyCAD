@@ -120,12 +120,21 @@ impl Default for DressUpOptions {
 
 /// Robust fillet: `edges` are `(edge index on shape, radius)`.
 pub fn fillet(shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOptions) -> Result<(Shape, DressUpReport)> {
-    run(DressUpKind::Fillet, shape, edges, opts)
+    let req: Vec<(u32, f64, bool)> = edges.iter().map(|&(e, s)| (e, s, opts.auto_reduce)).collect();
+    run(DressUpKind::Fillet, shape, &req, opts)
+}
+
+/// Fillet or chamfer with a per-edge `auto_reduce`: `edges` are `(edge index,
+/// size, auto_reduce)` (`opts.auto_reduce` is ignored). A tangent chain is reduced
+/// as a whole only when every requested edge in it allows it.
+pub fn dress(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &DressUpOptions) -> Result<(Shape, DressUpReport)> {
+    run(kind, shape, edges, opts)
 }
 
 /// Robust chamfer: `edges` are `(edge index on shape, distance)`.
 pub fn chamfer(shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOptions) -> Result<(Shape, DressUpReport)> {
-    run(DressUpKind::Chamfer, shape, edges, opts)
+    let req: Vec<(u32, f64, bool)> = edges.iter().map(|&(e, s)| (e, s, opts.auto_reduce)).collect();
+    run(DressUpKind::Chamfer, shape, &req, opts)
 }
 
 /// Geometric identity of an edge that survives re-indexing.
@@ -141,6 +150,8 @@ struct Item {
     size: f64,
     /// Request index this edge stands for (`None` = chain expansion).
     request: Option<usize>,
+    /// Apply the largest workable size when the requested one fails.
+    reduce: bool,
 }
 
 const MATCH_TOL: f64 = 1e-3;
@@ -208,7 +219,7 @@ fn search_max(
     Ok(best)
 }
 
-fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOptions) -> Result<(Shape, DressUpReport)> {
+fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64, bool)], opts: &DressUpOptions) -> Result<(Shape, DressUpReport)> {
     let mut report = DressUpReport { kind, strategy: Strategy::None, healed: false, outcomes: Vec::new(), expanded_edges: 0 };
     if edges.is_empty() {
         return Ok((shape.clone(), report));
@@ -216,10 +227,10 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOpt
     let infos = shape.edges()?;
     let mut statuses: Vec<Option<EdgeStatus>> = vec![None; edges.len()];
     let mut items: Vec<Item> = Vec::new();
-    for (k, &(e, size)) in edges.iter().enumerate() {
+    for (k, &(e, size, reduce)) in edges.iter().enumerate() {
         match infos.get(e as usize) {
             Some(info) if size > 0.0 => {
-                items.push(Item { key: EdgeKey { point: info.midpoint, tangent: info.tangent }, size, request: Some(k) })
+                items.push(Item { key: EdgeKey { point: info.midpoint, tangent: info.tangent }, size, request: Some(k), reduce })
             }
             Some(_) => statuses[k] = Some(EdgeStatus::Failed { reason: "size must be positive".into(), max_size: None }),
             None => statuses[k] = Some(EdgeStatus::Failed { reason: "edge index out of range".into(), max_size: None }),
@@ -261,12 +272,12 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOpt
     }
     if opts.expand_tangent_chains {
         for (chain, group) in groups.iter_mut() {
-            let size = group[0].size;
+            let (size, reduce) = (group[0].size, group[0].reduce);
             let present: Vec<u32> =
                 group.iter().filter_map(|it| cur.match_edge(it.key.point, it.key.tangent, MATCH_TOL).ok().flatten()).collect();
             for info in &cur_infos {
                 if chains[info.index as usize] == *chain && !present.contains(&info.index) && info.faces.len() == 2 {
-                    group.push(Item { key: EdgeKey { point: info.midpoint, tangent: info.tangent }, size, request: None });
+                    group.push(Item { key: EdgeKey { point: info.midpoint, tangent: info.tangent }, size, request: None, reduce });
                     report.expanded_edges += 1;
                 }
             }
@@ -340,7 +351,7 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOpt
                 Err(_) if group.len() == 1 => {}
                 Err(_) => {
                     // 4a. Whole-chain max (reported, or applied with auto_reduce).
-                    if opts.auto_reduce {
+                    if group.iter().all(|it| it.reduce) {
                         if let Some((f, r)) = search_max(kind, &cur, &group, opts)? {
                             cur = r;
                             for it in &group {
@@ -377,7 +388,7 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOpt
                     Err(e) => e.0,
                 };
                 match search_max(kind, &cur, &[it], opts)? {
-                    Some((f, r)) if opts.auto_reduce => {
+                    Some((f, r)) if it.reduce => {
                         cur = r;
                         set_status(&mut statuses, it, EdgeStatus::AppliedReduced { requested: it.size, applied: it.size * f });
                     }
@@ -402,7 +413,7 @@ fn run(kind: DressUpKind, shape: &Shape, edges: &[(u32, f64)], opts: &DressUpOpt
         report.strategy = Strategy::None;
     }
 
-    for (k, &(e, _)) in edges.iter().enumerate() {
+    for (k, &(e, _, _)) in edges.iter().enumerate() {
         let chain = items.iter().position(|it| it.request == Some(k)).map(|i| item_chain[i]).unwrap_or(usize::MAX);
         report.outcomes.push(EdgeOutcome {
             request: k,

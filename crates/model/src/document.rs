@@ -117,6 +117,11 @@ pub struct DocData {
     /// Mates between occurrences (paths from the root).
     #[serde(default)]
     pub mates: Vec<crate::assembly::Mate>,
+    /// History rollback marker: only the first `n` root features are computed
+    /// (the rest report `rolled_back`); new features are inserted at the marker,
+    /// which moves past them. `None` = the end of the history.
+    #[serde(default)]
+    pub rollback: Option<usize>,
     pub next_id: u32,
 }
 
@@ -142,6 +147,7 @@ impl DocData {
             components: Vec::new(),
             occurrences: Vec::new(),
             mates: Vec::new(),
+            rollback: None,
             next_id: 1,
         }
     }
@@ -200,9 +206,21 @@ impl DocData {
         id
     }
 
+    /// Append a root feature, or insert it at the rollback marker (which then
+    /// moves past it).
     pub fn add_feature(&mut self, name: &str, kind: FeatureKind) -> FeatureId {
         let id = FeatureId(self.alloc());
-        self.features.push(Feature { id, name: name.into(), suppressed: false, kind });
+        let f = Feature { id, name: name.into(), suppressed: false, kind };
+        match self.rollback {
+            Some(r) if r < self.features.len() => {
+                self.features.insert(r, f);
+                self.rollback = Some(r + 1);
+            }
+            _ => {
+                self.features.push(f);
+                self.rollback = None;
+            }
+        }
         id
     }
 
@@ -452,6 +470,24 @@ impl Document {
         self.edit(&label, |d| Ok::<_, DocError>(d.add_feature(name, kind))).unwrap()
     }
 
+    /// Move the history rollback marker (undoable): `Some(n)` computes only the
+    /// first `n` root features, `None` (or `n` ≥ the feature count) rolls forward.
+    pub fn set_rollback(&mut self, at: Option<usize>) {
+        let at = at.filter(|n| *n < self.data.features.len());
+        if at == self.data.rollback {
+            return;
+        }
+        let label = match at {
+            Some(n) => format!("Roll back to {n}"),
+            None => "Roll forward".to_string(),
+        };
+        self.edit(&label, |d| {
+            d.rollback = at;
+            Ok::<_, DocError>(())
+        })
+        .unwrap()
+    }
+
     /// Import a STEP file (stored as a blob) and add an `ImportStep` feature.
     pub fn import_step(&mut self, name: &str, data: Vec<u8>, reference: bool) -> (ImportId, FeatureId) {
         let size = data.len() as u64;
@@ -558,31 +594,69 @@ impl Document {
     }
 
     /// Export solids (STL/3MF) or all bodies (STEP), optionally under another
-    /// process profile and re-oriented so each body's plate face is −Z.
+    /// process profile and re-oriented so each body's plate face is −Z. Covers the
+    /// whole assembly (`Scope::Assembly`: the root's bodies and every visible
+    /// occurrence, placed); a flat document exports its bodies as before.
     pub fn export(&mut self, format: ExportFormat, path: &Path, opts: &ExportOptions) -> Result<(), DocError> {
-        let out = match &opts.profile {
-            Some(p) => self.regenerate_with_profile(p)?,
-            None => self.regenerate().clone(),
+        self.export_scoped(format, path, opts, &crate::assembly::Scope::Assembly)
+    }
+
+    /// Placed bodies of a scope (regenerated under `profile` if given; components
+    /// with their own `process` keep it).
+    pub fn scope_bodies(&mut self, scope: &crate::assembly::Scope, profile: Option<&str>) -> Result<Vec<crate::assembly::ScopeItem>, DocError> {
+        use crate::assembly::{AssemblyResult, Scope};
+        if let Some(p) = profile {
+            if self.data.profile_named(p).is_none() {
+                return Err(DocError::Other(format!("no process profile named `{p}`")));
+            }
+        }
+        let flat = self.data.occurrences.is_empty() && matches!(scope, Scope::Root | Scope::Assembly);
+        let r = match (profile, flat) {
+            (None, true) => AssemblyResult::flat(self.regenerate().clone()),
+            (Some(p), true) => AssemblyResult::flat(self.regenerate_with_profile(p)?),
+            (None, false) => self.regenerate_assembly().clone(),
+            (Some(p), false) => {
+                let mut d = self.data.clone();
+                d.active_profile = p.into();
+                crate::assembly::regenerate_assembly(&d, &self.blobs, &self.library, &mut self.regen, &mut self.asm)
+            }
         };
-        let mut bodies: Vec<crate::regen::Body> = out
-            .bodies
-            .iter()
-            .filter(|b| match format {
-                ExportFormat::Step => opts.include_reference || !b.reference,
-                _ => !b.reference,
-            })
-            .cloned()
-            .collect();
-        if opts.orient_to_plate {
-            for b in &mut bodies {
-                let o = self.data.orientation_of(b.id);
+        crate::assembly::scope_items(&self.data, &r, scope, false).map_err(DocError::Other)
+    }
+
+    /// [`Document::export`] of one scope. Instances are named "Occ:1 / Sub:2 /
+    /// Body". With `orient_to_plate`, each instance is printed from its component
+    /// frame: root bodies use their own build orientation, other components the
+    /// document default.
+    pub fn export_scoped(&mut self, format: ExportFormat, path: &Path, opts: &ExportOptions, scope: &crate::assembly::Scope) -> Result<(), DocError> {
+        let items = self.scope_bodies(scope, opts.profile.as_deref())?;
+        let mut bodies: Vec<crate::regen::Body> = Vec::new();
+        for it in items {
+            let keep = match format {
+                ExportFormat::Step => opts.include_reference || !it.body.reference,
+                _ => !it.body.reference,
+            };
+            if !keep {
+                continue;
+            }
+            let mut b = it.body.clone();
+            if !it.path.is_empty() {
+                let mut names: Vec<String> = it.path.iter().filter_map(|o| self.data.occurrence(*o).map(|o| o.name.clone())).collect();
+                names.push(b.name.clone());
+                b.name = names.join(" / ");
+            }
+            if opts.orient_to_plate {
+                let o = if it.component == crate::assembly::ComponentId::ROOT { self.data.orientation_of(b.id) } else { self.data.build_orientation };
                 let (axis, angle) = o.quat().to_axis_angle();
                 let mut s = if angle.abs() > 1e-12 { b.shape().rotated(glam::DVec3::ZERO, axis, angle.to_degrees()) } else { Ok(b.shape().clone()) }
                     .map_err(|e| DocError::Other(e.to_string()))?;
                 let bb = s.bbox().map_err(|e| DocError::Other(e.to_string()))?;
                 s = s.translated(glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(|e| DocError::Other(e.to_string()))?;
                 b.geom = crate::regen::BodyGeom::new(s);
+            } else if !it.transform.is_identity() {
+                b.geom = crate::regen::BodyGeom::new(it.placed_shape().map_err(|e| DocError::Other(e.to_string()))?);
             }
+            bodies.push(b);
         }
         let refs: Vec<&crate::regen::Body> = bodies.iter().collect();
         let r = match format {
@@ -613,7 +687,14 @@ impl Document {
         let drawing = self.data.drawing(id).cloned().ok_or_else(|| DocError::Other("no such drawing".into()))?;
         let regen = self.regenerate().clone();
         let bom = self.bom();
-        Ok(crate::drawing::compute(&self.data, &regen, &bom, &drawing, &mut self.drawing_cache))
+        use crate::drawing::AnnotationKind as K;
+        let asm_needed = !self.data.occurrences.is_empty()
+            || drawing.views.iter().any(|v| v.scope != crate::assembly::Scope::Root)
+            || drawing.annotations.iter().any(|a| matches!(a.kind, K::ItemBalloon { .. } | K::BomTable { .. }));
+        let asm = if asm_needed { Some(self.regenerate_assembly().clone()) } else { None };
+        let tree = asm.as_ref().map(|a| self.data.bom_tree(a));
+        let src = crate::drawing::DrawingSources { regen: &regen, bom: &bom, assembly: asm.as_ref(), bom_tree: tree.as_ref() };
+        Ok(crate::drawing::compute_with(&self.data, &src, &drawing, &mut self.drawing_cache))
     }
 
     /// Export a drawing as SVG, DXF or PDF (by extension of `path`).
@@ -668,29 +749,16 @@ impl Document {
         &mut self.regen
     }
 
-    /// Bill of materials: one line per (part, size), counting every placed part
-    /// body in the regenerated model (so patterned/mirrored parts are included).
+    /// Bill of materials of purchased parts: one line per (part, size), counting
+    /// every placed part body (so patterned/mirrored parts are included) in every
+    /// occurrence of the assembly, plus purchased components. See [`DocData::bom`].
     pub fn bom(&mut self) -> Vec<BomLine> {
-        let bodies = self.regenerate().bodies.clone();
-        let mut lines: Vec<BomLine> = Vec::new();
-        for b in &bodies {
-            let Some(pu) = &b.part else { continue };
-            let part = &pu.part;
-            match lines.iter_mut().find(|l| l.source == part.source && l.part == part.id && l.size == part.size) {
-                Some(l) => l.qty += 1,
-                None => lines.push(BomLine {
-                    source: part.source.clone(),
-                    part: part.id.clone(),
-                    name: part.name.clone(),
-                    size: part.size.clone(),
-                    qty: 1,
-                    vendor: part.vendor.clone(),
-                    part_number: part.part_number.clone(),
-                }),
-            }
+        if self.data.occurrences.is_empty() {
+            let r = crate::assembly::AssemblyResult::flat(self.regenerate().clone());
+            return self.data.bom(&r);
         }
-        lines.sort_by(|a, b| (&a.name, &a.size).cmp(&(&b.name, &b.size)));
-        lines
+        let r = self.regenerate_assembly().clone();
+        self.data.bom(&r)
     }
 
     // ---------------------------------------------------------------- persistence

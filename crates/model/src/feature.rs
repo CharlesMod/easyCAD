@@ -151,6 +151,8 @@ pub enum FeatureKind {
         #[serde(default)]
         target: Option<BodyId>,
     },
+    /// Edge sets: `(edges, radius, auto_reduce)` (when `edges` is not empty) followed
+    /// by `sets`, each with its own radius; see [`FeatureKind::edge_sets`].
     Fillet {
         #[serde(default)]
         body: Option<BodyId>,
@@ -159,6 +161,15 @@ pub enum FeatureKind {
         /// Apply the largest workable radius on edges that refuse the requested one.
         #[serde(default)]
         auto_reduce: bool,
+        /// More edge sets, each with its own radius.
+        #[serde(default)]
+        sets: Vec<EdgeSet>,
+        /// Edges the user chose to skip (left sharp, listed in the report).
+        #[serde(default)]
+        skipped: Vec<EdgeSelector>,
+        /// Setback (smooth) vertex blends where three or more filleted edges meet.
+        #[serde(default)]
+        setback: bool,
     },
     Chamfer {
         #[serde(default)]
@@ -167,6 +178,10 @@ pub enum FeatureKind {
         distance: Expr,
         #[serde(default)]
         auto_reduce: bool,
+        #[serde(default)]
+        sets: Vec<EdgeSet>,
+        #[serde(default)]
+        skipped: Vec<EdgeSelector>,
     },
     Shell {
         #[serde(default)]
@@ -183,6 +198,9 @@ pub enum FeatureKind {
         neutral: Plane,
         pull: DVec3,
         angle_deg: Expr,
+        /// Moves `neutral` along its normal (param expression).
+        #[serde(default = "zero")]
+        offset: Expr,
     },
     /// Thin wall grown from the sketch's open chains along the sketch normal.
     Rib {
@@ -215,6 +233,9 @@ pub enum FeatureKind {
         base_fillet: Expr,
         #[serde(default = "zero")]
         draft_deg: Expr,
+        /// Moves `plane` along its normal (param expression).
+        #[serde(default = "zero")]
+        offset: Expr,
     },
     StandoffsFromPcb {
         #[serde(default)]
@@ -228,6 +249,20 @@ pub enum FeatureKind {
         base_fillet: Expr,
         #[serde(default = "zero")]
         draft_deg: Expr,
+        /// Moves `plane` along its normal (param expression).
+        #[serde(default = "zero")]
+        offset: Expr,
+        /// Board holes left without a standoff: hole centres in plane coordinates
+        /// (after the source offset), matched within 0.5 mm.
+        #[serde(default)]
+        exclude: Vec<DVec2>,
+        /// Ribs from each standoff to the nearest wall of the body.
+        #[serde(default)]
+        gussets: Option<Gussets>,
+        /// Matching holes through another body (the lid), counterbored for the
+        /// screw head, coaxial with each standoff.
+        #[serde(default)]
+        lid_holes: Option<LidHoles>,
     },
     Pattern {
         source: PatternSource,
@@ -244,6 +279,9 @@ pub enum FeatureKind {
         body: Option<BodyId>,
         plane: Plane,
         new_name: String,
+        /// Moves `plane` along its normal (param expression, e.g. `"lid_split"`).
+        #[serde(default = "zero")]
+        offset: Expr,
     },
     /// Split a (shelled) body at a plane into two halves with a mating joint.
     /// The body keeps the lower half; the upper half becomes `BodyId::of(feature)`.
@@ -319,6 +357,46 @@ pub enum FeatureKind {
 fn zero() -> Expr {
     Expr::new("0")
 }
+
+/// One set of edges with its own size (fillet radius / chamfer distance).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeSet {
+    pub edges: Vec<EdgeSelector>,
+    pub size: Expr,
+    #[serde(default)]
+    pub auto_reduce: bool,
+}
+
+/// Gusset ribs from a standoff to the nearest wall.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Gussets {
+    pub thickness: Expr,
+    /// Height up the standoff (from the plane); `None` = 60 % of the standoff height.
+    #[serde(default)]
+    pub height: Option<Expr>,
+    /// Longest gusset (mm from the standoff axis); walls farther away get none.
+    #[serde(default = "gusset_reach")]
+    pub max_length: Expr,
+}
+
+fn gusset_reach() -> Expr {
+    Expr::new("25")
+}
+
+/// Counterbored screw holes through the lid, coaxial with the standoffs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LidHoles {
+    /// The lid body if it already exists at this point of the history; `None`
+    /// (usual: standoffs come before the parting joint) cuts the material above
+    /// each standoff in the target body, so the holes end up in the lid after the
+    /// split.
+    #[serde(default)]
+    pub body: Option<BodyId>,
+    /// Clearance hole (default fit Hole/Snug).
+    pub hole_dia: Expr,
+    pub cbore_dia: Expr,
+    pub cbore_depth: Expr,
+}
 fn slide() -> crate::process::FitClass {
     crate::process::FitClass::Slide
 }
@@ -336,6 +414,51 @@ pub struct Feature {
 }
 
 impl FeatureKind {
+    /// Fillet/chamfer edge sets in order: `(edges, radius/distance, auto_reduce)`
+    /// first when `edges` is not empty, then `sets`. Empty for other features.
+    /// `FeatureReport.edge_requests[k].set` indexes this list.
+    pub fn edge_sets(&self) -> Vec<EdgeSet> {
+        let (edges, size, auto_reduce, sets) = match self {
+            FeatureKind::Fillet { edges, radius, auto_reduce, sets, .. } => (edges, radius, auto_reduce, sets),
+            FeatureKind::Chamfer { edges, distance, auto_reduce, sets, .. } => (edges, distance, auto_reduce, sets),
+            _ => return Vec::new(),
+        };
+        let mut v = Vec::new();
+        if !edges.is_empty() {
+            v.push(EdgeSet { edges: edges.clone(), size: size.clone(), auto_reduce: *auto_reduce });
+        }
+        v.extend(sets.iter().cloned());
+        v
+    }
+
+    /// The fit a dimension field gets when its expression carries none
+    /// (GUI_NEEDS #6). Field names are the struct field names; joint fields are
+    /// `kind.<field>` (e.g. `kind.width`), `compression_rib.width`, and
+    /// `auto_hole` / `lid_holes.hole_dia`.
+    pub fn default_fit(&self, field: &str) -> Option<crate::process::Fit> {
+        use crate::joint::JointKind as J;
+        use crate::process::{Fit, FitClass};
+        match (self, field) {
+            (FeatureKind::ScrewBoss { .. } | FeatureKind::StandoffsFromPcb { .. }, "hole_dia") => Some(Fit::hole(FitClass::Snug)),
+            (FeatureKind::StandoffsFromPcb { .. }, "lid_holes.hole_dia") => Some(Fit::hole(FitClass::Snug)),
+            (FeatureKind::InsertPart { .. }, "auto_hole") => Some(Fit::hole(FitClass::Snug)),
+            (FeatureKind::PartingJoint { kind, class, .. }, f) => {
+                let c = *class;
+                match (kind, f.strip_prefix("kind.").unwrap_or(f)) {
+                    (J::TongueGroove { .. } | J::Lip { .. }, "width") => Some(Fit::pin(c)),
+                    (J::TongueGroove { .. }, "extra_depth") => Some(Fit::gap(c)),
+                    (J::TongueGroove { .. } | J::Lip { .. }, "groove" | "recess") => Some(Fit::hole(c)),
+                    (J::ORingGland { .. }, "width" | "depth") => Some(Fit::hole(c)),
+                    (J::ORingGland { .. }, "compression_rib.width") => Some(Fit::pin(c)),
+                    (J::SnapFit { .. }, "undercut") => Some(Fit::pin(c)),
+                    (J::SnapFit { .. }, "clearance") => Some(Fit::gap(c)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Short type label for the timeline.
     pub fn label(&self) -> &'static str {
         match self {

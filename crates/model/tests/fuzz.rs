@@ -117,6 +117,7 @@ fn random_enclosures_never_crash_and_stay_valid() {
                     hole_depth: None,
                     base_fillet: rng.f(0.0, 1.5).into(),
                     draft_deg: rng.f(0.0, 2.0).into(),
+                    offset: 0.0.into(),
                 },
             );
         }
