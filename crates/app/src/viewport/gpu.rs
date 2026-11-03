@@ -100,6 +100,8 @@ struct DrawUniform {
 
 struct GpuMesh {
     _keep: Arc<Mesh>,
+    /// The vertex colours baked into `vbuf` (held so the key's pointer stays unique).
+    _colors: Option<Arc<Vec<[f32; 3]>>>,
     vbuf: wgpu::Buffer,
     ibuf: wgpu::Buffer,
     index_count: u32,
@@ -143,7 +145,9 @@ pub struct ViewportGpu {
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    meshes: HashMap<usize, GpuMesh>,
+    /// Uploaded meshes by (mesh, vertex colours) identity: one mesh can be drawn
+    /// with several colour sets (the overhang heat map, per placed instance).
+    meshes: HashMap<MeshKey, GpuMesh>,
     target: Option<Target>,
     frame: u64,
     /// The frame the offscreen image holds. Kept alive so its mesh pointers
@@ -222,8 +226,10 @@ impl Timer {
     }
 }
 
-fn key(m: &Arc<Mesh>) -> usize {
-    Arc::as_ptr(m) as usize
+type MeshKey = (usize, usize);
+
+fn key(m: &Arc<Mesh>, colors: Option<&Arc<Vec<[f32; 3]>>>) -> MeshKey {
+    (Arc::as_ptr(m) as usize, colors.map(|c| Arc::as_ptr(c) as usize).unwrap_or(0))
 }
 
 impl ViewportGpu {
@@ -538,13 +544,22 @@ impl ViewportGpu {
         self.meshes.len()
     }
 
+    /// An upload of this mesh, the uncoloured one first.
+    fn any_key(&self, m: &Arc<Mesh>) -> Option<MeshKey> {
+        let p = Arc::as_ptr(m) as usize;
+        if self.meshes.contains_key(&(p, 0)) {
+            return Some((p, 0));
+        }
+        self.meshes.keys().find(|k| k.0 == p).copied()
+    }
+
     fn upload(
         &mut self,
         device: &wgpu::Device,
         m: &Arc<Mesh>,
         colors: Option<&Arc<Vec<[f32; 3]>>>,
     ) {
-        let k = key(m);
+        let k = key(m, colors);
         if let Some(g) = self.meshes.get_mut(&k) {
             g.last_used = self.frame;
             return;
@@ -609,6 +624,7 @@ impl ViewportGpu {
             k,
             GpuMesh {
                 _keep: m.clone(),
+                _colors: colors.cloned(),
                 vbuf,
                 ibuf,
                 index_count: idx.len() as u32,
@@ -743,7 +759,11 @@ impl ViewportGpu {
             self.upload(device, &b.mesh, b.colors.as_ref());
         }
         for h in &f.highlights {
-            self.upload(device, &h.mesh, None);
+            // highlights draw face ranges: any upload of the mesh will do
+            match self.any_key(&h.mesh) {
+                Some(k) => self.meshes.get_mut(&k).expect("listed").last_used = self.frame,
+                None => self.upload(device, &h.mesh, None),
+            }
         }
         // evict meshes unused for a while (keeps undo/redo flips cheap)
         let frame = self.frame;
@@ -780,7 +800,7 @@ impl ViewportGpu {
             Lines,
             Grid,
         }
-        let mut list: Vec<(P, usize, What, DrawUniform)> = Vec::new();
+        let mut list: Vec<(P, MeshKey, What, DrawUniform)> = Vec::new();
         let u = |c: [f32; 4], lit: f32, m: &Mat4| DrawUniform {
             color: c,
             params: [lit, 0.0, 0.0, 0.0],
@@ -805,13 +825,13 @@ impl ViewportGpu {
         let shown: Vec<&DrawBody> = f
             .bodies
             .iter()
-            .filter(|b| self.meshes.get(&key(&b.mesh)).is_none_or(|g| in_view(g.bounds, f.view_proj * b.model)))
+            .filter(|b| self.meshes.get(&key(&b.mesh, b.colors.as_ref())).is_none_or(|g| in_view(g.bounds, f.view_proj * b.model)))
             .collect();
         for b in shown.iter().copied().filter(|b| !b.translucent) {
             if wire {
                 continue;
             }
-            list.push((P::Opaque, key(&b.mesh), What::All, ub(b, b.color, 1.0)));
+            list.push((P::Opaque, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, b.color, 1.0)));
         }
         if f.mode != DisplayMode::Shaded {
             let ec = if wire {
@@ -825,23 +845,23 @@ impl ViewportGpu {
                 } else {
                     ec
                 };
-                list.push((P::Lines, key(&b.mesh), What::Edges, ub(b, c, 0.0)));
+                list.push((P::Lines, key(&b.mesh, b.colors.as_ref()), What::Edges, ub(b, c, 0.0)));
             }
         }
         if f.grid.is_some() {
-            list.push((P::Grid, 0, What::Grid, u([0.0; 4], 0.0, &Mat4::IDENTITY)));
+            list.push((P::Grid, (0, 0), What::Grid, u([0.0; 4], 0.0, &Mat4::IDENTITY)));
         }
         for b in shown.iter().copied() {
             if b.translucent {
-                list.push((P::Blend, key(&b.mesh), What::All, ub(b, b.color, 0.6)));
+                list.push((P::Blend, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, b.color, 0.6)));
             } else if wire {
                 let mut c = b.color;
                 c[3] = 0.06;
-                list.push((P::Blend, key(&b.mesh), What::All, ub(b, c, 0.0)));
+                list.push((P::Blend, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, c, 0.0)));
             }
         }
         for h in &f.highlights {
-            if let Some(g) = self.meshes.get(&key(&h.mesh)) {
+            if let Some((hk, g)) = self.any_key(&h.mesh).and_then(|k| Some((k, self.meshes.get(&k)?))) {
                 let range = if h.face == u32::MAX {
                     Some((0, g.index_count))
                 } else {
@@ -849,7 +869,7 @@ impl ViewportGpu {
                 };
                 if let Some((s, n)) = range {
                     let p = if h.xray { P::Xray } else { P::Blend };
-                    list.push((p, key(&h.mesh), What::Face(s, n), u(h.color, 0.0, &h.model)));
+                    list.push((p, hk, What::Face(s, n), u(h.color, 0.0, &h.model)));
                 }
             }
         }

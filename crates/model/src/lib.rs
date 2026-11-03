@@ -11,6 +11,7 @@ pub mod feature;
 pub mod geom;
 pub mod joint;
 pub mod library;
+pub mod overhang;
 pub mod params;
 pub mod pick;
 pub mod process;

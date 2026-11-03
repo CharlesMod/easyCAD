@@ -366,6 +366,17 @@ clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) o
   stage is skipped entirely for profiles with teardrops disabled (molded, SLA), and
   changing orientation re-runs only this stage.
 - `Document::export(ExportFormat::{Stl, ThreeMf, Step}, path, &ExportOptions { profile, orient_to_plate, include_reference })`.
+- Overhang analysis (`overhang`): `analyze(&Mesh, up, critical_deg, plate)` (or
+  `Body::overhang(up, critical_deg, q)`) gives an `OverhangReport` with one
+  `FaceOverhang { max_angle, class, area, overhang_area, support_area, on_plate }` per
+  face, totals, and per-vertex angles for a heat map. Angles are from vertical (0° a
+  wall or up-facing, 90° a ceiling); `OverhangClass::{Ok, Overhang, Support}` splits
+  at `WALL_TOL_DEG` (0.5°) and the critical angle,
+  `ProcessProfile::critical_overhang_deg()` (FDM 45°, SLA 60°, SLS 90° = never,
+  molded / CNC 45° for display). Each triangle counts its area by its own normal,
+  so a curved face reports how much of it needs support (a lying cylinder: a
+  quarter); a face's class is the worst its area has. Triangles in the lowest plane
+  facing down rest on the plate (`plate: None` = the body's lowest point) and are `Ok`.
 - `process::calibration_coupon(nominal, offsets)` builds a plate of
   `nominal + offset` holes plus nominal pins, with index notches. Default offsets
   run −0.10…+0.50 in 0.05 steps. Feed the results to

@@ -22,6 +22,7 @@ pub mod ui_drawing;
 pub mod ui_gizmo;
 pub mod ui_interference;
 pub mod ui_mates;
+pub mod ui_overhang;
 pub mod ui_main;
 pub mod ui_parts;
 pub mod ui_process;

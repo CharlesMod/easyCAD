@@ -143,6 +143,8 @@ pub struct EasyCadApp {
     pub section: Option<SectionUi>,
     /// Bounds of the uncut model, for placing the section plane.
     pub section_bbox: Option<easycad_model::occt::BBox>,
+    /// Overhang heat map (view toolbar).
+    pub overhang: crate::ui_overhang::OverhangUi,
     /// Google Drive sync (inert unless the binary starts it).
     pub cloud: crate::cloud::Cloud,
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
@@ -243,6 +245,7 @@ impl EasyCadApp {
             asm_explode_rect: None,
             section: None,
             section_bbox: None,
+            overhang: Default::default(),
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             bench_start: None,

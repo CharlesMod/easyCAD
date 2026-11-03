@@ -30,7 +30,9 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] **[eng]** Fillet/chamfer fuzz: random edge sets × radii on realistic enclosures; histogram
       applied / reduced / skipped / bailed; fix the "bailed" and wrongly "skipped" (vertex blends,
       sliver faces, cross-feature fillets).
-- [ ] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
+- [x] **[eng]** Overhang analysis (per-face, against build orientation) and **[ui]** a heatmap toggle.
+      `model::overhang` (per-triangle areas, so curved faces report a share; plate faces are ok;
+      critical angle from the process kind), view toolbar *Overhang* with legend and ±X/±Y/±Z picker.
 
 ## 4. App work still open
 - [ ] **[ui]** Assemblies in drawings: scope picker (assembly / component / occurrence), BOM table, balloons.
