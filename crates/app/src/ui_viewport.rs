@@ -177,7 +177,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
             } else {
                 EdgeTolerance::perspective(5.0, app.camera.fov_y, size.y)
             };
-            let hits = m.picker.pick_all(o, d, tol);
+            let hits = m.pick_all(o, d, tol, &|_| false);
             let facts = Facts { m, app };
             let c = candidates(&hits, filter, &facts);
             if app.hover_pos.is_none_or(|h| h.distance(p) > 3.0) {
@@ -203,9 +203,12 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
         }
     }
 
+    // ------------------------------------------------ move gizmo
+    let gizmo_owns = crate::ui_gizmo::gizmo(app, ui, rect, &resp);
+
     // ------------------------------------------------ click selection
     let mut popover_click = None;
-    if resp.clicked_by(egui::PointerButton::Primary) {
+    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns {
         let cur = app.stack.current().map(|c| c.key);
         select(app, cur, mods.command || mods.shift);
     }
@@ -315,6 +318,9 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
     }
     joint_plane_overlay(app, ui, rect);
     dialog_overlay(app, ui, rect);
+    crate::ui_mates::glyphs(app, ui, rect);
+    crate::ui_mates::mate_card(app, ui, rect);
+    crate::ui_interference::card(app, ui, rect);
     crate::ui_welcome::welcome(app, ui, rect);
     if let Some(mut ex) = app.export.take() {
         let r = Rect::from_center_size(rect.center(), vec2(370.0, 240.0));
@@ -354,11 +360,32 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
 
 fn select(app: &mut CaseworkApp, key: Option<PickKey>, additive: bool) {
     let model = app.model.clone();
+    if app.asm.mate.is_some() {
+        if let Some(k) = key {
+            app.mate_pick(k);
+        }
+        return;
+    }
     if let (Some(d), Some(k)) = (&mut app.dialog, key) {
         if d.on_pick(k, model.as_deref()) {
             app.request_preview();
             return;
         }
+    }
+    // a placed body of another occurrence selects that occurrence (one level
+    // below the component being edited)
+    let occ = key.and_then(|k| {
+        let m = model.as_deref()?;
+        let c = m.ctx_body(k.body)?;
+        let n = (app.active.len() + 1).min(c.path.len());
+        Some(c.path[..n].to_vec())
+    });
+    if let Some(p) = occ {
+        if !(additive && app.asm.sel.as_ref() == Some(&p)) {
+            app.asm.sel = Some(p);
+        }
+    } else if !additive {
+        app.asm.sel = None;
     }
     match key {
         Some(k) => {
@@ -383,6 +410,22 @@ fn select(app: &mut CaseworkApp, key: Option<PickKey>, additive: bool) {
 
 fn mesh_of(m: &Output, b: casework_model::feature::BodyId) -> Option<&Arc<Mesh>> {
     m.mesh(b)
+}
+
+pub fn to_mat4(a: glam::DAffine3) -> glam::Mat4 {
+    glam::DMat4::from(a).as_mat4()
+}
+
+fn tp(xf: &glam::DAffine3, p: [f32; 3]) -> Vec3 {
+    xf.transform_point3(Vec3::from_array(p).as_dvec3()).as_vec3()
+}
+
+/// Model matrix of a body in the current frame (drags and explode included).
+fn body_model(app: &CaseworkApp, m: &Output, b: casework_model::feature::BodyId) -> glam::Mat4 {
+    match m.ctx_body(b) {
+        Some(c) => to_mat4(crate::ui_assembly::display_xf(app, c)),
+        None => glam::Mat4::IDENTITY,
+    }
 }
 
 /// The upper half created by the previewed joint, if the preview is a joint.
@@ -453,9 +496,35 @@ fn build_frame(
                 color,
                 translucent: b.body.reference,
                 colors: b.colors.clone(),
-                offset,
+                model: glam::Mat4::from_translation(offset),
             });
         }
+    }
+    // assemblies: the other occurrences (dimmed while a component is being edited)
+    let dim = shown.asm.as_ref().is_some_and(|a| !a.active.is_empty());
+    for c in &shown.ctx {
+        if !app.body_visible(c.key) {
+            continue;
+        }
+        let Some(m) = &c.mb.mesh else { continue };
+        let b = &c.mb.body;
+        let mut color = body_color(b.reference, b.part.is_some());
+        if c.mb.colors.is_some() {
+            color = [1.0, 1.0, 1.0, if b.reference { 0.6 } else { 1.0 }];
+        }
+        if let Some(t) = crate::ui_assembly::body_tint(app, c) {
+            color = t;
+        }
+        if dim {
+            color[3] = if b.reference { 0.12 } else { 0.3 };
+        }
+        bodies.push(DrawBody {
+            mesh: m.clone(),
+            color,
+            translucent: b.reference || dim,
+            colors: c.mb.colors.clone(),
+            model: to_mat4(crate::ui_assembly::display_xf(app, c)),
+        });
     }
     let mut highlights = Vec::new();
     if let Some(m) = model {
@@ -469,15 +538,17 @@ fn build_frame(
                     PickKind::Face(f) => {
                         // a selected face behind other geometry (picked through the
                         // stack) is drawn x-ray, or the selection would be invisible
+                        let xf = m.xf(k.body);
                         let hidden = m
                             .meshed(k.body)
                             .and_then(|b| b.faces.get(f as usize))
-                            .is_some_and(|info| !point_visible(app, m, info.point.as_vec3()));
+                            .is_some_and(|info| !point_visible(app, m, xf.transform_point3(info.point).as_vec3()));
                         highlights.push(FaceHighlight {
                             mesh: mesh.clone(),
                             face: f,
                             color: SELECT_COLOR,
                             xray: hidden,
+                            model: body_model(app, m, k.body),
                         })
                     }
                     PickKind::Body => highlights.push(FaceHighlight {
@@ -485,6 +556,7 @@ fn build_frame(
                         face: u32::MAX,
                         color: [0.30, 0.61, 1.0, 0.22],
                         xray: false,
+                        model: body_model(app, m, k.body),
                     }),
                     PickKind::Edge(_) => {}
                 }
@@ -500,12 +572,14 @@ fn build_frame(
                         face: f,
                         color,
                         xray: hidden,
+                        model: body_model(app, m, c.key.body),
                     }),
                     PickKind::Body => highlights.push(FaceHighlight {
                         mesh: mesh.clone(),
                         face: u32::MAX,
                         color: [0.94, 0.53, 0.24, 0.30],
                         xray: hidden,
+                        model: body_model(app, m, c.key.body),
                     }),
                     PickKind::Edge(_) => {}
                 }
@@ -553,7 +627,7 @@ pub fn point_visible(app: &CaseworkApp, m: &Output, p: Vec3) -> bool {
         (cam.eye(), v.normalize(), v.length())
     };
     let eps = 0.03_f32.max(dist * 2e-3);
-    let hits = m.picker.pick_all(o, d, EdgeTolerance::ortho(0.0));
+    let hits = m.pick_all(o, d, EdgeTolerance::ortho(0.0), &|_| false);
     !hits.iter().any(|h| {
         matches!(h.kind, casework_model::pick::HitKind::Face(_))
             && h.t < dist - eps
@@ -575,6 +649,10 @@ fn draw_edge(
     depth_test: bool,
 ) {
     let Some(mesh) = m.mesh(body) else { return };
+    let xf = match m.ctx_body(body) {
+        Some(c) => crate::ui_assembly::display_xf(app, c),
+        None => glam::DAffine3::IDENTITY,
+    };
     let size = Vec2::new(rect.width(), rect.height());
     let to_screen = |q: Vec3| {
         app.camera
@@ -585,7 +663,7 @@ fn draw_edge(
         // sample the polyline finely enough that partly hidden segments split correctly
         let mut samples: Vec<Vec3> = Vec::new();
         for w2 in pl.points.windows(2) {
-            let (a, b) = (Vec3::from_array(w2[0]), Vec3::from_array(w2[1]));
+            let (a, b) = (tp(&xf, w2[0]), tp(&xf, w2[1]));
             let len_px = match (to_screen(a), to_screen(b)) {
                 (Some(x), Some(y)) => x.distance(y),
                 _ => 0.0,
@@ -600,7 +678,7 @@ fn draw_edge(
             }
         }
         if let Some(last) = pl.points.last() {
-            samples.push(Vec3::from_array(*last));
+            samples.push(tp(&xf, *last));
         }
         let mut run: Vec<Pos2> = Vec::new();
         for q in samples {
@@ -673,7 +751,8 @@ fn filter_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
 }
 
 fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
-    let w = 380.0;
+    let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
+    let w = if asm { 560.0 } else { 380.0 };
     let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 54.0);
     egui::Area::new(egui::Id::unique("display"))
         .order(egui::Order::Middle)
@@ -698,6 +777,27 @@ fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                         r.y_range(),
                         Stroke::new(1.0, theme::BORDER_CARD),
                     );
+                    if asm {
+                        let on = app.asm.explode_open || app.explode > 0.0;
+                        if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
+                            app.asm.explode_open = !on;
+                            if on {
+                                app.explode = 0.0;
+                                app.request_model();
+                            }
+                        }
+                        if on {
+                            let mut v = app.explode;
+                            let r = ui.add_sized(vec2(110.0, 22.0), egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+                            app.asm_explode_rect = Some(r.rect);
+                            if r.changed() {
+                                app.explode = v;
+                                app.request_model();
+                            }
+                        }
+                        let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
+                        ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_CARD));
+                    }
                     for (m, label, key) in [
                         (DisplayMode::Shaded, "Shaded", "1"),
                         (DisplayMode::ShadedEdges, "Shaded + edges", "2"),
@@ -830,7 +930,7 @@ fn joint_plane_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     let Some(bb) = app.model.as_ref().and_then(|m| m.bbox) else {
         return;
     };
-    let vals = crate::adapters::values(&app.doc.data);
+    let vals = crate::adapters::values(app.view());
     let size = Vec2::new(rect.width(), rect.height());
     let cam = app.camera.clone();
     let Some(d) = app.dialog.as_mut() else { return };
@@ -940,16 +1040,10 @@ fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     let Some(mut d) = app.dialog.take() else {
         return;
     };
-    let vals = crate::adapters::values(&app.doc.data);
-    let names: Vec<String> = app
-        .doc
-        .data
-        .params
-        .list
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
-    let profile = app.doc.data.profile();
+    let view = app.view().clone();
+    let vals = crate::adapters::values(&view);
+    let names: Vec<String> = view.params.list.iter().map(|p| p.name.clone()).collect();
+    let profile = view.profile();
     let model = app.model.clone();
     let preview = app.preview.clone();
     let regenerating =
@@ -970,7 +1064,7 @@ fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                         names: &names,
                         profile: &profile,
                     },
-                    data: &app.doc.data,
+                    data: &view,
                     model: model.as_deref(),
                     preview: preview.as_deref(),
                     regenerating,

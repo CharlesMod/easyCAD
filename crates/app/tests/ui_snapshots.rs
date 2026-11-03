@@ -558,3 +558,131 @@ fn welcome_and_pcb_wizard() {
     assert_viewport_rendered(&img, h.state().viewport_rect);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The wizard's assembly from the sample STEP board.
+fn wizard_assembly() -> casework_model::document::Document {
+    let dir = std::env::temp_dir().join(format!("casework-asm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let step = dir.join("sensor-node.step");
+    std::fs::write(&step, casework_app::sample::pcb_step()).unwrap();
+    let board = casework_app::wizard::Board::read(&step).unwrap();
+    let s = casework_app::wizard::Settings::new("FDM 0.4 generic");
+    let doc = casework_app::wizard::build(&board, &s).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    doc
+}
+
+fn occ_path(app: &CaseworkApp, name: &str) -> Vec<casework_model::assembly::OccurrenceId> {
+    app.doc
+        .data
+        .all_occurrences()
+        .into_iter()
+        .find(|(_, o, _)| o.name == name)
+        .unwrap_or_else(|| panic!("no occurrence {name}"))
+        .0
+}
+
+/// A straight edge along X on an occurrence's front face (y min), at its top or
+/// bottom: the hinge line of the wizard's box.
+fn front_edge(app: &CaseworkApp, name: &str, top: bool) -> PickKey {
+    let path = occ_path(app, name);
+    let m = app.model.as_ref().unwrap();
+    let mut best: Option<(f64, PickKey)> = None;
+    for c in m.ctx.iter().filter(|c| c.path == path && !c.mb.body.reference) {
+        for e in &c.mb.edges {
+            if e.kind != casework_model::occt::CurveKind::Line || e.tangent.x.abs() < 0.99 || e.length < 20.0 {
+                continue;
+            }
+            let p = c.xf.transform_point3(e.midpoint);
+            let score = -p.y * 1000.0 + if top { p.z } else { -p.z };
+            if best.as_ref().is_none_or(|b| score > b.0) {
+                best = Some((score, PickKey { body: c.key, kind: PickKind::Edge(e.index) }));
+            }
+        }
+    }
+    best.expect("front edge").1
+}
+
+#[test]
+fn assembly_tree_active_mates_explode() {
+    let _serial = serial();
+    let mut h = harness(wizard_assembly());
+    {
+        let app = h.state();
+        let m = app.model.as_ref().expect("model");
+        let a = m.asm.as_ref().expect("assembly output");
+        assert!(a.result.errors().is_empty(), "{:?}", a.result.errors());
+        assert!(m.ctx.len() >= 3, "Base, Lid and the board are placed: {}", m.ctx.len());
+    }
+    // the tree: select the Lid occurrence
+    let lid = occ_path(h.state(), "Lid:1");
+    h.state_mut().select_occurrence(Some(lid.clone()), false);
+    h.run_steps(3);
+    let img = save(&mut h, "assembly_tree");
+    assert_viewport_rendered(&img, h.state().viewport_rect.shrink(60.0));
+
+    // edit the Base in place: the rest dims, history and params scope to it
+    let base = occ_path(h.state(), "Base:1");
+    h.state_mut().activate(base.clone());
+    settle(&mut h);
+    {
+        let app = h.state();
+        assert_eq!(app.scope(), app.doc.data.component_at(&base).unwrap());
+        assert!(!app.view().features.is_empty(), "the Base's in-context feature");
+        assert!(app.model.as_ref().unwrap().bodies.iter().any(|b| !b.body.reference));
+    }
+    save(&mut h, "assembly_active_component");
+    h.state_mut().activate(Vec::new());
+    settle(&mut h);
+
+    // a revolute hinge along the front seam: Base stays, Lid swings open
+    h.state_mut().open_mate(None);
+    let a = front_edge(h.state(), "Base:1", true);
+    let b = front_edge(h.state(), "Lid:1", false);
+    assert!(h.state_mut().mate_pick(a));
+    assert!(h.state_mut().mate_pick(b));
+    {
+        let mu = h.state_mut().asm.mate.as_mut().unwrap();
+        assert_eq!(mu.kind, casework_model::assembly::MateKind::Revolute);
+        mu.angle = 100.0;
+    }
+    h.state_mut().request_model();
+    settle(&mut h);
+    {
+        let m = h.state().model.clone().unwrap();
+        let st = m.asm.as_ref().unwrap().solve.clone().expect("mates solved");
+        assert!(st.ok(), "{st:?}");
+    }
+    save(&mut h, "mates_hinge");
+    h.state_mut().commit_mate();
+    settle(&mut h);
+    assert_eq!(h.state().doc.data.mates.len(), 1);
+
+    // explode + interference (swing the lid back into the base first)
+    let id = h.state().doc.data.mates[0].id;
+    h.state_mut().open_mate(Some(id));
+    h.state_mut().asm.mate.as_mut().unwrap().angle = -12.0;
+    h.state_mut().commit_mate();
+    settle(&mut h);
+    h.state_mut().explode = 0.5;
+    h.state_mut().asm.explode_open = true;
+    h.state_mut().request_model();
+    settle(&mut h);
+    h.state_mut().check_interference();
+    for _ in 0..600 {
+        h.run_steps(1);
+        if h.state().asm.interference.as_ref().is_some_and(|i| i.job.is_none()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    h.run_steps(3);
+    let r = h.state().asm.interference.as_ref().and_then(|i| i.report.clone()).expect("report");
+    save(&mut h, "explode_interference");
+    let lid_t = h.state().doc.data.occurrence(lid[0]).unwrap().transform;
+    assert!(!r.pairs.is_empty(), "a lid turned -12° into the base interferes: {r:?} {lid_t:?} {:?}", h.state().doc.data.mates);
+    // BOM: Base, Lid made; the board purchased; the master left out
+    h.state_mut().open_bom();
+    h.run_steps(4);
+    save(&mut h, "assembly_bom");
+}

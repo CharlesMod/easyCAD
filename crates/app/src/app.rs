@@ -53,6 +53,9 @@ pub struct UiCache {
     pub users: std::collections::HashMap<String, String>,
     pub chips: std::collections::HashMap<FeatureId, String>,
     pub hot: Option<std::collections::BTreeSet<String>>,
+    /// The active component's view (`None` = the root: use the document).
+    pub scoped: Option<Arc<casework_model::document::DocData>>,
+    pub scoped_key: Option<(u64, casework_model::assembly::OccPath)>,
 }
 
 pub struct Toast {
@@ -130,6 +133,13 @@ pub struct CaseworkApp {
     pub autosave: crate::recovery::Autosaver,
     /// Recovery copies left by a crashed session, offered at start.
     pub recovery_offer: Vec<crate::recovery::Entry>,
+    /// Assemblies: the occurrence being edited (`[]` = the root / whole assembly).
+    pub active: casework_model::assembly::OccPath,
+    /// Assemblies: explode slider 0..1 (display only).
+    pub explode: f32,
+    pub asm: crate::ui_assembly::AsmUi,
+    /// Explode slider rect (E2E state dump).
+    pub asm_explode_rect: Option<egui::Rect>,
 }
 
 /// What a file chooser does with the chosen path.
@@ -209,6 +219,10 @@ impl CaseworkApp {
             show_keys: false,
             autosave: crate::recovery::Autosaver::default(),
             recovery_offer: Vec::new(),
+            active: Vec::new(),
+            explode: 0.0,
+            asm: Default::default(),
+            asm_explode_rect: None,
         }
     }
 
@@ -228,8 +242,41 @@ impl CaseworkApp {
         self.model_dirty = true;
     }
 
+    /// The component being edited (`ROOT` unless a component is active).
+    pub fn scope(&self) -> casework_model::assembly::ComponentId {
+        crate::ui_assembly::active_component(self)
+    }
+
+    /// The document as the active component sees it: its features, sketches and
+    /// imports, document params with its local params on top. The root: the document.
+    pub fn view(&self) -> &casework_model::document::DocData {
+        match &self.cache.scoped {
+            Some(v) if self.cache.scoped_key.as_ref().is_some_and(|k| k.0 == self.doc.data.revision && k.1 == self.active) => v,
+            _ => &self.doc.data,
+        }
+    }
+
+    /// Refresh the active component's view (call after activation or edits).
+    pub fn refresh_scope(&mut self) {
+        let key = (self.doc.data.revision, self.active.clone());
+        if self.cache.scoped_key.as_ref() == Some(&key) {
+            return;
+        }
+        let c = self.scope();
+        self.cache.scoped = (c != casework_model::assembly::ComponentId::ROOT)
+            .then(|| Arc::new(crate::scope::view(&self.doc.data, c)));
+        self.cache.scoped_key = Some(key);
+    }
+
     fn submit_model(&mut self) {
-        let data = adapters::effective(&self.doc.data, self.active_count());
+        let mut data = adapters::effective_in(&self.doc.data, self.scope(), self.active_count());
+        // the open mates dialog's draft is solved with the rest (live preview)
+        if let Some(m) = self.asm.mate.as_ref().and_then(|m| m.draft()) {
+            match data.mates.iter_mut().find(|x| x.id == m.id) {
+                Some(x) => *x = m,
+                None => data.mates.push(m),
+            }
+        }
         self.worker.submit_full(crate::worker::Request {
             id: 0,
             purpose: Purpose::Model,
@@ -240,6 +287,8 @@ impl CaseworkApp {
             drawing: None,
             quality: self.settings.mesh.quality(),
             section: None,
+            active: self.active.clone(),
+            explode: self.explode,
         });
         self.model_dirty = false;
     }
@@ -247,16 +296,18 @@ impl CaseworkApp {
     /// Features the open dialog would add, inserted at the active position.
     pub fn preview_data(&self) -> Option<(casework_model::document::DocData, Vec<usize>)> {
         let d = self.dialog.as_ref()?;
-        let mut data = adapters::effective(&self.doc.data, self.active_count());
+        let scope = self.scope();
+        let mut data = adapters::effective_in(&self.doc.data, scope, self.active_count());
         let feats = d.build(&self.dialog_cx_data()).ok()?;
         if feats.is_empty() {
             return None;
         }
-        let base = data.features.len();
+        let list = crate::scope::features_mut(&mut data, scope)?;
+        let base = list.len();
         let mut prefixes = Vec::new();
         for (i, f) in feats.into_iter().enumerate() {
             prefixes.push(base + i);
-            data.features.push(f);
+            list.push(f);
         }
         Some((data, prefixes))
     }
@@ -264,7 +315,7 @@ impl CaseworkApp {
     pub fn dialog_cx_data(&self) -> crate::dialogs::BuildCx {
         crate::dialogs::BuildCx {
             next_id: self.doc.data.next_id,
-            data: self.doc.data.clone(),
+            data: self.view().clone(),
         }
     }
 
@@ -288,6 +339,8 @@ impl CaseworkApp {
                         self.settings.mesh.quality()
                     },
                     section,
+                    active: self.active.clone(),
+                    explode: self.explode,
                 });
             }
             None => {
@@ -325,14 +378,25 @@ impl CaseworkApp {
             self.doc.data.revision,
             self.model.as_ref().map(|m| m.id).unwrap_or(0),
         );
+        self.refresh_scope();
         if key == self.cache.key && !self.cache.usage.is_empty() {
             return;
         }
-        let usage = adapters::usage_counts(&self.doc.data);
+        self.refresh_scope();
+        let view = self.view().clone();
+        // at the top of an assembly, a document param is used by every component
+        let mut all = view.clone();
+        if self.active.is_empty() {
+            for c in &self.doc.data.components {
+                all.features.extend(c.features.iter().cloned());
+                all.sketches.extend(c.sketches.iter().cloned());
+            }
+        }
+        let usage = adapters::usage_counts(&all);
         let users = usage
             .keys()
             .map(|n| {
-                let u = adapters::users_of(&self.doc.data, n);
+                let u = adapters::users_of(&all, n);
                 (
                     n.clone(),
                     if u.is_empty() {
@@ -343,19 +407,20 @@ impl CaseworkApp {
                 )
             })
             .collect();
-        let chips = self
-            .doc
-            .data
+        let chips = view
             .features
             .iter()
             .map(|f| (f.id, crate::ui_main::chip_label(self, f)))
             .collect();
+        let (scoped, scoped_key) = (self.cache.scoped.take(), self.cache.scoped_key.take());
         self.cache = UiCache {
             key,
             usage,
             users,
             chips,
             hot: None,
+            scoped,
+            scoped_key,
         };
     }
 
@@ -403,9 +468,17 @@ impl CaseworkApp {
                     self.camera.scene_radius = (bb.size().length() * 0.5) as f32;
                 }
                 // drop selections that no longer exist
-                let ids: HashSet<BodyId> = out.bodies.iter().map(|b| b.body.id).collect();
+                let ids: HashSet<BodyId> = out
+                    .bodies
+                    .iter()
+                    .map(|b| b.body.id)
+                    .chain(out.ctx.iter().map(|c| c.key))
+                    .collect();
                 self.selection.retain(|k| ids.contains(&k.body));
                 self.stack.clear();
+                if self.asm.hold.as_ref().is_some_and(|h| out.data.revision >= h.2) {
+                    self.asm.hold = None;
+                }
                 self.model = Some(Arc::new(out));
             }
             Purpose::Drawing => {
@@ -509,6 +582,15 @@ impl CaseworkApp {
         Ok(())
     }
 
+    /// Set a parameter of the active component (a local one shadows the document's).
+    pub fn set_local_param(&mut self, name: &str, expr: &str) -> Result<(), DocError> {
+        let expr = crate::units::normalize_input(expr);
+        let c = self.scope();
+        self.doc.set_component_param(c, name, expr.as_str())?;
+        self.after_edit();
+        Ok(())
+    }
+
     /// Insert features from a dialog (replacing the edited one, if any).
     pub fn commit_features(
         &mut self,
@@ -518,7 +600,8 @@ impl CaseworkApp {
         bind: Vec<(FeatureId, String)>,
     ) {
         let at = self.rollback;
-        let r = self.doc.edit(label, |d| {
+        let scope = self.scope();
+        let r = crate::scope::edit(&mut self.doc, scope, label, |d| {
             let pos = match replace {
                 Some(id) => d
                     .features
@@ -586,7 +669,7 @@ impl CaseworkApp {
     }
 
     pub fn edit_feature(&mut self, id: FeatureId) {
-        let Some(f) = self.doc.data.feature(id).cloned() else {
+        let Some(f) = self.view().feature(id).cloned() else {
             return;
         };
         if let Some(sk) = crate::dialogs::sketch_of(&f) {
@@ -651,11 +734,10 @@ impl CaseworkApp {
     pub fn open_sketch(&mut self, id: Option<casework_model::feature::SketchId>) {
         let s = match id {
             Some(id) => self
-                .doc
-                .data
+                .view()
                 .sketch(id)
                 .cloned()
-                .map(|s| SketchSession::edit(id, s, &self.doc.data)),
+                .map(|s| SketchSession::edit(id, s, self.view())),
             None => {
                 self.sketch_body = self
                     .selection
@@ -664,7 +746,7 @@ impl CaseworkApp {
                     .map(|k| (None, k.body));
                 Some(SketchSession::new_on(
                     self.sketch_plane_from_selection(),
-                    &self.doc.data,
+                    self.view(),
                 ))
             }
         };
@@ -700,13 +782,14 @@ impl CaseworkApp {
     pub fn finish_sketch(&mut self) {
         let mode = std::mem::replace(&mut self.mode, Mode::Model);
         if let Mode::Sketch(s) = mode {
-            match s.commit(&mut self.doc) {
+            let scope = self.scope();
+            match s.commit(&mut self.doc, scope) {
                 Ok(Some(label)) => {
                     // the face the sketch was placed on has been used up; its body
                     // stays the default target of an extrude on this sketch
                     self.selection.clear();
                     if s.id.is_none() {
-                        let new = self.doc.data.sketches.last().map(|s| s.id);
+                        let new = crate::scope::view(&self.doc.data, scope).sketches.last().map(|s| s.id);
                         self.sketch_body = self.sketch_body.map(|(_, b)| (new, b));
                     }
                     self.toast(label)
@@ -780,6 +863,9 @@ impl CaseworkApp {
         self.preview = None;
         self.params = ParamsUi::default();
         self.fit_pending = true;
+        self.active = Vec::new();
+        self.explode = 0.0;
+        self.asm = Default::default();
         self.request_model();
     }
 
@@ -893,6 +979,15 @@ impl CaseworkApp {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or(name);
+            if crate::ui_assembly::is_assembly(&self.doc.data) {
+                let parent = self.scope();
+                self.doc
+                    .import_step_assembly(&stem, bytes, parent, true)
+                    .map_err(|e| format!("Import failed: {e}"))?;
+                self.fit_pending = true;
+                self.request_model();
+                return Ok(format!("Imported {stem} as a locked reference component"));
+            }
             self.doc.import_step(&stem, bytes, true);
             self.fit_pending = true;
             self.request_model();
@@ -924,7 +1019,17 @@ impl CaseworkApp {
         if let Some((name, expr, t)) = self.params.pending.clone() {
             if self.now >= t {
                 self.params.pending = None;
-                if let Err(e) = self.set_param(&name, &expr) {
+                let local = self
+                    .doc
+                    .data
+                    .component(self.scope())
+                    .is_some_and(|c| c.params.get(&name).is_some());
+                let r = if local {
+                    self.set_local_param(&name, &expr)
+                } else {
+                    self.set_param(&name, &expr)
+                };
+                if let Err(e) = r {
                     self.params.error = Some((name, e.to_string()));
                 } else {
                     self.params.error = None;
@@ -1040,6 +1145,17 @@ impl CaseworkApp {
             }
             Mode::Model => {}
         }
+        if self.asm.mate.is_some() {
+            if pressed(Key::Escape) {
+                self.cancel_mate();
+            } else if pressed(Key::Enter) {
+                self.commit_mate();
+            }
+            if pressed(Key::F) {
+                self.fit_all();
+            }
+            return;
+        }
         if self.dialog.is_some() {
             if pressed(Key::Escape) {
                 self.close_dialog(false);
@@ -1052,7 +1168,14 @@ impl CaseworkApp {
             return;
         }
         if pressed(Key::Escape) {
-            self.selection.clear();
+            if self.asm.gizmo {
+                self.asm.gizmo = false;
+            } else if self.selection.is_empty() && !self.active.is_empty() {
+                self.activate_parent();
+            } else {
+                self.selection.clear();
+                self.asm.sel = None;
+            }
         }
         if pressed(Key::F) {
             if self
@@ -1106,6 +1229,24 @@ impl CaseworkApp {
                     (Key::D, None) => self.mode = Mode::Drawing(Box::default()),
                     _ => {}
                 }
+            }
+        }
+        if crate::ui_assembly::is_assembly(&self.doc.data) {
+            if pressed(Key::A) {
+                self.open_mate(None);
+            }
+            if pressed(Key::G) {
+                self.toggle_gizmo();
+            }
+            if pressed(Key::X) {
+                self.asm.explode_open = !self.asm.explode_open;
+                if !self.asm.explode_open && self.explode > 0.0 {
+                    self.explode = 0.0;
+                    self.request_model();
+                }
+            }
+            if pressed(Key::I) {
+                self.check_interference();
             }
         }
         if pressed(Key::Num1) {
@@ -1167,6 +1308,22 @@ impl CaseworkApp {
             Some("calibrate")
         } else {
             None
+        }
+    }
+
+    /// G: the move gizmo on the selected occurrence (explains when it cannot move).
+    pub fn toggle_gizmo(&mut self) {
+        if self.asm.gizmo {
+            self.asm.gizmo = false;
+            return;
+        }
+        let Some(p) = self.asm.sel.clone() else {
+            self.toast("Select a component to move (click it or its browser row), then G");
+            return;
+        };
+        match crate::ui_gizmo::blocked(self, &p) {
+            Some(why) => self.warn(why),
+            None => self.asm.gizmo = true,
         }
     }
 

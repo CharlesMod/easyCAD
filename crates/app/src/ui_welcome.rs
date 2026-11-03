@@ -68,7 +68,11 @@ impl Default for WizardUi {
 /// Is the document empty enough to greet the user?
 pub fn is_empty(app: &CaseworkApp) -> bool {
     let d = &app.doc.data;
-    d.features.is_empty() && d.sketches.is_empty() && d.imports.is_empty() && app.dialog.is_none()
+    d.features.is_empty()
+        && d.sketches.is_empty()
+        && d.imports.is_empty()
+        && d.occurrences.is_empty()
+        && app.dialog.is_none()
 }
 
 /// Welcome card over an empty viewport.
@@ -309,6 +313,8 @@ pub fn wizard_window(app: &mut CaseworkApp, ui: &mut Ui) {
                                     }
                                 }
                             });
+                            ui.checkbox(&mut s.components, "Base and Lid as components")
+                                .on_hover_text("An assembly: the enclosure is the design master, split into Base and Lid components that follow its edits; a STEP board becomes a locked reference component");
                             ui.label(RichText::new("Made by").color(theme::TEXT_DIM));
                             egui::ComboBox::from_id_salt("wiz_profile")
                                 .selected_text(&s.profile)

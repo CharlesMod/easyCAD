@@ -397,7 +397,11 @@ impl SketchSession {
     }
 
     /// Write the sketch back into the document (undoable).
-    pub fn commit(&self, doc: &mut Document) -> Result<Option<String>, String> {
+    pub fn commit(
+        &self,
+        doc: &mut Document,
+        scope: casework_model::assembly::ComponentId,
+    ) -> Result<Option<String>, String> {
         if !self.dirty && self.id.is_some() {
             return Ok(None);
         }
@@ -405,7 +409,7 @@ impl SketchSession {
         let dxf = self.dxf.is_some() || self.entity_layer.iter().any(|l| l.is_some());
         match self.id {
             Some(id) => {
-                doc.edit(&format!("Edit sketch {}", sk.name), |d| {
+                crate::scope::edit(doc, scope, &format!("Edit sketch {}", sk.name), |d| {
                     let s = d
                         .sketch_mut(id)
                         .ok_or_else(|| DocError::Other("sketch vanished".into()))?;
@@ -420,7 +424,7 @@ impl SketchSession {
                     return Ok(None);
                 }
                 let name = sk.name.clone();
-                doc.edit(&format!("Add sketch {name}"), |d| {
+                crate::scope::edit(doc, scope, &format!("Add sketch {name}"), |d| {
                     let id = d.add_sketch(sk);
                     if dxf {
                         d.meta

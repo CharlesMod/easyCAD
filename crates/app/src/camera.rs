@@ -377,6 +377,10 @@ impl Camera {
         }
     }
 
+    pub fn cancel_anim(&mut self) {
+        self.anim = None;
+    }
+
     pub fn animate_to(&mut self, to: Pose, now: f64) {
         self.anim = Some(Anim {
             from: self.pose(),

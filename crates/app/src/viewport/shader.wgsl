@@ -16,8 +16,8 @@ struct Draw {
     color: vec4<f32>,
     // x = lighting amount (0 flat .. 1 lit), y = use vertex colours
     params: vec4<f32>,
-    // xyz = translation (exploded previews)
-    offset: vec4<f32>,
+    // model matrix: component frame -> view frame (instances, explode, gizmo drags)
+    model: mat4x4<f32>,
 };
 @group(1) @binding(0) var<uniform> d: Draw;
 
@@ -43,9 +43,9 @@ struct MeshOut {
 @vertex
 fn vs_mesh(@location(0) p0: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec3<f32>) -> MeshOut {
     var o: MeshOut;
-    let p = p0 + d.offset.xyz;
+    let p = (d.model * vec4<f32>(p0, 1.0)).xyz;
     o.pos = g.view_proj * vec4<f32>(p, 1.0);
-    o.normal = n;
+    o.normal = (d.model * vec4<f32>(n, 0.0)).xyz;
     o.world = p;
     o.vcolor = c;
     return o;
@@ -75,7 +75,7 @@ fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
 
 @vertex
 fn vs_line(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return g.view_proj * vec4<f32>(p + d.offset.xyz, 1.0);
+    return g.view_proj * (d.model * vec4<f32>(p, 1.0));
 }
 
 @fragment

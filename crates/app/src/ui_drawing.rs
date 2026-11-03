@@ -340,6 +340,8 @@ pub fn sync(app: &mut CaseworkApp) {
                 drawing: Some(draft),
                 quality: casework_model::regen::MeshQuality::Display,
                 section: None,
+                active: Vec::new(),
+                explode: 0.0,
             });
         }
     }
@@ -1475,19 +1477,7 @@ pub fn commit_now(app: &mut CaseworkApp) -> Result<(), DocError> {
 
 /// The view an annotation belongs to (notes have none).
 pub fn annotation_view(k: &AnnotationKind) -> Option<ViewId> {
-    match k {
-        AnnotationKind::Linear { view, .. }
-        | AnnotationKind::Ordinate { view, .. }
-        | AnnotationKind::Radius { view, .. }
-        | AnnotationKind::Angle { view, .. }
-        | AnnotationKind::Chamfer { view, .. }
-        | AnnotationKind::Leader { view, .. }
-        | AnnotationKind::Balloon { view, .. }
-        | AnnotationKind::CenterMark { view, .. }
-        | AnnotationKind::Centerline { view, .. }
-        | AnnotationKind::PartingLine { view, .. } => Some(*view),
-        AnnotationKind::Note { .. } => None,
-    }
+    k.view()
 }
 
 /// Standard-scale third-angle layout for model extents on a sheet.

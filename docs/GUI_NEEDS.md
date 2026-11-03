@@ -53,6 +53,24 @@ today (adapter or limitation) and what would replace it.
     closed shell fails as documented. Reproduce by setting `corner_r` to 5 in
     `wizard::tests::builds_a_clean_enclosure_from_dxf_and_step`.
 
+## Assemblies
+
+17. **Movable in-context components.** `split_to_components` makes Base / Lid with a
+    `ContextRef` resolved in the frame of the component's context occurrence, which is
+    its only occurrence; moving that occurrence (a mate, the gizmo) re-expresses the
+    master's half in the new frame, so it stays where it was in the world and a
+    hinge never opens. *Adapter:* `adapters::anchor_in_context` adds a hidden,
+    grounded, out-of-BOM "design position" occurrence of each inside the master and
+    sets it as `Component.context` (marked `meta["gui.anchor.<occ>"]`, hidden in the
+    tree and counts); the visible occurrence then moves. *Want:* a captured context
+    frame (`Component.context_frame: Option<Transform>`, set by
+    `split_to_components`), or `split_to_components` doing the anchoring itself.
+18. **Mate preview.** The dialog's draft mate is pushed into `DocData.mates` of every
+    model request (id `u32::MAX` while new) and the worker runs
+    `assembly::solve_mates` before `regenerate_assembly`. Fine, but *want:*
+    `solve_mates` to report per-mate the remaining free DOF direction (axis / plane)
+    so the jog control can show it on the model.
+
 ## Sketch
 
 12. **Offset constraint.** The GUI's offset makes new geometry pinned by

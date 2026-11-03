@@ -74,7 +74,7 @@ fn orbit_frames_reuse_uploaded_mesh() {
                 color: [0.7, 0.7, 0.7, 1.0],
                 translucent: false,
                 colors: None,
-                offset: Vec3::ZERO,
+                model: glam::Mat4::IDENTITY,
             }],
             highlights: Vec::new(),
             grid: None,

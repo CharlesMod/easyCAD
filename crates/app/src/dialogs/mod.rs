@@ -584,6 +584,7 @@ impl Dialog {
                 body,
                 plane,
                 new_name,
+                ..
             } => (
                 DialogKind::Split,
                 Body::Split(SplitD {
@@ -848,6 +849,7 @@ impl Dialog {
                     neutral: Plane::XY.offset(z),
                     pull: DVec3::Z,
                     angle_deg: s.angle.expr(None),
+                    offset: 0.0.into(),
                 })
             }
             Body::Split(s) => {
@@ -856,6 +858,7 @@ impl Dialog {
                     body: s.body,
                     plane: Plane::XY.offset(z),
                     new_name: s.new_name.clone(),
+                    offset: 0.0.into(),
                 })
             }
             Body::Boss(b) => {
@@ -871,6 +874,7 @@ impl Dialog {
                     hole_depth: None,
                     base_fillet: b.base_fillet.expr(None),
                     draft_deg: b.draft.expr(None),
+                    offset: 0.0.into(),
                 })
             }
             Body::Rib(r) => one(FeatureKind::Rib {

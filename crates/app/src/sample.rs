@@ -212,6 +212,9 @@ pub fn sensor_node() -> Document {
             edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }],
             radius: "clearance + wall + 3".into(),
             auto_reduce: false,
+            sets: Vec::new(),
+            skipped: Vec::new(),
+            setback: false,
         },
     );
     doc.add_feature(
@@ -279,6 +282,7 @@ pub fn sensor_node() -> Document {
             body: Some(base),
             plane: Plane::XY.offset(28.0),
             new_name: "Lid".into(),
+            offset: 0.0.into(),
         },
     );
     crate::adapters::bind_plane_offset(&mut doc, split, "lid_split");
@@ -308,6 +312,10 @@ pub fn sensor_node() -> Document {
             height: "18".into(),
             base_fillet: "0.8".into(),
             draft_deg: "draft".into(),
+            offset: 0.0.into(),
+            exclude: Vec::new(),
+            gussets: None,
+            lid_holes: None,
         },
     );
     // standoffs start on the floor, whatever the wall thickness

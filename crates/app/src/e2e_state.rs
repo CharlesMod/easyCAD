@@ -200,6 +200,100 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "recovery": app.recovery_offer.iter().map(|e| json!({ "name": e.info.name, "revision": e.info.revision })).collect::<Vec<_>>(),
         "autosave": app.autosave.last_path.as_ref().map(|p| p.display().to_string()),
         "nav": format!("{:?}", app.settings.nav),
+        "assembly": assembly(app),
         "path_prompt": app.path_prompt.as_ref().map(|(p, _)| json!({ "title": p.req.title, "text": p.text })),
+    })
+}
+
+fn rect_json(r: Option<egui::Rect>) -> Value {
+    r.map(|r| json!([r.left(), r.top(), r.right(), r.bottom()])).unwrap_or(Value::Null)
+}
+
+/// Assemblies: the tree with screen anchors (for clicking), mates, the mates
+/// dialog, explode, interference.
+fn assembly(app: &CaseworkApp) -> Value {
+    let d = &app.doc.data;
+    if !crate::ui_assembly::is_assembly(d) {
+        return Value::Null;
+    }
+    let r = app.viewport_rect;
+    let size = glam::Vec2::new(r.width(), r.height());
+    let scr = |p: glam::Vec3| {
+        app.camera
+            .project(p, size)
+            .map(|s| json!([(r.left() + s.x).round(), (r.top() + s.y).round()]))
+            .unwrap_or(Value::Null)
+    };
+    let occ: Vec<Value> = d
+        .all_occurrences()
+        .into_iter()
+        .filter(|(_, o, _)| !crate::adapters::is_anchor(d, o.id))
+        .map(|(path, o, _)| {
+            let b = crate::ui_gizmo::occ_bounds(app, &path);
+            let anchors = b.map(|(lo, hi)| {
+                let c = (lo + hi) * 0.5;
+                json!({
+                    "center": scr(c),
+                    "front_top": scr(glam::Vec3::new(c.x, lo.y, hi.z)),
+                    "front_bottom": scr(glam::Vec3::new(c.x, lo.y, lo.z)),
+                    "front": scr(glam::Vec3::new(c.x, lo.y, c.z)),
+                    "top": scr(glam::Vec3::new(c.x, c.y, hi.z)),
+                    "bounds": [lo.to_array(), hi.to_array()],
+                })
+            });
+            json!({
+                "name": o.name,
+                "component": d.component_name(o.component),
+                "depth": path.len(),
+                "visible": o.visible,
+                "grounded": o.grounded,
+                "anchors": anchors,
+            })
+        })
+        .collect();
+    let solve = app.model.as_ref().and_then(|m| m.asm.as_ref()).and_then(|a| a.solve.clone());
+    let mates: Vec<Value> = d
+        .mates
+        .iter()
+        .map(|m| {
+            let st = solve.as_ref().and_then(|s| s.mates.iter().find(|r| r.mate == m.id)).map(|r| format!("{:?}", r.status));
+            json!({ "name": m.name, "kind": format!("{:?}", m.kind), "angle": m.angle.0, "distance": m.distance.0, "status": st })
+        })
+        .collect();
+    let dialog = app.asm.mate.as_ref().map(|m| {
+        let st = solve.as_ref().and_then(|s| s.mates.iter().find(|r| r.mate == m.editing.unwrap_or(crate::ui_mates::DRAFT))).map(|r| format!("{:?}", r.status));
+        json!({
+            "kind": format!("{:?}", m.kind),
+            "a": m.a.as_ref().map(|s| s.label.clone()),
+            "b": m.b.as_ref().map(|s| s.label.clone()),
+            "angle": m.angle,
+            "distance": m.distance,
+            "status": st,
+            "error": m.error,
+            "jog_rect": rect_json(m.jog_rect),
+            "ok_rect": rect_json(m.ok_rect),
+        })
+    });
+    let interference = app.asm.interference.as_ref().map(|i| {
+        json!({
+            "running": i.job.is_some(),
+            "pairs": i.report.as_ref().map(|r| r.pairs.iter().map(|p| json!({ "a": p.a.label, "b": p.b.label, "volume": (p.volume * 100.0).round() / 100.0 })).collect::<Vec<_>>()),
+            "tested": i.report.as_ref().map(|r| r.tested),
+        })
+    });
+    json!({
+        "active": app.active.iter().filter_map(|o| d.occurrence(*o).map(|o| o.name.clone())).collect::<Vec<_>>(),
+        "scope": d.component_name(app.scope()),
+        "occurrences": occ,
+        "components": d.components.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "mates": mates,
+        "mate_dialog": dialog,
+        "selected": app.asm.sel.as_ref().map(|p| crate::ui_assembly::occ_name(d, p)),
+        "gizmo": app.asm.gizmo,
+        "explode": app.explode,
+        "explode_rect": rect_json(app.asm_explode_rect),
+        "interference": interference,
+        "bom": app.asm.bom.is_some(),
+        "issues": app.model.as_ref().and_then(|m| m.asm.as_ref()).map(|a| a.result.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>()),
     })
 }

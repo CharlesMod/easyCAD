@@ -32,6 +32,7 @@ pub fn show(app: &mut CaseworkApp, ui: &mut Ui) {
     }
     new_doc_window(app, ui);
     crate::ui_welcome::wizard_window(app, ui);
+    crate::ui_bom::window(app, ui);
 }
 
 /// New document: name + process profile (defaults to the last one used).
@@ -130,6 +131,10 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                 ui.label(RichText::new("Casework").strong());
                 ui.label(RichText::new("/").color(theme::TEXT_FAINT));
                 ui.label(RichText::new(app.title()).strong());
+                if !app.active.is_empty() && app.mode.is_model() {
+                    ui.label(RichText::new("·").color(theme::TEXT_FAINT));
+                    crate::ui_assembly::breadcrumb(app, ui);
+                }
                 match &app.mode {
                     Mode::Sketch(s) => {
                         chip(
@@ -338,7 +343,7 @@ fn toolbar(app: &mut CaseworkApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 type Item = (Icon, &'static str, &'static str, Cmd);
-                let groups: [(&str, Vec<Item>); 5] = [
+                let groups: [(&str, Vec<Item>); 6] = [
                     (
                         "CREATE",
                         vec![
@@ -450,6 +455,47 @@ fn toolbar(app: &mut CaseworkApp, ui: &mut Ui) {
                         ],
                     ),
                     (
+                        "ASSEMBLE",
+                        vec![
+                            (
+                                Icon::Parts,
+                                "Component",
+                                "New empty component in the one being edited",
+                                Cmd::NewComponent,
+                            ),
+                            (
+                                Icon::Import,
+                                "Insert",
+                                "Insert a .cwk as a linked component",
+                                Cmd::InsertCwk,
+                            ),
+                            (
+                                Icon::Joint,
+                                "Mate",
+                                "Mate two components: rigid, hinge, slider… (A)",
+                                Cmd::Mate,
+                            ),
+                            (
+                                Icon::Fit,
+                                "Move",
+                                "Move the selected component with the gizmo (G)",
+                                Cmd::Move,
+                            ),
+                            (
+                                Icon::Warn,
+                                "Interfere",
+                                "Check every pair of parts for overlap (I)",
+                                Cmd::Interference,
+                            ),
+                            (
+                                Icon::Drawing,
+                                "BOM",
+                                "Bill of materials: indented / flat, CSV",
+                                Cmd::Bom,
+                            ),
+                        ],
+                    ),
+                    (
                         "FILE",
                         vec![
                             (
@@ -529,6 +575,12 @@ enum Cmd {
     Import,
     Export,
     Drawing,
+    NewComponent,
+    InsertCwk,
+    Mate,
+    Move,
+    Interference,
+    Bom,
 }
 
 fn run(app: &mut CaseworkApp, c: Cmd) {
@@ -539,12 +591,21 @@ fn run(app: &mut CaseworkApp, c: Cmd) {
         Cmd::Import => app.import_file(),
         Cmd::Export => app.export = Some(crate::dialogs::export::ExportDialog::new(&app.doc.data)),
         Cmd::Drawing => app.mode = Mode::Drawing(Box::default()),
+        Cmd::NewComponent => {
+            let c = app.scope();
+            app.new_component(c);
+        }
+        Cmd::InsertCwk => app.insert_cwk(),
+        Cmd::Mate => app.open_mate(None),
+        Cmd::Move => app.toggle_gizmo(),
+        Cmd::Interference => app.check_interference(),
+        Cmd::Bom => app.open_bom(),
     }
 }
 
 // ---------------------------------------------------------------- browser
 
-fn row(ui: &mut Ui, indent: f32, height: f32, selected: bool) -> (egui::Rect, egui::Response) {
+pub(crate) fn row(ui: &mut Ui, indent: f32, height: f32, selected: bool) -> (egui::Rect, egui::Response) {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, height), Sense::click());
     if selected {
@@ -571,7 +632,31 @@ pub fn browser(app: &mut CaseworkApp, ui: &mut Ui) {
     });
     ui.add_space(4.0);
     let p = ui.painter().clone();
-    let (r, _) = row(ui, 14.0, 30.0, false);
+    let assembly = crate::ui_assembly::is_assembly(&app.doc.data);
+    if assembly {
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height() * 0.55)
+            .auto_shrink([false, true])
+            .show(ui, |ui| crate::ui_assembly::tree(app, ui));
+        let sep = ui.cursor().top();
+        p.hline(ui.max_rect().x_range(), sep, Stroke::new(1.0, theme::BORDER_SOFT));
+        ui.add_space(4.0);
+        let c = crate::ui_assembly::active_component(app);
+        let (r, _) = row(ui, 14.0, 26.0, false);
+        p.text(
+            r.left_center(),
+            egui::Align2::LEFT_CENTER,
+            if app.active.is_empty() {
+                format!("{} (top level)", app.doc.data.name)
+            } else {
+                app.doc.data.component_name(c)
+            },
+            theme::prop(12.0),
+            theme::TEXT_LABEL,
+        );
+    }
+    let (r, _) = if assembly { (egui::Rect::NOTHING, ui.allocate_response(vec2(0.0, 0.0), Sense::hover())) } else { row(ui, 14.0, 30.0, false) };
+    if !assembly {
     p.text(
         r.left_center(),
         egui::Align2::LEFT_CENTER,
@@ -590,6 +675,7 @@ pub fn browser(app: &mut CaseworkApp, ui: &mut Ui) {
         theme::prop(12.0),
         theme::TEXT_LABEL,
     );
+    }
     let (r, _) = row(ui, 26.0, 28.0, false);
     p.text(
         r.left_center(),
@@ -695,8 +781,7 @@ pub fn browser(app: &mut CaseworkApp, ui: &mut Ui) {
         theme::TEXT_DIM,
     );
     let sketches: Vec<(SketchId, String, bool)> = app
-        .doc
-        .data
+        .view()
         .sketches
         .iter()
         .map(|s| {
@@ -846,16 +931,18 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 theme::section_label(ui, "Parameters");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("+ Add").size(12.0)).fill(Color32::TRANSPARENT).min_size(vec2(0.0, 26.0))).clicked() {
-                        app.params.adding = Some((format!("p{}", app.doc.data.params.list.len() + 1), "0".into()));
+                    let tip = if app.active.is_empty() { "New document parameter" } else { "New parameter of this component (shadows a document one of the same name)" };
+                    if ui.add(egui::Button::new(RichText::new("+ Add").size(12.0)).fill(Color32::TRANSPARENT).min_size(vec2(0.0, 26.0))).on_hover_text(tip).clicked() {
+                        app.params.adding = Some((format!("p{}", app.view().params.list.len() + 1), "0".into()));
                     }
                 });
             });
         });
         let usage = app.cache.usage.clone();
-        let vals = crate::adapters::values(&app.doc.data);
-        let names: Vec<String> = app.doc.data.params.list.iter().map(|p| p.name.clone()).collect();
-        let profile = app.doc.data.profile();
+        let view = app.view().clone();
+        let vals = crate::adapters::values(&view);
+        let names: Vec<String> = view.params.list.iter().map(|p| p.name.clone()).collect();
+        let profile = view.profile();
         let env = widgets::ExprEnv { values: &vals, names: &names, profile: &profile };
         Frame::new().inner_margin(Margin { left: 14, right: 14, top: 0, bottom: 4 }).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -865,8 +952,34 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(widgets::muted("Used")));
             });
         });
-        let list = app.doc.data.params.list.clone();
-        for p in &list {
+        // a component being edited: its own params first, then the document's
+        let scope = app.scope();
+        let local: Vec<_> = app
+            .doc
+            .data
+            .component(scope)
+            .map(|c| c.params.list.clone())
+            .unwrap_or_default();
+        let mut groups: Vec<(Option<String>, Vec<casework_model::params::Param>)> = Vec::new();
+        if scope != casework_model::assembly::ComponentId::ROOT {
+            groups.push((Some(format!("{} · local", app.doc.data.component_name(scope))), local.clone()));
+            groups.push((Some("Document".into()), app.doc.data.params.list.clone()));
+        } else {
+            groups.push((None, app.doc.data.params.list.clone()));
+        }
+        for (title, list) in &groups {
+        if let Some(t) = title {
+            Frame::new().inner_margin(Margin { left: 14, right: 14, top: 8, bottom: 4 }).show(ui, |ui| {
+                ui.label(RichText::new(t.to_uppercase()).size(10.5).color(theme::TEXT_LABEL));
+            });
+            if list.is_empty() {
+                Frame::new().inner_margin(Margin::symmetric(14, 4)).show(ui, |ui| {
+                    ui.label(widgets::muted("None yet: + Add makes one here"));
+                });
+            }
+        }
+        let shadowed = |n: &str| title.as_deref() == Some("Document") && local.iter().any(|l| l.name == n);
+        for p in list {
             let is_hot = hot.contains(&p.name);
             let used = usage.get(&p.name).copied().unwrap_or(0);
             let r = Frame::new().fill(if is_hot { theme::ROW_HOT } else { Color32::TRANSPARENT }).inner_margin(Margin::symmetric(14, 4)).show(ui, |ui| {
@@ -877,7 +990,9 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
                         ui.set_min_width(w - 150.0);
                         ui.label(RichText::new(&p.name).font(theme::mono(12.0)).color(theme::TEXT));
                         let literal = p.expr.0.trim().parse::<f64>().is_ok();
-                        let note = if is_hot {
+                        let note = if shadowed(&p.name) {
+                            "shadowed by the component's own".to_string()
+                        } else if is_hot {
                             "used here".to_string()
                         } else if !p.comment.is_empty() {
                             p.comment.clone()
@@ -931,6 +1046,7 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
             });
             ui.painter().hline(r.response.rect.x_range(), r.response.rect.top(), Stroke::new(1.0, theme::BORDER_SOFT));
         }
+        }
         if let Some((name, expr)) = &mut app.params.adding {
             let mut done = None;
             Frame::new().inner_margin(Margin::symmetric(14, 6)).show(ui, |ui| {
@@ -948,7 +1064,8 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
             match done {
                 Some(true) => {
                     let (n, e) = app.params.adding.take().unwrap();
-                    if let Err(err) = app.set_param(&n, &e) {
+                    let r = if app.active.is_empty() { app.set_param(&n, &e) } else { app.set_local_param(&n, &e) };
+                    if let Err(err) = r {
                         app.warn(err.to_string());
                     }
                 }
@@ -1003,7 +1120,7 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
 
 /// Chip label like "Fillet r5.3", "Split @ lid_split", "Standoffs ×4".
 pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> String {
-    let vals = crate::adapters::values(&app.doc.data);
+    let vals = crate::adapters::values(app.view());
     let ev = |e: &casework_model::params::Expr| {
         e.eval(&vals)
             .ok()
@@ -1016,7 +1133,7 @@ pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> St
         FeatureKind::Fillet { radius, .. } => format!("{name} r{}", ev(radius)),
         FeatureKind::Chamfer { distance, .. } => format!("{name} {}", ev(distance)),
         FeatureKind::Shell { thickness, .. } => format!("{name} {}", ev(thickness)),
-        FeatureKind::Split { plane, .. } => match crate::adapters::binding(&app.doc.data, f.id) {
+        FeatureKind::Split { plane, .. } => match crate::adapters::binding(app.view(), f.id) {
             Some(b) => format!("{name} @ {b}"),
             None => format!("{name} @ {}", crate::dialogs::fmt(plane.origin.z)),
         },
@@ -1051,10 +1168,18 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(RichText::new("HISTORY").size(10.5).color(theme::TEXT_LABEL));
+                if !app.active.is_empty() {
+                    let c = app.scope();
+                    ui.label(
+                        RichText::new(app.doc.data.component_name(c))
+                            .size(11.0)
+                            .color(theme::ACCENT_LINK),
+                    )
+                    .on_hover_text("History of the component being edited");
+                }
                 ui.add_space(6.0);
                 let feats: Vec<(FeatureId, String, FeatureKind)> = app
-                    .doc
-                    .data
+                    .view()
                     .features
                     .iter()
                     .map(|f| {
@@ -1091,8 +1216,7 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                                 if let Some(s) = sk {
                                     if shown_sketches.insert(s) {
                                         let name = app
-                                            .doc
-                                            .data
+                                            .view()
                                             .sketch(s)
                                             .map(|s| s.name.clone())
                                             .unwrap_or_default();
@@ -1281,7 +1405,7 @@ fn history_chip(
 
 pub fn status_text(app: &CaseworkApp) -> String {
     if let Some(n) = app.rollback {
-        if let Some(f) = app.doc.data.features.get(n.saturating_sub(1)) {
+        if let Some(f) = app.view().features.get(n.saturating_sub(1)) {
             let l = app
                 .cache
                 .chips
@@ -1296,7 +1420,31 @@ pub fn status_text(app: &CaseworkApp) -> String {
     };
     let solids = m.bodies.iter().filter(|b| !b.body.reference).count();
     let errs = m.result.errors().len();
-    let n = app.doc.data.features.len();
+    let n = app.view().features.len();
+    if let Some(a) = &m.asm {
+        let occ = app.doc.data.all_occurrences().len();
+        let issues = a.result.issues.len();
+        let mut s = match crate::ui_assembly::active_label(app) {
+            Some(l) => format!("{l} · {n} feature{}", if n == 1 { "" } else { "s" }),
+            None => format!(
+                "Ready · {occ} occurrence{} · {} placed bod{}",
+                if occ == 1 { "" } else { "s" },
+                m.ctx.len() + solids,
+                if m.ctx.len() + solids == 1 { "y" } else { "ies" }
+            ),
+        };
+        let errs: usize = a.result.components.iter().map(|c| c.regen.errors().len()).sum::<usize>() + issues;
+        if errs > 0 {
+            s += &format!(" · {errs} with errors");
+        }
+        if let Some(sv) = &a.solve {
+            let bad = sv.mates.iter().filter(|r| matches!(r.status, casework_model::assembly::MateStatus::OverConstrained(_) | casework_model::assembly::MateStatus::Unsolved(_))).count();
+            if bad > 0 {
+                s += &format!(" · {bad} mate{} not solved", if bad == 1 { "" } else { "s" });
+            }
+        }
+        return s;
+    }
     let mut s = format!(
         "Ready · {solids} bod{} · {n} feature{}",
         if solids == 1 { "y" } else { "ies" },

@@ -250,6 +250,10 @@ pub struct Settings {
     pub joint: joint::Kind,
     /// Process profile name (one of the document's built-in profiles).
     pub profile: String,
+    /// Make an assembly: the enclosure becomes a hidden master component, split
+    /// into Base and Lid components (in context), plus the board as a locked
+    /// reference component (STEP boards).
+    pub components: bool,
 }
 
 impl Settings {
@@ -263,6 +267,7 @@ impl Settings {
             standoff_h: "5".into(),
             joint: joint::Kind::Tongue,
             profile: profile.into(),
+            components: true,
         }
     }
 }
@@ -357,6 +362,9 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
             })],
             radius: "edge_r".into(),
             auto_reduce: true,
+            sets: Vec::new(),
+            skipped: Vec::new(),
+            setback: false,
         },
     );
     // 4. closed shell
@@ -370,11 +378,13 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
         },
     );
     // 5. the board and its standoffs
+    let mut board_place = DVec3::ZERO;
     let source = match &board.kind {
         BoardKind::Step => {
             let (imp, f) = doc.import_step(&board.name, board.bytes.clone(), true);
             // centre the board over the origin, resting on the standoffs
             let t = DVec3::new(-board.center.x, -board.center.y, board_z - board.bottom_z);
+            board_place = t;
             let _ = doc.edit("Place board", |d| {
                 if let Some(FeatureKind::ImportStep { translate, .. }) =
                     d.feature_mut(f).map(|f| &mut f.kind)
@@ -417,6 +427,10 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
                 height: "standoff_h".into(),
                 base_fillet: "0.3".into(),
                 draft_deg: if molded { "draft".into() } else { "0".into() },
+                offset: 0.0.into(),
+                exclude: Vec::new(),
+                gussets: None,
+                lid_holes: None,
             },
         );
         // standoffs start on the floor, whatever the wall thickness
@@ -428,14 +442,55 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
     j.body = Some(base);
     j.z = crate::dialogs::Field::new("lid_split");
     j.upper_name = "Lid".into();
-    doc.add_feature(
+    let joint_id = doc.add_feature(
         &format!("Joint · {}", s.joint.label()),
         j.feature_kind(),
     );
     for (k, v) in [("title", format!("{} enclosure", doc.data.name)), ("revision", "A".into())] {
         doc.data.meta.insert(k.into(), v);
     }
+    if s.components {
+        make_components(&mut doc, board, joint_id, board_place)?;
+    }
     Ok(doc)
+}
+
+/// The flat enclosure as an assembly: `Enclosure` (the design master, hidden and
+/// out of the BOM) split by its parting joint into `Base` (grounded) and `Lid`
+/// components that follow every edit, plus the board as a locked, purchased
+/// reference component (STEP boards).
+fn make_components(
+    doc: &mut Document,
+    board: &Board,
+    joint: casework_model::feature::FeatureId,
+    board_place: DVec3,
+) -> Result<(), String> {
+    use casework_model::assembly::{ComponentId, Transform};
+    let (_, master) = doc
+        .move_root_into_component("Enclosure")
+        .map_err(|e| format!("components: {e}"))?;
+    let [(base_c, base), (lid_c, _)] = doc
+        .split_to_components(&[master], joint, Some(("Base", "Lid")))
+        .map_err(|e| format!("components: {e}"))?;
+    // so Base and Lid can be moved and mated (GUI_NEEDS: movable in-context components)
+    crate::adapters::anchor_in_context(doc, &[master], &[base_c, lid_c])
+        .map_err(|e| format!("components: {e}"))?;
+    doc.edit_occurrence(master, "Master", |o| o.grounded = true)
+        .map_err(|e| e.to_string())?;
+    doc.edit_occurrence(base, "Ground Base", |o| o.grounded = true)
+        .map_err(|e| e.to_string())?;
+    if matches!(board.kind, BoardKind::Step) {
+        let name = if board.name.is_empty() { "PCB" } else { board.name.as_str() };
+        let (_, occ) = doc
+            .import_step_assembly(name, board.bytes.clone(), ComponentId::ROOT, true)
+            .map_err(|e| format!("board: {e}"))?;
+        doc.edit_occurrence(occ, "Place board", |o| {
+            o.transform = Transform::translation(board_place);
+            o.grounded = true;
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The board outline (construction, fixed) and its offset by `clearance + wall`
@@ -575,12 +630,25 @@ mod tests {
             let board = Board::read(&write(&dir, file, &data)).unwrap();
             // snap fits: see GUI_NEEDS 12d (no position placed on these boxes)
             for k in [joint::Kind::Tongue, joint::Kind::Lip, joint::Kind::ORing] {
-                let s = Settings { joint: k, ..Settings::new("FDM 0.4 generic") };
+                let s = Settings { joint: k, components: false, ..Settings::new("FDM 0.4 generic") };
                 let mut doc = build(&board, &s).unwrap_or_else(|e| panic!("{file}: {e}"));
                 let r = doc.regenerate().clone();
                 assert!(r.errors().is_empty(), "{file} {k:?}: {:?}", r.errors());
             }
-            let s = Settings::new("Injection molded (nominal)");
+            // the default: an assembly (Enclosure master -> Base + Lid, the board)
+            let asm = build(&board, &Settings::new("FDM 0.4 generic")).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let names: Vec<_> = asm.data.components.iter().map(|c| c.name.clone()).collect();
+            assert!(names.iter().any(|n| n == "Base") && names.iter().any(|n| n == "Lid"), "{names:?}");
+            let mut asm = asm;
+            let ar = asm.regenerate_assembly().clone();
+            assert!(ar.errors().is_empty(), "{file}: {:?}", ar.errors());
+            let placed: Vec<_> = ar.instances.iter().filter(|i| i.visible).map(|i| i.label(&asm.data)).collect();
+            assert!(placed.iter().any(|l| l.starts_with("Base:1")) && placed.iter().any(|l| l.starts_with("Lid:1")), "{placed:?}");
+            if file.ends_with(".step") {
+                assert!(asm.data.components.iter().any(|c| c.purchased.is_some()), "board component");
+            }
+            let mut s = Settings::new("Injection molded (nominal)");
+            s.components = false;
             let mut doc = build(&board, &s).unwrap_or_else(|e| panic!("{file}: {e}"));
             let names: Vec<_> = doc.data.features.iter().map(|f| f.kind.label()).collect();
             let r = doc.regenerate().clone();
@@ -603,6 +671,7 @@ mod tests {
             // too low is refused up front
             let mut low = Settings::new("FDM 0.4 generic");
             low.height = "8".into();
+            low.components = false;
             assert!(build(&board, &low).is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);

@@ -158,12 +158,14 @@ impl FilletD {
                 edges,
                 radius,
                 auto_reduce,
+                ..
             } => (false, *body, edges, radius, *auto_reduce),
             FeatureKind::Chamfer {
                 body,
                 edges,
                 distance,
                 auto_reduce,
+                ..
             } => (true, *body, edges, distance, *auto_reduce),
             _ => unreachable!(),
         };
@@ -251,6 +253,8 @@ impl FilletD {
                     edges,
                     distance: radius,
                     auto_reduce: s.auto_reduce,
+                    sets: Vec::new(),
+                    skipped: Vec::new(),
                 }
             } else {
                 FeatureKind::Fillet {
@@ -258,6 +262,9 @@ impl FilletD {
                     edges,
                     radius,
                     auto_reduce: s.auto_reduce,
+                    sets: Vec::new(),
+                    skipped: Vec::new(),
+                    setback: false,
                 }
             };
             let fname = match (&s.name, out.len()) {

@@ -6,6 +6,11 @@
 //!   the same undoable edit as every parameter change.
 //! * **Rollback marker.** Not part of `DocData` yet: the GUI keeps it and sends the
 //!   truncated feature list to the worker.
+//! * **Movable in-context components.** A component made by `split_to_components`
+//!   is built in the frame of its context occurrence, so moving its only occurrence
+//!   re-expresses the master's half and it stays put. Each gets a hidden "design
+//!   position" anchor occurrence inside the master as its `context`
+//!   ([`anchor_in_context`]); its visible occurrence then moves (hinged lids).
 //! * **Usage counts.** "Used by" in the Parameters panel scans feature, sketch and
 //!   parameter JSON for identifiers.
 
@@ -36,8 +41,35 @@ pub fn binding(d: &DocData, f: FeatureId) -> Option<&str> {
     d.meta.get(&bind_key(f)).map(|s| s.as_str())
 }
 
-/// Re-evaluate every plane binding into its feature.
+/// Re-evaluate every plane binding into its feature (root and components, each
+/// with its own params in scope).
 pub fn apply_bindings(d: &mut DocData) {
+    apply_bindings_root(d);
+    let bound: Vec<u32> = d
+        .meta
+        .keys()
+        .filter_map(|k| k.strip_prefix(BIND).and_then(|id| id.parse().ok()))
+        .collect();
+    if bound.is_empty() {
+        return;
+    }
+    let comps: Vec<casework_model::assembly::ComponentId> = d
+        .components
+        .iter()
+        .filter(|c| c.features.iter().any(|f| bound.contains(&f.id.0)))
+        .map(|c| c.id)
+        .collect();
+    for c in comps {
+        if let Some(mut v) = d.component_view(c) {
+            apply_bindings_root(&mut v);
+            if let Some(comp) = d.component_mut(c) {
+                comp.features = v.features;
+            }
+        }
+    }
+}
+
+fn apply_bindings_root(d: &mut DocData) {
     let Ok(vals) = d.values() else { return };
     let binds: Vec<(u32, String)> = d
         .meta
@@ -78,10 +110,19 @@ pub fn set_param(doc: &mut Document, name: &str, expr: &str) -> Result<(), DocEr
 
 /// The document as the worker should see it: rolled back to `active` features.
 pub fn effective(d: &DocData, active: Option<usize>) -> DocData {
+    effective_in(d, casework_model::assembly::ComponentId::ROOT, active)
+}
+
+/// Same, with the rollback marker in component `scope`'s history.
+pub fn effective_in(
+    d: &DocData,
+    scope: casework_model::assembly::ComponentId,
+    active: Option<usize>,
+) -> DocData {
     let mut d = d.clone();
     apply_bindings(&mut d);
-    if let Some(n) = active {
-        d.features.truncate(n);
+    if let (Some(n), Some(f)) = (active, crate::scope::features_mut(&mut d, scope)) {
+        f.truncate(n);
     }
     d
 }
@@ -194,6 +235,55 @@ pub fn update_profile(
         }
         Ok::<_, casework_model::document::DocError>(())
     });
+}
+
+const ANCHOR: &str = "gui.anchor.";
+
+/// Is this occurrence a design-position anchor (hidden from the tree and counts)?
+pub fn is_anchor(d: &DocData, o: casework_model::assembly::OccurrenceId) -> bool {
+    d.meta.contains_key(&format!("{ANCHOR}{}", o.0))
+}
+
+/// Give in-context components a fixed frame: an anchor occurrence of each inside the
+/// master component (`master` = the master's occurrence path), placed where the
+/// master is, grounded and out of the BOM, set as the component's `context`. One
+/// undo step. See GUI_NEEDS ("movable in-context components").
+pub fn anchor_in_context(
+    doc: &mut Document,
+    master: &[casework_model::assembly::OccurrenceId],
+    comps: &[casework_model::assembly::ComponentId],
+) -> Result<(), DocError> {
+    use casework_model::assembly::{Occurrence, OccurrenceId, Transform};
+    let master = master.to_vec();
+    doc.edit("Anchor in-context components", |d| {
+        let mc = d.component_at(&master).map_err(DocError::Other)?;
+        for c in comps {
+            let name = d.component_name(*c);
+            let id = OccurrenceId(d.next_id);
+            d.next_id += 1;
+            let o = Occurrence {
+                id,
+                component: *c,
+                name: format!("{name} (design position)"),
+                transform: Transform::IDENTITY,
+                visible: true,
+                grounded: true,
+                explode: glam::DVec3::ZERO,
+                in_bom: false,
+            };
+            d.component_mut(mc)
+                .ok_or_else(|| DocError::Other("master component vanished".into()))?
+                .children
+                .push(o);
+            d.meta.insert(format!("{ANCHOR}{}", id.0), "1".into());
+            let mut p = master.clone();
+            p.push(id);
+            if let Some(comp) = d.component_mut(*c) {
+                comp.context = Some(p);
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

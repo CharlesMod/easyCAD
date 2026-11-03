@@ -169,6 +169,7 @@ impl JointD {
                 body,
                 plane,
                 new_name,
+                ..
             } if !f.suppressed && plane.normal.z.abs() > 0.999 => {
                 Some((f, *body, *plane, new_name.clone()))
             }

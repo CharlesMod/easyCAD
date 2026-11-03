@@ -38,8 +38,8 @@ pub struct DrawBody {
     pub translucent: bool,
     /// Per-vertex colours (imported STEP appearance), parallel to the mesh positions.
     pub colors: Option<Arc<Vec<[f32; 3]>>>,
-    /// Display translation (exploded previews).
-    pub offset: Vec3,
+    /// Model matrix: mesh frame -> view frame (placed instances, explode, drags).
+    pub model: Mat4,
 }
 
 #[derive(Clone)]
@@ -50,6 +50,8 @@ pub struct FaceHighlight {
     pub color: [f32; 4],
     /// Draw through everything in front (hidden pick candidate).
     pub xray: bool,
+    /// Mesh frame -> view frame (as for its body).
+    pub model: Mat4,
 }
 
 #[derive(Clone, Copy)]
@@ -93,7 +95,7 @@ struct Globals {
 struct DrawUniform {
     color: [f32; 4],
     params: [f32; 4],
-    offset: [f32; 4],
+    model: [[f32; 4]; 4],
 }
 
 struct GpuMesh {
@@ -621,10 +623,10 @@ impl ViewportGpu {
             Grid,
         }
         let mut list: Vec<(P, usize, What, DrawUniform)> = Vec::new();
-        let u = |c: [f32; 4], lit: f32| DrawUniform {
+        let u = |c: [f32; 4], lit: f32, m: &Mat4| DrawUniform {
             color: c,
             params: [lit, 0.0, 0.0, 0.0],
-            offset: [0.0; 4],
+            model: m.to_cols_array_2d(),
         };
         let ub = |b: &DrawBody, c: [f32; 4], lit: f32| DrawUniform {
             color: c,
@@ -638,7 +640,7 @@ impl ViewportGpu {
                 0.0,
                 0.0,
             ],
-            offset: [b.offset.x, b.offset.y, b.offset.z, 0.0],
+            model: b.model.to_cols_array_2d(),
         };
         let wire = f.mode == DisplayMode::Wireframe;
         for b in f.bodies.iter().filter(|b| !b.translucent) {
@@ -663,7 +665,7 @@ impl ViewportGpu {
             }
         }
         if f.grid.is_some() {
-            list.push((P::Grid, 0, What::Grid, u([0.0; 4], 0.0)));
+            list.push((P::Grid, 0, What::Grid, u([0.0; 4], 0.0, &Mat4::IDENTITY)));
         }
         for b in &f.bodies {
             if b.translucent {
@@ -683,7 +685,7 @@ impl ViewportGpu {
                 };
                 if let Some((s, n)) = range {
                     let p = if h.xray { P::Xray } else { P::Blend };
-                    list.push((p, key(&h.mesh), What::Face(s, n), u(h.color, 0.0)));
+                    list.push((p, key(&h.mesh), What::Face(s, n), u(h.color, 0.0, &h.model)));
                 }
             }
         }

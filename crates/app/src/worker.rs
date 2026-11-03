@@ -9,12 +9,16 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use casework_model::assembly::{
+    AssemblyCache, AssemblyResult, ComponentId, MateSolve, OccPath, OccurrenceId, Transform,
+};
 use casework_model::document::{BlobStore, DocData};
-use casework_model::feature::BodyId;
+use casework_model::feature::{BodyId, FeatureId};
 use casework_model::library::Library;
 use casework_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
-use casework_model::pick::Picker;
+use casework_model::pick::{BodyPicker, EdgeTolerance, Hit, HitKind, Picker};
 use casework_model::regen::{Body, MeshQuality, RegenResult, Regenerator};
+use glam::{DAffine3, DVec3, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
@@ -41,6 +45,11 @@ pub struct Request {
     pub quality: MeshQuality,
     /// Section plane (origin, normal, in-plane x) to cut every solid with (joint dialog).
     pub section: Option<(glam::DVec3, glam::DVec3, glam::DVec3)>,
+    /// Assemblies: the occurrence being edited (`[]` = the root). Its component's
+    /// bodies are `Output::bodies` and its frame is the view frame.
+    pub active: OccPath,
+    /// Assemblies: explode amount 0..1 (display only).
+    pub explode: f32,
 }
 
 /// One solid's cut at the section plane, as triangles in plane coordinates.
@@ -49,6 +58,7 @@ pub struct SectionCut {
     pub tris: Vec<[glam::DVec2; 3]>,
 }
 
+#[derive(Clone)]
 pub struct MeshedBody {
     pub body: Body,
     pub mesh: Option<Arc<Mesh>>,
@@ -58,6 +68,34 @@ pub struct MeshedBody {
     pub colors: Option<Arc<Vec<[f32; 3]>>>,
     pub faces: Vec<FaceInfo>,
     pub edges: Vec<EdgeInfo>,
+}
+
+/// A body placed by another occurrence (assemblies): drawn and picked in its
+/// component frame through `xf`.
+pub struct CtxBody {
+    /// Unique per (occurrence path, body): the selection / pick key.
+    pub key: BodyId,
+    pub path: OccPath,
+    pub component: ComponentId,
+    /// In the component's frame (`mb.body.id` is the component's own body id).
+    pub mb: MeshedBody,
+    pub picker: Option<Arc<BodyPicker>>,
+    /// Component frame -> view frame, explode included.
+    pub xf: DAffine3,
+    /// Component frame -> view frame without explode.
+    pub place: DAffine3,
+}
+
+/// Assembly side of an output.
+pub struct AsmView {
+    pub active: OccPath,
+    pub active_comp: ComponentId,
+    /// View frame -> world (the active occurrence's placement).
+    pub frame: Transform,
+    pub result: Arc<AssemblyResult>,
+    /// Mates solved before regenerating (the data in `Output::data` is solved).
+    pub solve: Option<MateSolve>,
+    pub explode: f32,
 }
 
 pub struct Output {
@@ -73,27 +111,93 @@ pub struct Output {
     pub sections: Vec<SectionCut>,
     pub quality: MeshQuality,
     pub elapsed: Duration,
+    /// Assemblies: bodies of the other occurrences.
+    pub ctx: Vec<CtxBody>,
+    pub asm: Option<AsmView>,
+    /// Context bodies can be picked (the root is active).
+    pub ctx_pickable: bool,
 }
 
 impl Output {
     pub fn mesh(&self, id: BodyId) -> Option<&Arc<Mesh>> {
-        self.bodies
-            .iter()
-            .find(|b| b.body.id == id)
-            .and_then(|b| b.mesh.as_ref())
+        self.meshed(id).and_then(|b| b.mesh.as_ref())
     }
     pub fn body(&self, id: BodyId) -> Option<&Body> {
-        self.bodies.iter().map(|b| &b.body).find(|b| b.id == id)
+        self.meshed(id).map(|b| &b.body)
     }
     pub fn shape(&self, id: BodyId) -> Option<&Shape> {
         self.body(id).map(|b| b.shape())
     }
+    /// A body of the active component, or a placed context body by its key.
     pub fn meshed(&self, id: BodyId) -> Option<&MeshedBody> {
-        self.bodies.iter().find(|b| b.body.id == id)
+        self.bodies
+            .iter()
+            .find(|b| b.body.id == id)
+            .or_else(|| self.ctx_body(id).map(|c| &c.mb))
+    }
+    pub fn ctx_body(&self, key: BodyId) -> Option<&CtxBody> {
+        if !is_ctx_key(key) {
+            return None;
+        }
+        self.ctx.iter().find(|c| c.key == key)
+    }
+    /// Mesh frame -> view frame of a body (identity for the active component's).
+    pub fn xf(&self, id: BodyId) -> DAffine3 {
+        self.ctx_body(id).map(|c| c.xf).unwrap_or(DAffine3::IDENTITY)
+    }
+    /// Is this a body of the component being edited (not a placed context body)?
+    pub fn is_active_body(&self, id: BodyId) -> bool {
+        !is_ctx_key(id) && self.bodies.iter().any(|b| b.body.id == id)
+    }
+    /// Every face / edge along the ray over the active bodies and (when pickable)
+    /// the context bodies, nearest first. `skip` filters context bodies out.
+    pub fn pick_all(&self, origin: Vec3, dir: Vec3, tol: EdgeTolerance, skip: &dyn Fn(&CtxBody) -> bool) -> Vec<Hit> {
+        let mut hits = self.picker.pick_all(origin, dir, tol);
+        if self.ctx_pickable {
+            let mut tmp = Vec::new();
+            for c in &self.ctx {
+                let Some(bp) = &c.picker else { continue };
+                if skip(c) {
+                    continue;
+                }
+                let inv = c.xf.inverse();
+                let o = inv.transform_point3(origin.as_dvec3()).as_vec3();
+                let d = inv.transform_vector3(dir.as_dvec3()).as_vec3();
+                tmp.clear();
+                bp.pick(o, d, tol, &mut tmp);
+                for mut h in tmp.drain(..) {
+                    h.body = c.key;
+                    h.point = c.xf.transform_point3(h.point.as_dvec3()).as_vec3();
+                    hits.push(h);
+                }
+            }
+            hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+            let mut out: Vec<Hit> = Vec::new();
+            for h in hits {
+                let dup = out
+                    .iter()
+                    .rev()
+                    .take_while(|o| h.t - o.t < 1e-3 + 1e-6 * h.t)
+                    .any(|o| o.body == h.body && o.kind == h.kind);
+                if !dup {
+                    out.push(h);
+                }
+            }
+            out.sort_by(|a, b| {
+                let ta = (a.t * 1e3).round();
+                let tb = (b.t * 1e3).round();
+                ta.total_cmp(&tb).then_with(|| {
+                    matches!(b.kind, HitKind::Edge(_)).cmp(&matches!(a.kind, HitKind::Edge(_)))
+                })
+            });
+            return out;
+        }
+        hits
     }
     pub fn triangles(&self) -> usize {
         self.bodies
             .iter()
+            .chain(self.ctx.iter().map(|c| &c.mb))
             .filter_map(|b| b.mesh.as_ref())
             .map(|m| m.indices.len())
             .sum()
@@ -157,6 +261,8 @@ impl Worker {
             drawing: None,
             quality: MeshQuality::Display,
             section: None,
+            active: Vec::new(),
+            explode: 0.0,
         })
     }
 
@@ -221,9 +327,43 @@ impl Drop for Worker {
     }
 }
 
+/// Context body keys: high bit of the feature id set (real feature ids are small).
+pub fn is_ctx_key(k: BodyId) -> bool {
+    k.feature.0 & 0x8000_0000 != 0
+}
+
+/// Stable key of (occurrence path, body).
+pub fn ctx_key(path: &[OccurrenceId], body: BodyId) -> BodyId {
+    // FNV-1a over the path
+    let mut h: u32 = 0x811c_9dc5;
+    for o in path {
+        for b in o.0.to_le_bytes() {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    }
+    BodyId {
+        feature: FeatureId(0x8000_0000 | (h & 0x7fff_ffff)),
+        index: (body.feature.0 << 8) ^ (body.index & 0xff),
+    }
+}
+
+/// A component body's mesh with what its instances share: picker, topology, bounds.
+type MeshEntry = (Arc<Mesh>, Arc<BodyPicker>, Arc<(Vec<FaceInfo>, Vec<EdgeInfo>)>, BBox);
+
+/// Worker-side caches for assemblies.
+#[derive(Default)]
+struct AsmCaches {
+    asm: AssemblyCache,
+    /// Per mesh (by pointer): picker, topology and mesh bounds, shared by instances.
+    meshes: HashMap<usize, MeshEntry>,
+    used: std::collections::HashSet<usize>,
+}
+
 fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
     let mut regen = Regenerator::default();
     let mut dcache = casework_model::drawing::DrawingCache::default();
+    let mut acache = AsmCaches::default();
     while let Ok(mut req) = rx.recv() {
         // keep only the newest request of each purpose, model first
         let mut latest: Vec<Request> = Vec::new();
@@ -244,7 +384,7 @@ fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
         latest.push(req);
         latest.sort_by_key(|r| r.purpose as u8);
         for r in latest {
-            let out = process(&mut regen, &mut dcache, r);
+            let out = process(&mut regen, &mut dcache, &mut acache, r);
             if tx.send(out).is_err() {
                 return;
             }
@@ -256,11 +396,45 @@ fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
 fn process(
     regen: &mut Regenerator,
     dcache: &mut casework_model::drawing::DrawingCache,
-    r: Request,
+    acache: &mut AsmCaches,
+    mut r: Request,
 ) -> Output {
     // no kernel mutex: the engine's concurrency contract allows parallel threads
     let t0 = Instant::now();
-    let result = regen.regenerate(&r.data, &r.blobs, &r.library);
+    let asm_mode = r.purpose != Purpose::Drawing && !r.data.occurrences.is_empty();
+    let mut asm_out: Option<(AssemblyResult, Option<MateSolve>, ComponentId, OccPath)> = None;
+    let result = if asm_mode {
+        let solve = if r.data.mates.is_empty() {
+            None
+        } else {
+            let (moves, solve) = casework_model::assembly::solve_mates(&r.data);
+            for (id, t) in moves {
+                if let Some(o) = r.data.occurrence_mut(id) {
+                    o.transform = t;
+                }
+            }
+            Some(solve)
+        };
+        let ar = casework_model::assembly::regenerate_assembly(
+            &r.data,
+            &r.blobs,
+            &r.library,
+            regen,
+            &mut acache.asm,
+        );
+        let (comp, active) = match r.data.component_at(&r.active) {
+            Ok(c) => (c, r.active.clone()),
+            Err(_) => (ComponentId::ROOT, Vec::new()),
+        };
+        let res = ar
+            .component(comp)
+            .map(|c| c.regen.clone())
+            .unwrap_or_else(|| regen.regenerate(&r.data, &r.blobs, &r.library));
+        asm_out = Some((ar, solve, comp, active));
+        res
+    } else {
+        regen.regenerate(&r.data, &r.blobs, &r.library)
+    };
     let drawing = r.drawing.as_ref().map(|d| {
         // BOM for balloons, from the document data alone
         let mut tmp = casework_model::document::Document::new(&r.data.name);
@@ -271,11 +445,19 @@ fn process(
         ))
     });
     let mut prefix_bodies = HashMap::new();
-    for n in r.prefixes {
-        let mut d = r.data.clone();
-        d.features.truncate(n);
-        let res = regen.regenerate(&d, &r.blobs, &r.library);
-        prefix_bodies.insert(n, res.bodies);
+    let active_comp = asm_out.as_ref().map(|a| a.2).unwrap_or(ComponentId::ROOT);
+    for n in std::mem::take(&mut r.prefixes) {
+        if active_comp == ComponentId::ROOT {
+            let mut d = r.data.clone();
+            d.features.truncate(n);
+            let res = regen.regenerate(&d, &r.blobs, &r.library);
+            prefix_bodies.insert(n, res.bodies);
+        } else if let Some(mut d) = r.data.component_view(active_comp) {
+            // the component's regenerator still holds its in-context inputs
+            d.features.truncate(n);
+            let res = acache.asm.regenerator(active_comp).regenerate(&d, &r.blobs, &r.library);
+            prefix_bodies.insert(n, res.bodies);
+        }
     }
     let bodies: Vec<MeshedBody> = result
         .bodies
@@ -343,19 +525,51 @@ fn process(
         ))
     };
     let mut bbox: Option<BBox> = None;
+    let mut grow = |p: DVec3| {
+        bbox = Some(match bbox {
+            None => BBox { min: p, max: p },
+            Some(bb) => BBox {
+                min: bb.min.min(p),
+                max: bb.max.max(p),
+            },
+        });
+    };
     for b in &bodies {
         if let Some(m) = &b.mesh {
             for p in &m.positions {
-                let p = glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
-                bbox = Some(match bbox {
-                    None => BBox { min: p, max: p },
-                    Some(bb) => BBox {
-                        min: bb.min.min(p),
-                        max: bb.max.max(p),
-                    },
-                });
+                grow(DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
             }
         }
+    }
+    let (mut ctx, mut asm, mut ctx_pickable) = (Vec::new(), None, false);
+    if let Some((ar, solve, comp, active)) = asm_out {
+        let frame = r.data.world_transform(&active).unwrap_or(Transform::IDENTITY);
+        ctx = context_bodies(&r, &ar, &active, &frame, acache);
+        for c in &ctx {
+            if let Some(bb) = acache
+                .meshes
+                .get(&c.mb.mesh.as_ref().map(|m| Arc::as_ptr(m) as usize).unwrap_or(0))
+                .map(|e| e.3)
+            {
+                for i in 0..8 {
+                    let p = DVec3::new(
+                        if i & 1 == 0 { bb.min.x } else { bb.max.x },
+                        if i & 2 == 0 { bb.min.y } else { bb.max.y },
+                        if i & 4 == 0 { bb.min.z } else { bb.max.z },
+                    );
+                    grow(c.xf.transform_point3(p));
+                }
+            }
+        }
+        ctx_pickable = active.is_empty();
+        asm = Some(AsmView {
+            active,
+            active_comp: comp,
+            frame,
+            result: Arc::new(ar),
+            solve,
+            explode: r.explode,
+        });
     }
     Output {
         id: r.id,
@@ -370,5 +584,116 @@ fn process(
         sections,
         quality: r.quality,
         elapsed: t0.elapsed(),
+        ctx,
+        asm,
+        ctx_pickable,
     }
+}
+
+/// The other occurrences' bodies, placed in the view frame (with the explode).
+fn context_bodies(
+    r: &Request,
+    ar: &AssemblyResult,
+    active: &OccPath,
+    frame: &Transform,
+    cache: &mut AsmCaches,
+) -> Vec<CtxBody> {
+    let to_view = frame.inverse().affine();
+    cache.used.clear();
+    let inst: Vec<_> = ar
+        .instances
+        .iter()
+        .filter(|i| i.visible && i.path != *active)
+        .collect();
+    // automatic explode: top-level groups spread apart along z by their height
+    // order, and away from the centre in xy; stored `explode` offsets scale too
+    let mut auto: HashMap<OccurrenceId, DVec3> = HashMap::new();
+    let t = r.explode.clamp(0.0, 1.0) as f64;
+    let mut prepared = Vec::new();
+    for i in &inst {
+        let Ok(m) = i.body.mesh_quality(r.quality) else {
+            continue;
+        };
+        let k = Arc::as_ptr(&m) as usize;
+        if let std::collections::hash_map::Entry::Vacant(slot) = cache.meshes.entry(k) {
+            let faces = i.body.shape().faces().unwrap_or_default();
+            let edges = i.body.shape().edges().unwrap_or_default();
+            let mut bb: Option<BBox> = None;
+            for p in &m.positions {
+                let p = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+                bb = Some(match bb {
+                    None => BBox { min: p, max: p },
+                    Some(b) => BBox { min: b.min.min(p), max: b.max.max(p) },
+                });
+            }
+            let bb = bb.unwrap_or(BBox { min: DVec3::ZERO, max: DVec3::ZERO });
+            slot.insert((m.clone(), Arc::new(BodyPicker::new(i.body.id, &m)), Arc::new((faces, edges)), bb));
+        }
+        cache.used.insert(k);
+        prepared.push((i, m, k));
+    }
+    if t > 0.0 && active.is_empty() {
+        let mut groups: HashMap<OccurrenceId, BBox> = HashMap::new();
+        let mut all: Option<BBox> = None;
+        for (i, _, k) in &prepared {
+            let Some(top) = i.path.first() else { continue };
+            let bb = cache.meshes[k].3;
+            let a = i.transform.affine();
+            for c in 0..8 {
+                let p = a.transform_point3(DVec3::new(
+                    if c & 1 == 0 { bb.min.x } else { bb.max.x },
+                    if c & 2 == 0 { bb.min.y } else { bb.max.y },
+                    if c & 4 == 0 { bb.min.z } else { bb.max.z },
+                ));
+                for b in [groups.entry(*top).or_insert(BBox { min: p, max: p }), all.get_or_insert(BBox { min: p, max: p })] {
+                    b.min = b.min.min(p);
+                    b.max = b.max.max(p);
+                }
+            }
+        }
+        if let Some(all) = all {
+            let mut order: Vec<(OccurrenceId, BBox)> = groups.into_iter().collect();
+            order.sort_by(|a, b| a.1.center().z.total_cmp(&b.1.center().z).then(a.0.cmp(&b.0)));
+            let n = order.len() as f64;
+            let h = all.size().z.max(10.0);
+            for (rank, (id, bb)) in order.iter().enumerate() {
+                let c = bb.center() - all.center();
+                let z = (rank as f64 - (n - 1.0) / 2.0) * h * 0.9;
+                auto.insert(*id, DVec3::new(c.x * 0.8, c.y * 0.8, z) * t);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, m, k) in prepared {
+        let (_, picker, topo, _) = &cache.meshes[&k];
+        let place = to_view * i.transform.affine();
+        let stored = i.display.translation - i.transform.translation;
+        let off = stored * t + i.path.first().and_then(|o| auto.get(o)).copied().unwrap_or(DVec3::ZERO);
+        let xf = to_view * DAffine3::from_translation(off) * i.transform.affine();
+        let colors = i
+            .body
+            .appearance()
+            .and_then(|_| i.body.mesh_colors(r.quality).ok())
+            .map(Arc::new);
+        out.push(CtxBody {
+            key: ctx_key(&i.path, i.body.id),
+            path: i.path.clone(),
+            component: i.component,
+            mb: MeshedBody {
+                body: i.body.clone(),
+                mesh: Some(m),
+                error: None,
+                colors,
+                faces: topo.0.clone(),
+                edges: topo.1.clone(),
+            },
+            picker: Some(picker.clone()),
+            xf,
+            place,
+        });
+    }
+    let used = std::mem::take(&mut cache.used);
+    cache.meshes.retain(|k, _| used.contains(k));
+    cache.used = used;
+    out
 }

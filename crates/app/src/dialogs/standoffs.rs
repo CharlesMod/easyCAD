@@ -319,6 +319,10 @@ impl StandoffsD {
                 height: self.height.expr(None),
                 base_fillet: self.base_fillet.expr(None),
                 draft_deg: self.draft.expr(None),
+                offset: 0.0.into(),
+                exclude: Vec::new(),
+                gussets: None,
+                lid_holes: None,
             }
         } else {
             let pts: Vec<DVec2> = self
@@ -340,6 +344,7 @@ impl StandoffsD {
                 hole_depth: None,
                 base_fillet: self.base_fillet.expr(None),
                 draft_deg: self.draft.expr(None),
+                offset: 0.0.into(),
             }
         };
         Ok(vec![Feature {
