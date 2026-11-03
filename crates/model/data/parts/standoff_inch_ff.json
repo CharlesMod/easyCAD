@@ -8,7 +8,7 @@
   "generator": "standoff",
   "variant": "ff",
   "tags": ["standoff", "spacer", "hex standoff", "pcb", "female", "inch"],
-  "todo": "TODO: across-flats sizes vary by vendor (#4-40 is sold in 3/16 and 1/4 hex); verify against the stocked part.",
+  "todo": "Across flats varies by vendor (#4-40 is sold in 3/16 and 1/4 hex); check against the stocked part.",
   "sizes": [
     {"size": "#2-56",  "d": 0.086, "s": 0.1875, "lengths": [0.125, 0.1875, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
     {"size": "#4-40",  "d": 0.112, "s": 0.1875, "lengths": [0.125, 0.1875, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},

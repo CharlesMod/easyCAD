@@ -64,8 +64,10 @@ fn imperial_shcs_and_nut_4_40() {
     assert!((bb.size().x - 0.183 * IN).abs() < 1e-3);
     assert!((bb.size().z - (0.5 + 0.112) * IN).abs() < 1e-6, "{bb:?}");
     let clear = p.hole(HoleChoice::Clearance(Fit::Close)).unwrap();
-    assert!((clear.diameter - 0.1160 * IN).abs() < 1e-9);
-    assert!((p.hole(HoleChoice::Clearance(Fit::Normal)).unwrap().diameter - 0.1285 * IN).abs() < 1e-9);
+    // ASME B18.2.8 close / normal / loose
+    assert!((clear.diameter - 0.120 * IN).abs() < 1e-9);
+    assert!((p.hole(HoleChoice::Clearance(Fit::Normal)).unwrap().diameter - 0.128 * IN).abs() < 1e-9);
+    assert!((p.hole(HoleChoice::Clearance(Fit::Loose)).unwrap().diameter - 0.144 * IN).abs() < 1e-9);
     assert!((p.hole(HoleChoice::Tap).unwrap().diameter - 0.0890 * IN).abs() < 1e-9);
 
     let n = BuiltinSource.build("asme_hex_nut", "#4-40").unwrap();
@@ -136,6 +138,7 @@ fn insert_part_with_auto_hole_and_bom() {
             offset: 0.0.into(),
             auto_hole: Some(AutoHole { choice: HoleChoice::Insert, depth: None, fit: None }),
             target: Some(plate),
+            threads: Default::default(),
         },
     );
     let shcs = BuiltinSource.parts().into_iter().find(|p| p.id == "iso4762").unwrap();
@@ -149,6 +152,7 @@ fn insert_part_with_auto_hole_and_bom() {
             offset: Expr::from(0.0),
             auto_hole: Some(AutoHole { choice: HoleChoice::Counterbore(Fit::Normal), depth: None, fit: None }),
             target: Some(plate),
+            threads: Default::default(),
         },
     );
     let out = doc.regenerate();
@@ -209,6 +213,7 @@ fn snap_to_circular_edge() {
             offset: 0.0.into(),
             auto_hole: None,
             target: Some(plate),
+            threads: Default::default(),
         },
     );
     let out = doc.regenerate();
@@ -259,6 +264,7 @@ fn local_step_library_is_embedded_in_the_document() {
             offset: 0.0.into(),
             auto_hole: None,
             target: Some(plate),
+            threads: Default::default(),
         },
     );
     let save = tempfile::tempdir().unwrap();
@@ -274,3 +280,111 @@ fn local_step_library_is_embedded_in_the_document() {
 }
 
 use easycad_model::params::Expr;
+
+fn tris(s: &Shape) -> usize {
+    s.tessellate(0.05, 12.0).unwrap().indices.len()
+}
+
+#[test]
+fn modeled_threads_on_parts() {
+    let b = BuiltinSource;
+    // a screw: the threaded shank weighs less than the plain Ø3 cylinder
+    let (plain, thr) = (b.build("iso4762", "M3x10").unwrap(), b.build_threaded("iso4762", "M3x10").unwrap());
+    assert!(thr.shape.is_valid() && thr.shape.solids().unwrap().len() == 1);
+    let (vp, vt) = (plain.shape.volume().unwrap(), thr.shape.volume().unwrap());
+    assert!(vp - vt > 8.0 && vp - vt < 18.0, "{vp} {vt}");
+    assert_eq!(thr.bbox_z(), plain.bbox_z(), "same length and head");
+    assert_eq!(thr.modeled_thread().map(|t| t.pitch), Some(0.5));
+    let (tp, tt) = (tris(&plain.shape), tris(&thr.shape));
+    eprintln!("M3x10 SHCS: {tp} triangles cosmetic, {tt} modelled");
+    assert!(tt < 40_000, "{tt}");
+    // a nut, an insert and a standoff: threaded bores leave more material than the
+    // cosmetic Ø d bore, and stay valid
+    for (id, size) in [("iso4032", "M3"), ("insert_m", "M3"), ("standoff_m_mf", "M3x10")] {
+        let (p, t) = (b.build(id, size).unwrap(), b.build_threaded(id, size).unwrap());
+        assert!(t.shape.is_valid(), "{id}");
+        let (vp, vt) = (p.shape.volume().unwrap(), t.shape.volume().unwrap());
+        eprintln!("{id} {size}: {vp:.2} -> {vt:.2} mm³, {} triangles", tris(&t.shape));
+        if id != "standoff_m_mf" {
+            assert!(vt > vp, "{id}: {vp} {vt}");
+        }
+    }
+    // inch
+    let t = b.build_threaded("asme_shcs", "#4-40x1/4").unwrap();
+    assert!(t.shape.is_valid());
+    // thread-forming screws keep their cosmetic shank
+    let (p, t) = (b.build("pt_pan", "M3x8").unwrap(), b.build_threaded("pt_pan", "M3x8").unwrap());
+    assert!(t.modeled_thread().is_none() && (p.shape.volume().unwrap() - t.shape.volume().unwrap()).abs() < 1e-9);
+}
+
+trait BboxZ {
+    fn bbox_z(&self) -> (i64, i64);
+}
+impl BboxZ for PartInstance {
+    fn bbox_z(&self) -> (i64, i64) {
+        let bb = self.shape.bbox().unwrap();
+        ((bb.min.z * 1e4).round() as i64, (bb.max.z * 1e4).round() as i64)
+    }
+}
+
+#[test]
+fn modeled_tapped_hole() {
+    let (mut doc, plate) = plate_doc();
+    let shcs = BuiltinSource.parts().into_iter().find(|p| p.id == "iso4762").unwrap();
+    let r = doc.part_ref(&shcs, "M3x8").unwrap();
+    let screw = doc.add_feature(
+        "Screw",
+        FeatureKind::InsertPart {
+            part: r,
+            placements: vec![PlacementRef::Explicit { origin: DVec3::new(-10.0, -10.0, 10.0), axis: DVec3::Z }],
+            flip: false,
+            offset: Expr::from(0.0),
+            auto_hole: Some(AutoHole { choice: HoleChoice::Tap, depth: None, fit: None }),
+            target: Some(plate),
+            threads: Threads::Cosmetic,
+        },
+    );
+    let out = doc.regenerate();
+    assert!(out.errors().is_empty(), "{:?}", out.errors());
+    let v_plain = out.body_by_id(plate).unwrap().shape().volume().unwrap();
+    assert!((16000.0 - v_plain - PI * 1.25f64.powi(2) * 8.0).abs() < 1e-3, "tap drill Ø2.5 x 8");
+    doc.edit("model threads", |d| {
+        if let FeatureKind::InsertPart { threads, .. } = &mut d.feature_mut(screw).unwrap().kind {
+            *threads = Threads::Modeled;
+        }
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    let out = doc.regenerate();
+    let rep = out.report(screw).unwrap();
+    assert_eq!(rep.status, FeatureStatus::Ok, "{rep:?}");
+    let body = out.body_by_id(plate).unwrap().shape();
+    assert!(body.is_valid());
+    // the thread's void (core D1 = 2.46 plus the ridge out to Ø3) over 8 mm
+    let removed = 16000.0 - body.volume().unwrap();
+    let t = easycad_model::occt::Thread::parse("M3").unwrap();
+    let core = PI * (t.minor() / 2.0).powi(2) * 8.0;
+    assert!(removed > core + 3.0 && removed < PI * 1.5f64.powi(2) * 8.0, "{removed}");
+    let screw_body = out.bodies.iter().find(|b| b.name.contains("M3x8")).unwrap();
+    assert!(screw_body.shape().is_valid());
+    eprintln!("tapped plate: {} triangles", tris(body));
+
+    // a part without a standard thread warns and stays cosmetic
+    let magnet = BuiltinSource.parts().into_iter().find(|p| p.category == Category::Magnet).unwrap();
+    let size = BuiltinSource.sizes(&magnet.id)[0].clone();
+    let r = doc.part_ref(&magnet, &size).unwrap();
+    let m = doc.add_feature(
+        "Magnet",
+        FeatureKind::InsertPart {
+            part: r,
+            placements: vec![PlacementRef::Explicit { origin: DVec3::new(10.0, 10.0, 10.0), axis: DVec3::Z }],
+            flip: false,
+            offset: Expr::from(0.0),
+            auto_hole: None,
+            target: Some(plate),
+            threads: Threads::Modeled,
+        },
+    );
+    let out = doc.regenerate();
+    assert!(matches!(out.report(m).unwrap().status, FeatureStatus::Warning(ref w) if w.contains("cosmetic")), "{:?}", out.report(m));
+}

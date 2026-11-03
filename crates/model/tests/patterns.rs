@@ -8,7 +8,7 @@ use easycad_model::geom::{Axis, Plane};
 use easycad_model::library::{BuiltinSource, HoleChoice, PartSource};
 use easycad_model::params::Expr;
 use easycad_model::regen::FeatureStatus;
-use easycad_model::select::FaceSelector;
+use easycad_model::select::{EdgeSelector, FaceSelector};
 use easycad_model::sketch::Sketch;
 use glam::{DVec2, DVec3};
 
@@ -68,6 +68,7 @@ fn mirrored_parts_are_copied_and_counted() {
             offset: 0.0.into(),
             auto_hole: Some(AutoHole { choice: HoleChoice::Insert, depth: None, fit: None }),
             target: Some(p),
+            threads: Default::default(),
         },
     );
     let before = vol(&mut doc, p);
@@ -103,10 +104,105 @@ fn patterned_holes_get_fits_and_teardrops() {
     let out = doc.regenerate();
     assert!(out.errors().is_empty(), "{:?}", out.errors());
     assert_eq!(out.process.teardropped.len(), 3, "{:?}", out.process);
-    // non-patternable sources give a clear error
-    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![easycad_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
+    // a fillet whose selector picks over the whole body has no copy of its own
+    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
     let bad = doc.add_feature("Bad", FeatureKind::Pattern { source: PatternSource::Features(vec![fillet]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 5.0.into(), count: Expr::from(2) } });
-    assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("cannot be patterned")));
+    assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("parallel to a direction over the whole body")), "{:?}", doc.regenerate().report(bad));
+}
+
+fn fillet(edges: Vec<EdgeSelector>, r: f64, b: BodyId) -> FeatureKind {
+    FeatureKind::Fillet { body: Some(b), edges, radius: r.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false }
+}
+
+/// The top outer edge of a boss at `x` (top at z = 11, radius 3.5).
+fn boss_top(x: f64) -> EdgeSelector {
+    EdgeSelector::Circles { radius: 3.5, near: Some((DVec3::new(x, 0.0, 11.0), 0.5)) }
+}
+
+#[test]
+fn patterned_fillets_follow_their_bosses() {
+    // reference: three bosses, one fillet on all three top edges
+    let mut a = Document::new("A");
+    let pa = plate(&mut a, DVec2::new(80.0, 30.0), 3.0);
+    a.add_feature("Bosses", boss(vec![DVec2::new(-15.0, 0.0), DVec2::new(0.0, 0.0), DVec2::new(15.0, 0.0)], pa));
+    a.add_feature("Round", fillet(vec![boss_top(-15.0), boss_top(0.0), boss_top(15.0)], 1.0, pa));
+    let want = vol(&mut a, pa);
+    // a pattern of one boss and its fillet
+    let mut b = Document::new("B");
+    let pb = plate(&mut b, DVec2::new(80.0, 30.0), 3.0);
+    let f = b.add_feature("Boss", boss(vec![DVec2::new(-15.0, 0.0)], pb));
+    let r = b.add_feature("Round", fillet(vec![boss_top(-15.0)], 1.0, pb));
+    let before = vol(&mut b, pb);
+    let p = b.add_feature("Row", FeatureKind::Pattern { source: PatternSource::Features(vec![f, r]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 15.0.into(), count: Expr::from(3) } });
+    let got = vol(&mut b, pb);
+    assert!((got - want).abs() < 1e-3, "patterned {got} vs reference {want}");
+    let out = b.regenerate();
+    assert_eq!(out.report(p).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(p));
+    assert!(out.body_by_id(pb).unwrap().shape().is_valid());
+    // the bosses alone (without their fillets) would weigh more
+    let mut c = Document::new("C");
+    let pc = plate(&mut c, DVec2::new(80.0, 30.0), 3.0);
+    let f = c.add_feature("Boss", boss(vec![DVec2::new(-15.0, 0.0)], pc));
+    c.add_feature("Row", FeatureKind::Pattern { source: PatternSource::Features(vec![f]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 15.0.into(), count: Expr::from(3) } });
+    let unrounded = vol(&mut c, pc);
+    assert!(unrounded > got + 1e-3 && before < got);
+}
+
+#[test]
+fn mirrored_chamfer_and_draft_follow_the_copy() {
+    let mut doc = Document::new("M");
+    let p = plate(&mut doc, DVec2::new(60.0, 30.0), 3.0);
+    let base = vol(&mut doc, p);
+    let f = doc.add_feature("Boss", boss(vec![DVec2::new(15.0, 0.0)], p));
+    // a picked (hint) edge: the boss's top outer circle
+    let shape = doc.regenerate().body_by_id(p).unwrap().shape().clone();
+    let e = shape.edges().unwrap().into_iter().find(|e| e.circle.is_some_and(|(c, _, r)| (r - 3.5).abs() < 1e-6 && (c.z - 11.0).abs() < 1e-6)).unwrap();
+    let ch = doc.add_feature("Chamfer", FeatureKind::Chamfer { body: Some(p), edges: vec![EdgeSelector::from_pick(&e)], distance: 0.8.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new() });
+    let one = vol(&mut doc, p) - base;
+    let m = doc.add_feature("Mirror", FeatureKind::Mirror { source: PatternSource::Features(vec![f, ch]), plane: Plane::YZ });
+    let two = vol(&mut doc, p) - base;
+    assert!((two - 2.0 * one).abs() < 1e-3, "{two} vs 2 x {one}");
+    let out = doc.regenerate();
+    assert_eq!(out.report(m).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(m));
+
+    // a drafted block, patterned with its draft: the copies taper like the original
+    let mut d = Document::new("D");
+    let p = plate(&mut d, DVec2::new(80.0, 30.0), 3.0);
+    let mut s = Sketch::new("B", Plane::XY.offset(3.0));
+    s.rect(DVec2::new(-30.0, -5.0), DVec2::new(-20.0, 5.0));
+    let s = d.add_sketch(s);
+    let block = d.add_feature("Block", FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: 10.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::Join, target: Some(p) });
+    let face = FaceSelector::Hint { centroid: DVec3::new(-30.0, 0.0, 8.0), normal: DVec3::NEG_X, kind: None };
+    let dr = d.add_feature("Draft", FeatureKind::Draft { body: Some(p), faces: vec![face], neutral: Plane::XY.offset(3.0), pull: DVec3::Z, angle_deg: 5.0.into(), offset: 0.0.into() });
+    let v1 = vol(&mut d, p);
+    let row = d.add_feature("Row", FeatureKind::Pattern { source: PatternSource::Features(vec![block, dr]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 20.0.into(), count: Expr::from(3) } });
+    let v3 = vol(&mut d, p);
+    let block_v = v1 - 80.0 * 30.0 * 3.0;
+    assert!(block_v < 1000.0 - 1.0, "the draft removes material: {block_v}");
+    assert!((v3 - v1 - 2.0 * block_v).abs() < 1e-3, "each copy drafted: {v3} {v1} {block_v}");
+    let out = d.regenerate();
+    assert_eq!(out.report(row).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(row));
+}
+
+#[test]
+fn patterning_a_shell_says_why_not() {
+    let mut doc = Document::new("S");
+    let p = plate(&mut doc, DVec2::new(40.0, 40.0), 20.0);
+    let sh = doc.add_feature("Shell", FeatureKind::Shell { body: Some(p), open_faces: vec![FaceSelector::top()], thickness: 2.0.into(), outward: false });
+    let bad = doc.add_feature("Ring", FeatureKind::Pattern { source: PatternSource::Features(vec![sh]), kind: PatternKind::Circular { axis: Axis::Z, count: Expr::from(4), total_deg: 360.0.into() } });
+    let st = doc.regenerate().report(bad).unwrap().status.clone();
+    assert!(matches!(st, FeatureStatus::Error(ref e) if e.contains("hollows the whole body") && e.contains("pattern the body")), "{st:?}");
+    // mirroring the (shelled) body itself works
+    let m = doc.add_feature("Mirror body", FeatureKind::Mirror { source: PatternSource::Body(p), plane: Plane::YZ.offset(20.0) });
+    doc.edit("drop ring", |d| {
+        d.feature_mut(bad).unwrap().suppressed = true;
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    let out = doc.regenerate();
+    assert_eq!(out.report(m).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(m));
+    let bb = out.body_by_id(p).unwrap().shape().bbox().unwrap();
+    assert!((bb.max.x - 60.0).abs() < 1e-6, "{bb:?}");
 }
 
 #[test]

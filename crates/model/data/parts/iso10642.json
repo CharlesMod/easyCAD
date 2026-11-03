@@ -2,7 +2,7 @@
   "id": "iso10642",
   "name": "Countersunk (flat) head socket screw",
   "standard": "ISO 10642",
-  "source": "ISO 10642:2004 Table 1: dk = theoretical max head diameter (sharp edge, 2.24 d), k max (0.62 d), s nominal; 90 deg head. Length is overall (includes head). ISO 10642 starts at M3.",
+  "source": "ISO 10642:2004 Table 1: dk = theoretical max head diameter (sharp edge, 2.24 d), k max (0.62 d), s nominal; 90 deg head. Length is overall (includes head). ISO 10642 starts at M3. Verified 2026-11 against BS EN ISO 10642:2004 (engineersedge.com bs_en_iso_10642_14583, westfieldfasteners.co.uk).",
   "units": "mm",
   "system": "metric",
   "generator": "screw",

@@ -207,24 +207,35 @@ pub fn write_step(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     // one STEP part per body (per sub-part for assemblies), keeping names/colours
     let mut shapes: Vec<Shape> = Vec::new();
     let mut parts: Vec<occt::StepPart> = Vec::new();
+    // face colours of their own (imported face styles), in the compound's face order
+    let mut face_colors: Vec<Option<[f32; 3]>> = Vec::new();
     for b in bodies {
+        let own = |f: usize| b.appearance().and_then(|a| a.face_color.get(f).copied().flatten());
         match b.appearance().filter(|a| a.parts.len() > 1 && b.shape().kind() == Some(occt::ShapeKind::Compound)) {
             Some(a) => {
                 let solids = b.shape().solids()?;
                 for (k, s) in solids.into_iter().enumerate() {
                     let p = a.parts.get(k);
                     parts.push(occt::StepPart { name: p.map(|p| p.name.clone()).unwrap_or_else(|| b.name.clone()), color: p.and_then(|p| p.color) });
+                    let mine: Vec<Option<[f32; 3]>> = a.face_part.iter().enumerate().filter(|(_, o)| **o as usize == k).map(|(f, _)| own(f)).collect();
+                    let nf = s.count(occt::ShapeKind::Face) as usize;
+                    face_colors.extend(if mine.len() == nf { mine } else { vec![None; nf] });
                     shapes.push(s);
                 }
             }
             None => {
                 parts.push(occt::StepPart { name: b.name.clone(), color: b.appearance().and_then(|a| a.parts.first()).and_then(|p| p.color) });
+                face_colors.extend((0..b.shape().count(occt::ShapeKind::Face) as usize).map(own));
                 shapes.push(b.shape().clone());
             }
         }
     }
     let refs: Vec<&Shape> = shapes.iter().collect();
-    std::fs::write(path, Shape::compound(&refs)?.to_step_string_named(&parts)?)?;
+    let c = Shape::compound(&refs)?;
+    if face_colors.len() != c.count(occt::ShapeKind::Face) as usize {
+        face_colors.clear(); // faces shared between bodies: keep part colours only
+    }
+    std::fs::write(path, c.to_step_string_styled(&parts, &face_colors)?)?;
     Ok(())
 }
 

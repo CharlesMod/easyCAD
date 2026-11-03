@@ -973,7 +973,7 @@ fn step_component(blob: &str, node: u32, reference: bool, blobs: &BlobStore, cac
         Ok(n) => {
             if let Some(shape) = n.shape {
                 let nf = shape.faces().map(|f| f.len()).unwrap_or(0);
-                let app = Appearance { parts: vec![SubPart { name: n.name.clone(), color: n.color }], face_part: vec![0; nf] };
+                let app = Appearance { parts: vec![SubPart { name: n.name.clone(), color: n.color }], face_part: vec![0; nf], face_color: Vec::new() };
                 out.bodies.push(Body { id: crate::feature::BodyId::of(fid), name: n.name, reference, part: None, geom: BodyGeom::with_appearance(shape, app) });
             }
         }
@@ -1018,6 +1018,7 @@ impl Document {
                     offset: crate::params::Expr::new("0"),
                     auto_hole: None,
                     target: None,
+                    threads: Default::default(),
                 },
             };
             d.components.push(Component { id, name: name.clone(), features: vec![feature], locked: true, purchased: Some(part), ..Default::default() });

@@ -54,6 +54,7 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [x] **[ui+eng]** Native sketch offset for chains that contain arcs (GUI_NEEDS #21): each offset
       joint gets two equations (tangent joints pinned on the source joint's normal); 0 DOF, no
       redundancy on the board outline, S-curves, sharp corners, circles. The GUI's own offset is gone.
+- [ ] **[ui]** "Modeled threads" toggle when placing a part (`FeatureKind::InsertPart.threads`).
 
 ## 5. Known gaps (fix, or consciously drop)
 - [ ] Setback fillet corners: OpenCascade has no blend; implement or remove the toggle.
@@ -63,14 +64,19 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
       text moves off other text and view lines; Helvetica AFM widths for PDF centring and
       table / frame cells. Not done: editing an existing annotation's GD&T fields (the tool
       settings apply to new frames), offset / aligned sections, hatching patterns per material.
-- [ ] Parts library rows marked TODO (imperial inserts/standoffs, thread-forming heads, some button-head
-      lengths, M2/M2.5 counterbores, inch loose-fit clearance): verify against ISO 4762/7380/10642/273 and ASME B18.3.
-- [ ] Per-face STEP colours: no real fixture yet (the sample PCB has none).
+- [x] Parts library rows marked TODO: verified against ISO 4762/7380-1/10642/273, ASME B18.3/B18.22.1/B18.2.8
+      and vendor tables (ruthex inserts, EJOT PT); #2-56 rows and the B18.2.8 inch close/normal/loose classes added.
+      Still marked: shortest ISO 7380-1 lengths, #6-32/#10-32 inch inserts, M2/M2.5 counterbore depths (no source).
+- [x] Per-face STEP colours: read, shown and re-exported; fixture `crates/model/tests/data/face_colors.step`
+      (OCCT XCAF; the test also reads a plain-`STYLED_ITEM` variant). Assembly imports keep part colours only.
 - [x] Closed loops of mates are solved: the occurrences of a loop are solved together (least squares,
       drives used in mate order); redundant-but-consistent loops get a note, inconsistent ones
       `OverConstrained("the loop through … cannot close …")`. Tree mates still just propagate.
-- [ ] Pattern/mirror of whole-body features (fillet, shell) returns "cannot be patterned".
-- [ ] Threads are cosmetic only.
+- [x] Pattern/mirror of whole-body features: fillets, chamfers and drafts follow the copies (selectors moved
+      onto each instance); whole-body selectors, shell, split and joints get a precise "why not" error.
+- [x] Threads are cosmetic only: `InsertPart.threads = Modeled` gives ISO 68-1 / UN helical threads on screws,
+      nuts, inserts, standoffs and tapped auto-holes (cosmetic stays the default; ~1 s and ~16 k triangles per M3×10).
+      Not done: PT-screw thread form, thread runout, a Parts-screen toggle (see 4).
 
 ## 6. After the MVP
 - [x] Google Drive sync (`crates/sync`; in the app: File ▸ Settings ▸ Google Drive, status bar, conflict notices).

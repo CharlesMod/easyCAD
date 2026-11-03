@@ -56,7 +56,18 @@ booleans run in non-destructive mode.
   `tri_face` per triangle, edge polylines tagged with edge index).
 - Measurement: `volume`, `area`, `center_of_mass`, `bbox`, `is_valid`, `solids`.
 - I/O: `read_step(path)`, `read_step_str`, `write_step`, `to_step_string`,
-  `write_stl`.
+  `write_stl`, `read_step_styled` / `to_step_string_styled` (face colours).
+- Threads (`thread` module, `cpp/thread.cpp`): `Thread { major, pitch }` with
+  `Thread::parse("M3" | "M8x1" | "#4-40" | "1/4-20")` (ISO 261 coarse pitch
+  M1–M24; UN sizes from the designation) and `minor()` / `pitch_diameter()`.
+  `Shape::thread_rod(&t, length, offset)` is a right-hand threaded rod along +Z,
+  z ∈ [0, length], with the ISO 68-1 / UN basic profile. Its core is D1 = d − 5H/4
+  and a helical ridge runs out to d, with P/8 crest and P/4 root flats. The ridge is
+  four ruled faces between helices, sewn with two planar caps, fused to the core and
+  trimmed flat at both ends. The same solid is a screw shank and, cut away, a
+  threaded bore. `offset` grows it radially (clearance). An M3×10 rod is ~16 k
+  display triangles and takes about 1 s, mostly the core fuse. `volume()` reads about
+  2 % high on these long B-spline faces; an axial section is exact.
 
 ## `model`: document API
 
@@ -177,8 +188,8 @@ doc.bom(); doc.blob_refs();
   until geometry is built. `LocalStepSource::open(name, dir)` reads a folder of STEP
   files described by `library.json`. `Library::default()` contains the built-in
   source; add others with `add`.
-  `hole_rules("M3")` gives close/normal/loose clearance (ISO 273 for metric; the
-  close/free drill chart for inch), tap drill, the 0.8·d pilot for thread-forming
+  `hole_rules("M3")` gives close/normal/loose clearance (ISO 273 for metric, ASME
+  B18.2.8 for inch), tap drill, the 0.8·d pilot for thread-forming
   screws in plastic, counterbore/countersink per head, and the insert hole.
   `PartInstance::hole(HoleChoice)` returns a `HoleSpec` in mm, with `tool()` for
   cutting. `InsertPart { part: PartRef, placements: Vec<PlacementRef>, auto_hole, .. }`
@@ -810,18 +821,41 @@ verified on load.
 - Pattern/Mirror re-runs the source feature's recipe under the transform: extrude,
   revolve, rib, screw boss, standoffs, inserted parts and nested patterns. Boss
   fillets, part copies (counted in the BOM), fits and teardrops therefore all follow.
-  Whole-body operations (fillet, shell, draft, split, joint) cannot be patterned and
-  give a clear error.
-- Threads are cosmetic. Several data rows carry `TODO`s (surfaced in
-  `PartInfo::notes`): imperial inserts and standoffs, PT screw heads, some ISO 7380
-  lengths, M2/M2.5 counterbores, the inch loose-fit class (ASME B18.2.8) and #2
-  button/flat heads. Counterbores for non-socket heads and all countersinks are
-  derived from head dimensions (`derived: true`).
+  Fillets, chamfers and drafts are re-run with their selectors moved onto the copy
+  (`EdgeSelector::placed`/`FaceSelector::placed`; a draft's neutral plane and pull
+  move too), so patterning [boss, its fillet] rounds every copy. Selectors that pick
+  over the whole body (`Parallel`, `Extreme`, `AllWithNormal`, `Cylinders`, `Circles`
+  without `near`) have no copy and give an error naming the selector. Shell, split,
+  parting joint, STEP import and in-context references cannot be patterned (a copy
+  would shell or split the same body again); the error says so and points to
+  patterning the body (`PatternSource::Body`).
+  Edge hints on closed circles are matched to the nearest point of the circle, not
+  its midpoint, since a rebuilt or mirrored circle has its seam elsewhere.
+- Threads are cosmetic by default. `InsertPart { threads: Threads::Modeled, .. }`
+  builds library parts with helical threads (`PartSource::build_threaded`). That
+  covers screw shanks, set screws, nut, insert and standoff bores, and standoff
+  studs. A `Tap` auto-hole then cuts the thread itself (`library::tap_tool`),
+  opened up by the fit's clearance at the minor diameter. Thread-forming (PT)
+  screws, local STEP parts and parts without an ISO/UN thread stay cosmetic, with a
+  warning. Screw-boss holes are pilot holes for thread-forming screws and have no
+  thread designation, so they get no modelled thread. For a tapped boss, insert a
+  screw with a `Tap` auto-hole. Shanks are threaded full length (no runout).
+  Every table cites its source (standards checked against
+  published tables, 2026-11; vendor tables name the vendor: ruthex inserts, EJOT PT
+  screws). Values that vary by vendor (standoff across-flats and studs, insert
+  geometry, PT heads) carry a plain note in `PartInfo::notes`. `TODO` stays only on
+  what could not be verified: the shortest ISO 7380-1 lengths, the #6-32 and #10-32
+  inch inserts, and the M2/M2.5 counterbore depths. Counterbores for non-socket heads
+  and all countersinks are derived from head dimensions (`derived: true`).
 - STEP import goes through XCAF and keeps per-solid names and colours. A reference
   import is one locked body whose `Body::appearance()` lists sub-parts with their
-  names and colours. Non-reference imports give one named body per solid. STEP
-  export writes body and sub-part names and colours. Layers, face-level colours and
-  PMI are not read.
+  names and colours. Non-reference imports give one named body per solid. Face
+  colours (AP214 `STYLED_ITEM` / `OVER_RIDING_STYLED_ITEM` on a face) are read too
+  (`Shape::read_step_styled`). They land in `Appearance::face_color`, override the
+  part colour in `Body::face_colors` / `mesh_colors`, and are written back by STEP
+  export (`Shape::to_step_string_styled`). The fixture is
+  `crates/model/tests/data/face_colors.step`. Layers and PMI are not read, and
+  assembly imports (`StepTree`) keep part colours only.
 - The DXF reader has no SPLINE, ELLIPSE, blocks/INSERT or binary DXF; skipped
   entities are counted in `DxfDrawing::skipped`.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.
@@ -835,6 +869,17 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Kernel batch (todo-kernel).**
+  - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to
+    `Cosmetic`). Struct literals need `threads: Default::default()`; I added it in
+    `ui_parts.rs`. A "Modeled threads" toggle in the Parts screen is still to do.
+  - `Appearance` gained `face_color: Vec<Option<[f32; 3]>>` (empty = none);
+    `Body::face_colors` / `mesh_colors` already apply it.
+  - Pattern/Mirror accept fillets, chamfers and drafts as sources (whole-body
+    sources give a precise error instead).
+  - `holes_imperial.json` now follows ASME B18.2.8, so `#4-40` close/normal is
+    0.120/0.128 in (was 0.116/0.1285), and the inch tables have a loose class.
 
 - **GUI_NEEDS #17–#20.**
   - **Movable split components (#17).** New `Component.context_frame:

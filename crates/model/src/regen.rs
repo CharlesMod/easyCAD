@@ -15,7 +15,7 @@ use crate::document::{BlobStore, DocData};
 use crate::dxf::DxfDrawing;
 use crate::feature::*;
 use crate::geom::{Plane, Profile, Segment2};
-use crate::library::{local_mate, place, Library, PartInfo, PartInstance};
+use crate::library::{local_mate, place, HoleChoice, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
 use crate::process::{Fit, FitClass, ProcessProfile, TeardropStyle};
 use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
@@ -42,6 +42,9 @@ pub struct Appearance {
     pub parts: Vec<SubPart>,
     /// Owning part per face (face index of the body's shape).
     pub face_part: Vec<u32>,
+    /// A face's own colour (STEP face style), overriding its part's; empty when no
+    /// face has one.
+    pub face_color: Vec<Option<[f32; 3]>>,
 }
 
 /// Colour used for faces without one.
@@ -121,7 +124,13 @@ impl Body {
     /// Colour per face index, if the body has an appearance.
     pub fn face_colors(&self) -> Option<Vec<[f32; 3]>> {
         let a = self.appearance()?;
-        Some(a.face_part.iter().map(|p| a.parts.get(*p as usize).and_then(|x| x.color).unwrap_or(DEFAULT_COLOR)).collect())
+        Some(
+            a.face_part
+                .iter()
+                .enumerate()
+                .map(|(f, p)| a.face_color.get(f).copied().flatten().or_else(|| a.parts.get(*p as usize).and_then(|x| x.color)).unwrap_or(DEFAULT_COLOR))
+                .collect(),
+        )
     }
     /// Per-vertex colours for a mesh of this body (`DEFAULT_COLOR` where unknown).
     pub fn mesh_colors(&self, q: MeshQuality) -> Result<Vec<[f32; 3]>, String> {
@@ -370,7 +379,7 @@ pub struct Regenerator {
     dxfs: HashMap<String, Arc<DxfDrawing>>,
     parts: HashMap<String, Arc<PartInstance>>,
     stages: HashMap<u64, (Vec<Body>, ProcessReport, crate::provenance::FaceOrigins)>,
-    xcaf: HashMap<String, Arc<(Shape, Vec<occt::StepPart>)>>,
+    xcaf: HashMap<String, Arc<occt::StyledStep>>,
     /// In-context bodies per source occurrence path, already in this component's
     /// frame (set by the assembly regeneration before `regenerate`).
     pub(crate) context: HashMap<Vec<crate::assembly::OccurrenceId>, Arc<Vec<ContextBody>>>,
@@ -848,6 +857,16 @@ impl Ctx<'_> {
     /// Execute a feature recipe into `st`. Patterns call this again for their source
     /// features with a transform pushed on `self.xf`.
     fn exec_kind(&mut self, kind: &FeatureKind, name: &str, fid: FeatureId, st: &mut ModelState) -> R<()> {
+        // dress-ups and drafts under a pattern transform act on the placed copy's
+        // edges and faces
+        let placed;
+        let kind = match kind {
+            FeatureKind::Fillet { .. } | FeatureKind::Chamfer { .. } | FeatureKind::Draft { .. } if !self.xf.is_empty() => {
+                placed = self.placed_selectors(kind, name)?;
+                &placed
+            }
+            _ => kind,
+        };
         match kind {
             FeatureKind::Extrude { sketch, profiles, distance, symmetric, reverse, draft_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles)?;
@@ -1128,7 +1147,8 @@ impl Ctx<'_> {
             FeatureKind::ImportStep { import, reference, translate } => {
                 let imp = self.doc.import(*import).ok_or_else(|| Fail::msg(format!("import {import:?} missing")))?;
                 let xc = self.step_xcaf(&imp.blob)?;
-                let (mut s, parts) = (xc.0.clone(), xc.1.clone());
+                let (mut s, parts) = (xc.shape.clone(), xc.parts.clone());
+                let styled = xc.face_colors.iter().any(|c| c.is_some());
                 if *translate != DVec3::ZERO {
                     s = s.translated(*translate)?;
                 }
@@ -1137,24 +1157,37 @@ impl Ctx<'_> {
                     // the whole assembly is one locked reference body with named,
                     // coloured sub-parts
                     let face_part = s.face_owners()?;
-                    let app = Appearance { parts: sub, face_part };
+                    let face_color = if styled { xc.face_colors.clone() } else { Vec::new() };
+                    let app = Appearance { parts: sub, face_part, face_color };
                     st.bodies.push(Body { id: BodyId::of(fid), name: imp.name.clone(), reference: true, part: None, geom: BodyGeom::with_appearance(s, app) });
                 } else {
+                    // a solid's faces are, in order, the compound faces it owns
+                    let owners = if styled { s.face_owners()? } else { Vec::new() };
                     for (k, solid) in s.solids()?.into_iter().enumerate() {
                         let sp = sub.get(k).cloned().unwrap_or(SubPart { name: format!("{} {}", imp.name, k + 1), color: None });
                         let nf = solid.count(occt::ShapeKind::Face) as usize;
+                        let mut face_color: Vec<Option<[f32; 3]>> =
+                            owners.iter().zip(&xc.face_colors).filter(|(o, _)| **o as usize == k).map(|(_, c)| *c).collect();
+                        if face_color.len() != nf || face_color.iter().all(|c| c.is_none()) {
+                            face_color.clear();
+                        }
                         st.bodies.push(Body {
                             id: BodyId { feature: fid, index: k as u32 },
                             name: sp.name.clone(),
                             reference: false,
                             part: None,
-                            geom: BodyGeom::with_appearance(solid, Appearance { parts: vec![sp], face_part: vec![0; nf] }),
+                            geom: BodyGeom::with_appearance(solid, Appearance { parts: vec![sp], face_part: vec![0; nf], face_color }),
                         });
                     }
                 }
             }
-            FeatureKind::InsertPart { part, placements, flip, offset, auto_hole, target } => {
-                let inst = self.part(part)?;
+            FeatureKind::InsertPart { part, placements, flip, offset, auto_hole, target, threads } => {
+                let modeled = *threads == Threads::Modeled;
+                let inst = self.part(part, modeled)?;
+                let thread = if modeled { inst.modeled_thread() } else { None };
+                if modeled && thread.is_none() {
+                    self.warning = Some(format!("{} has no ISO or UN thread to model; its thread stays cosmetic", part.name));
+                }
                 let off = self.ev(offset)?;
                 let ti = self.target(st, *target).ok();
                 let mut holes = Vec::new();
@@ -1172,7 +1205,13 @@ impl Ctx<'_> {
                         if let Some((d, a)) = spec.countersink {
                             spec.countersink = Some((self.profile.resolve(d, fit), a));
                         }
-                        Some(spec)
+                        // a modelled tapped hole: the thread itself, opened up by the
+                        // fit's clearance at the minor diameter
+                        let tap = match (thread, ah.choice) {
+                            (Some(t), HoleChoice::Tap) => Some((t, (self.profile.resolve(t.minor(), fit) - t.minor()) / 2.0)),
+                            _ => None,
+                        };
+                        Some((spec, tap))
                     }
                     None => None,
                 };
@@ -1192,12 +1231,17 @@ impl Ctx<'_> {
                         part: Some(PartUse { feature: fid, part: part.clone() }),
                         geom: BodyGeom::new(placed),
                     });
-                    if let Some(spec) = &hole_spec {
+                    if let Some((spec, tap)) = &hole_spec {
                         let through = match ti {
                             Some(i) => st.bodies[i].shape().bbox()?.size().length() * 2.0 + 10.0,
                             None => 1000.0,
                         };
-                        holes.push(place(&spec.tool(through)?, origin, axis, 0.0)?);
+                        let tool = match tap {
+                            // threads only as deep as the body is big
+                            Some((t, clearance)) => crate::library::tap_tool(t, spec.depth.unwrap_or(through / 2.0), *clearance)?,
+                            None => spec.tool(through)?,
+                        };
+                        holes.push(place(&tool, origin, axis, 0.0)?);
                     }
                 }
                 if !holes.is_empty() {
@@ -1242,12 +1286,12 @@ impl Ctx<'_> {
         Ok(s)
     }
 
-    fn step_xcaf(&mut self, blob: &str) -> R<Arc<(Shape, Vec<occt::StepPart>)>> {
+    fn step_xcaf(&mut self, blob: &str) -> R<Arc<occt::StyledStep>> {
         if let Some(s) = self.regen.xcaf.get(blob) {
             return Ok(s.clone());
         }
         let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
-        let s = Arc::new(Shape::read_step_xcaf(&String::from_utf8_lossy(&data))?);
+        let s = Arc::new(Shape::read_step_styled(&String::from_utf8_lossy(&data))?);
         self.regen.xcaf.insert(blob.to_string(), s.clone());
         Ok(s)
     }
@@ -1262,8 +1306,8 @@ impl Ctx<'_> {
         Ok(d)
     }
 
-    fn part(&mut self, r: &PartRef) -> R<Arc<PartInstance>> {
-        let key = format!("{}\u{1}{}\u{1}{}\u{1}{}", r.source, r.id, r.size, r.blob.clone().unwrap_or_default());
+    fn part(&mut self, r: &PartRef, modeled: bool) -> R<Arc<PartInstance>> {
+        let key = format!("{}\u{1}{}\u{1}{}\u{1}{}\u{1}{modeled}", r.source, r.id, r.size, r.blob.clone().unwrap_or_default());
         if let Some(p) = self.regen.parts.get(&key) {
             return Ok(p.clone());
         }
@@ -1300,6 +1344,8 @@ impl Ctx<'_> {
                 shape,
                 mate: local_mate(&entry),
             }
+        } else if modeled {
+            self.lib.build_threaded(&r.source, &r.id, &r.size)?
         } else {
             self.lib.build(&r.source, &r.id, &r.size)?
         };
@@ -1538,20 +1584,22 @@ impl Ctx<'_> {
                 // Re-run each source feature's recipe at every transformed placement,
                 // so bosses keep their fillets, parts are copied, fits and process
                 // stages apply as for the original.
+                // Fillets, chamfers and drafts re-resolve their selectors on each
+                // placed copy (see `placed_selectors`).
                 for f in fs {
                     let src = self.doc.feature(*f).cloned().ok_or_else(|| Fail::msg(format!("feature {f:?} does not exist")))?;
-                    if !matches!(
-                        src.kind,
-                        FeatureKind::Extrude { .. }
-                            | FeatureKind::Revolve { .. }
-                            | FeatureKind::Rib { .. }
-                            | FeatureKind::ScrewBoss { .. }
-                            | FeatureKind::StandoffsFromPcb { .. }
-                            | FeatureKind::InsertPart { .. }
-                            | FeatureKind::Pattern { .. }
-                            | FeatureKind::Mirror { .. }
-                    ) {
-                        return fail(format!("`{}` ({}) cannot be patterned; pattern the body instead", src.name, src.kind.label()));
+                    let why = match src.kind {
+                        FeatureKind::Shell { .. } => Some("hollows the whole body, so a copy would shell it a second time"),
+                        FeatureKind::Split { .. } | FeatureKind::PartingJoint { .. } => Some("cuts the whole body in two, so a copy would cut it again"),
+                        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => Some("brings in a body that has no recipe to repeat"),
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        return fail(format!(
+                            "`{}` ({}) cannot be patterned: it {why}. Pattern the features before it, or pattern the body",
+                            src.name,
+                            src.kind.label()
+                        ));
                     }
                     if src.suppressed {
                         continue;
@@ -1567,9 +1615,42 @@ impl Ctx<'_> {
                         r.map_err(|e| Fail::msg(format!("pattern instance of `{}`: {}", src.name, e.msg)))?;
                     }
                 }
+                // edge requests index the source feature's edge sets, not the pattern's
+                self.edge_requests.clear();
+                self.skipped_edges.clear();
             }
         }
         Ok(())
+    }
+
+    /// A fillet, chamfer or draft with its selectors (and draft plane and pull)
+    /// moved by the pattern transform stack, so a pattern instance dresses the
+    /// copy's edges. Selectors that pick over the whole body have no copy.
+    fn placed_selectors(&self, kind: &FeatureKind, name: &str) -> R<FeatureKind> {
+        let (point, dir) = (|p| self.tx_point(p), |v| self.tx_dir(v));
+        let pl = crate::select::Placement { point: &point, dir: &dir };
+        let global = |what: &str| {
+            Fail::msg(format!(
+                "`{name}` selects {what} over the whole body, so its pattern copy would select the same edges; pick the edges or faces instead, or pattern the body"
+            ))
+        };
+        let edges = |v: &[crate::select::EdgeSelector]| v.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<Vec<_>>>();
+        let sets = |v: &[EdgeSet]| v.iter().map(|s| Ok(EdgeSet { edges: edges(&s.edges)?, ..s.clone() })).collect::<R<Vec<_>>>();
+        let mut k = kind.clone();
+        match &mut k {
+            FeatureKind::Fillet { edges: e, sets: s, skipped, .. } | FeatureKind::Chamfer { edges: e, sets: s, skipped, .. } => {
+                *e = edges(e)?;
+                *s = sets(s)?;
+                *skipped = edges(skipped)?;
+            }
+            FeatureKind::Draft { faces, neutral, pull, .. } => {
+                *faces = faces.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<_>>()?;
+                *neutral = Plane { origin: point(neutral.origin), x_dir: dir(neutral.x_dir), normal: dir(neutral.normal) };
+                *pull = dir(*pull);
+            }
+            _ => {}
+        }
+        Ok(k)
     }
 }
 

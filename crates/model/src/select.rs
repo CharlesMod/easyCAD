@@ -134,6 +134,21 @@ fn hint_score(dist: f64, scale: f64, cos: f64, type_ok: bool) -> f64 {
     d.max(ang).max(t)
 }
 
+/// Distance from a hint point to an edge, and the edge tangent there. A closed
+/// circle's midpoint depends on where its seam happens to lie (a rebuilt or mirrored
+/// copy puts it elsewhere), so circles are measured to the nearest point of the curve.
+fn hint_distance(e: &EdgeInfo, p: DVec3) -> (f64, DVec3) {
+    if let (true, Some((c, axis, r))) = (e.closed, e.circle) {
+        let a = axis.normalize_or_zero();
+        let h = (p - c).dot(a);
+        let radial = p - c - a * h;
+        if radial.length() > 1e-9 && a != DVec3::ZERO {
+            return ((radial.length() - r).hypot(h), a.cross(radial).normalize());
+        }
+    }
+    (e.midpoint.distance(p), e.tangent)
+}
+
 fn unresolved(selector: Selector, best: Option<(u32, Selector, f64)>) -> SelectError {
     match best {
         Some((i, s, score)) => SelectError::Unresolved { selector: Box::new(selector), best: Some(Box::new(s)), best_index: Some(i), score },
@@ -229,7 +244,8 @@ impl EdgeSelector {
                     .filter(|e| e.length > 0.0)
                     .map(|e| {
                         let type_ok = kind.is_none_or(|k| EdgeKind::from(e.kind) == k);
-                        (e, hint_score(e.midpoint.distance(*midpoint), scale, e.tangent.dot(t).abs(), type_ok))
+                        let (d, tan) = hint_distance(e, *midpoint);
+                        (e, hint_score(d, scale, tan.dot(t).abs(), type_ok))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 return match best {
@@ -280,6 +296,42 @@ impl EdgeSelector {
             return Err(unresolved(Selector::Edge(self.clone()), None));
         }
         Ok(out)
+    }
+}
+
+/// A rigid placement (pattern instance or mirror) applied to selectors: `point` maps
+/// positions, `dir` maps directions.
+pub struct Placement<'a> {
+    pub point: &'a dyn Fn(DVec3) -> DVec3,
+    pub dir: &'a dyn Fn(DVec3) -> DVec3,
+}
+
+impl FaceSelector {
+    /// The selector for the same face of a placed copy. Selectors that pick by
+    /// direction or size over the whole body (`Extreme`, `AllWithNormal`,
+    /// `Cylinders`) have no copy of their own and give `Err` with their name.
+    pub fn placed(&self, p: &Placement) -> Result<Self, &'static str> {
+        match self {
+            FaceSelector::Hint { centroid, normal, kind } => Ok(FaceSelector::Hint { centroid: (p.point)(*centroid), normal: (p.dir)(*normal), kind: *kind }),
+            FaceSelector::Extreme { .. } => Err("an extreme face"),
+            FaceSelector::AllWithNormal { .. } => Err("all faces with a normal"),
+            FaceSelector::Cylinders { .. } => Err("all cylinders of a radius"),
+        }
+    }
+}
+
+impl EdgeSelector {
+    /// The selector for the same edges of a placed copy; see [`FaceSelector::placed`].
+    /// `Circles` with a `near` point is local and moves with it.
+    pub fn placed(&self, p: &Placement) -> Result<Self, &'static str> {
+        Ok(match self {
+            EdgeSelector::Hint { midpoint, tangent, kind } => EdgeSelector::Hint { midpoint: (p.point)(*midpoint), tangent: (p.dir)(*tangent), kind: *kind },
+            EdgeSelector::OfFace(f) => EdgeSelector::OfFace(f.placed(p)?),
+            EdgeSelector::Between(a, b) => EdgeSelector::Between(a.placed(p)?, b.placed(p)?),
+            EdgeSelector::Circles { radius, near: Some((c, tol)) } => EdgeSelector::Circles { radius: *radius, near: Some(((p.point)(*c), *tol)) },
+            EdgeSelector::Circles { near: None, .. } => return Err("all circles of a radius"),
+            EdgeSelector::Parallel { .. } => return Err("all edges parallel to a direction"),
+        })
     }
 }
 

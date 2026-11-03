@@ -2,7 +2,7 @@
   "id": "asme_shcs",
   "name": "Socket head cap screw (inch)",
   "standard": "ASME B18.3",
-  "source": "ASME B18.3 socket head cap screws (1960 series): head diameter A (max), head height H (max), hex key J (nominal). Lengths: standard fractional stock lengths.",
+  "source": "ASME B18.3 socket head cap screws (1960 series): head diameter A (max), head height H (max), hex key J (nominal). Lengths: standard fractional stock lengths. Heads verified 2026-11 against ASME B18.3-2003 (aftfasteners.com socket cap screw tables).",
   "units": "in",
   "system": "imperial",
   "generator": "screw",

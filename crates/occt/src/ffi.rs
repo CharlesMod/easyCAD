@@ -230,9 +230,12 @@ pub mod bridge {
 
         /// STEP with assembly structure, names and colours. Returns a compound whose
         /// direct children are the leaf solids (placed), in the order of `parts`.
-        fn read_step_xcaf(data: &str, parts: &mut Vec<XcafPart>) -> Result<UniquePtr<Shape>>;
-        /// STEP writer keeping a name and colour per direct child of `c`.
-        fn write_step_xcaf(c: &Shape, parts: &[XcafPart]) -> Result<String>;
+        /// `face_rgba`: 4 floats per face of the compound (MapShapes order), the
+        /// face's own colour (alpha 1) or none (alpha 0).
+        fn read_step_xcaf(data: &str, parts: &mut Vec<XcafPart>, face_rgba: &mut Vec<f32>) -> Result<UniquePtr<Shape>>;
+        /// STEP writer keeping a name and colour per direct child of `c`, and the
+        /// face colours in `face_rgba` (as read; empty = none).
+        fn write_step_xcaf(c: &Shape, parts: &[XcafPart], face_rgba: &[f32]) -> Result<String>;
         /// For each face of `c` (MapShapes order), the index of the direct child owning it.
         fn face_owners(c: &Shape) -> Result<Vec<u32>>;
         /// Write an XCAF product structure: `nodes` (parts reference children of
@@ -252,6 +255,11 @@ pub mod bridge {
         fn write_step_file(s: &Shape, path: &str) -> Result<()>;
         fn write_step_str(s: &Shape) -> Result<String>;
         fn write_stl_file(s: &Shape, path: &str, lin_defl: f64, ascii: bool) -> Result<()>;
+
+        /// Threaded rod along +Z from z = 0 to `length`: a core of radius `r_root`
+        /// plus a helical ridge out to `r_crest`, `w_root` wide at the root and
+        /// `w_crest` at the crest (cpp/thread.cpp).
+        fn thread_solid(r_root: f64, r_crest: f64, pitch: f64, length: f64, w_root: f64, w_crest: f64) -> Result<UniquePtr<Shape>>;
     }
 }
 

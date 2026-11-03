@@ -111,6 +111,17 @@ pub struct PartRef {
     pub thread: Option<String>,
 }
 
+/// How screw threads are drawn. `Cosmetic` (the default) keeps plain cylinders at
+/// the nominal or tap-drill diameter: small printed threads come out better tapped or
+/// thread-formed, and files stay small. `Modeled` builds ISO 68-1 / UN basic-profile
+/// helical threads (`occt::Thread`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Threads {
+    #[default]
+    Cosmetic,
+    Modeled,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutoHole {
     pub choice: HoleChoice,
@@ -327,6 +338,10 @@ pub enum FeatureKind {
         auto_hole: Option<AutoHole>,
         #[serde(default)]
         target: Option<BodyId>,
+        /// Draw the part's threads (and a tapped auto-hole) as real helical
+        /// geometry instead of plain cylinders.
+        #[serde(default)]
+        threads: Threads,
     },
     /// In-context reference: a body of another occurrence, resolved after that
     /// component regenerates and placed into this component's frame (the frame of
