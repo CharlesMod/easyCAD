@@ -493,6 +493,12 @@ verified on load.
 
 ## Changelog for GUI
 
+- **Shell with no open faces (GUI_NEEDS #5).** `FeatureKind::Shell { open_faces: [] }`
+  now gives a closed hollow solid (one solid, two shells: skin + void). When the
+  inner offset fails (wall thicker than the body or a convex radius) the feature is
+  `FeatureStatus::Error("shell with no open faces: ...")`. The sample's "shell open
+  bottom + floor plate" workaround is no longer needed.
+
 - **Concurrency (GUI_NEEDS #10).** Kernel and model calls are safe on any number
   of threads; see "Concurrency contract". The GUI's global kernel mutex can go.
   Meshing no longer writes into the shape (each `MeshQuality` meshes a private copy),

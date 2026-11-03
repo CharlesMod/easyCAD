@@ -284,3 +284,34 @@ fn selector_threshold_reports_unresolved_after_drastic_edit() {
     let f = doc.add_feature("No such face", FeatureKind::Shell { body: None, open_faces: vec![FaceSelector::AllWithNormal { normal: DVec3::X }], thickness: 1.0.into(), outward: false });
     assert!(matches!(doc.regenerate().report(f).unwrap().status, FeatureStatus::Unresolved(ref u) if u.best_candidate.is_none()));
 }
+
+/// GUI_NEEDS #5: a shell with no open faces is a closed hollow solid (outer skin +
+/// internal void), never just the inner offset surface; too thick is an error.
+#[test]
+fn shell_without_open_faces_is_closed_hollow() {
+    let (mut doc, body, _) = block_doc();
+    let solid = doc.regenerate().body_by_id(body).unwrap().shape().volume().unwrap();
+    let f = doc.add_feature("Hollow", FeatureKind::Shell { body: None, open_faces: vec![], thickness: 1.0.into(), outward: false });
+    let r = doc.regenerate();
+    assert_eq!(r.report(f).unwrap().status, FeatureStatus::Ok, "{:?}", r.report(f));
+    let s = r.body_by_id(body).unwrap().shape();
+    assert!(s.is_valid());
+    assert_eq!(s.count(casework_model::occt::ShapeKind::Solid), 1);
+    assert_eq!(s.count(casework_model::occt::ShapeKind::Shell), 2);
+    let size = s.bbox().unwrap().size();
+    assert!((size.x - 40.0).abs() < 1e-6 && (size.z - 10.0).abs() < 1e-6, "{size:?}");
+    let v = s.volume().unwrap();
+    assert!(v > 0.0 && v < 0.5 * solid, "{v} vs {solid}");
+    doc.edit("thick", |d| {
+        if let FeatureKind::Shell { thickness, .. } = &mut d.feature_mut(f).unwrap().kind {
+            *thickness = 6.0.into();
+        }
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    let r = doc.regenerate();
+    match &r.report(f).unwrap().status {
+        FeatureStatus::Error(e) => assert!(e.contains("no open faces"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
