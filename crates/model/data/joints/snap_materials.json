@@ -1,0 +1,12 @@
+{
+  "source": "Permissible short-term strain for a single (or infrequent) snap assembly and flexural modulus, after the Bayer/Covestro design guide 'Snap-Fit Joints for Plastics' (unreinforced grades). FDM-printed values are much lower than molded and depend on layer orientation (beam axis should lie in the XY plane).",
+  "todo": "TODO: printed PLA/PETG/ABS allowable strains and friction coefficients are rough guidance; calibrate with a printed test beam.",
+  "materials": [
+    {"id": "PLA",  "strain": 0.020, "modulus_mpa": 3500, "friction": 0.4, "note": "printed; TODO calibrate"},
+    {"id": "PETG", "strain": 0.025, "modulus_mpa": 2100, "friction": 0.4, "note": "printed; TODO calibrate"},
+    {"id": "ABS",  "strain": 0.025, "modulus_mpa": 2300, "friction": 0.5},
+    {"id": "PC",   "strain": 0.040, "modulus_mpa": 2350, "friction": 0.5},
+    {"id": "PA6",  "strain": 0.040, "modulus_mpa": 2800, "friction": 0.3, "note": "dry as molded; conditioned allows more"},
+    {"id": "PP",   "strain": 0.060, "modulus_mpa": 1400, "friction": 0.3}
+  ]
+}

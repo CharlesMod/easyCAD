@@ -134,6 +134,94 @@ doc.bom(); doc.blob_refs();
   object per body, welded and watertight), `write_step` (AP214, via the kernel),
   `weld` and `open_edges`.
 
+## Parting joints (`joint`, `FeatureKind::PartingJoint`)
+
+`PartingJoint { body, plane, offset, kind, rim, upper_name, class, closing_radius }`
+splits a hollow body at `plane` (moved along its normal by `offset`). The body keeps
+the lower half, and the upper half becomes `BodyId::of(feature)`. The results are in
+`FeatureReport.joint: JointReport`:
+- `wall_thickness` and `effective_wall`;
+- `rim_added`;
+- `clearance_per_side`, the result after fits;
+- `checks` (name, value, limit, ok);
+- `warnings`;
+- `oring`, with squeeze, fill, min corner radius, and the suggested depth/width;
+- `snap`, with strain, allowable, forces, pass and the suggested length;
+- `snaps`, one placement per requested position: where it went and why it moved or
+  was skipped.
+
+A case that cannot be supported ends the feature with `FeatureStatus::Error(reason)`.
+Joint warnings show up as `FeatureStatus::Warning`. Neither leaves an invalid solid.
+
+**Recipe.** Everything is built from planar regions at the split plane, using
+uniform 2D offsets (`BRepOffsetAPI_MakeOffset`) and prisms. Nothing is swept.
+
+- `R`: the wall section ring, i.e. the section face that holds the outer contour.
+  Separate sections (free bosses) are ignored and simply split.
+- `t`: the wall thickness, `t ≈ 2·area(R) / perimeter(R)`.
+- `E` and the cavity. For an unbroken ring, `E` is `R` with holes filled and the
+  cavity is `E − R`. For a ring broken by a cutout (USB slot), cutouts are bridged
+  with a closing of radius ρ ≥ 12 built from single-boundary offsets:
+  `E = fill(R⊕ρ)⊖ρ`. The gaps `G` are the pieces of `closing − R` that reach the
+  outside, and the cavity is `E − R − G`.
+- Rim thickening: `R' = (R ⊕ (rim_width − t)) ∩ E − G`. It grows the wall inward
+  only and never fills a cutout. It is prismed `rim.height` up and down from the
+  plane, and extended on the window half for snap fits.
+- `band(w) = R' ⊖ ((t' − w)/2)` is a centred band of width `w`. Bosses or ribs merged
+  into the wall make it bulge there; the clearance stays constant.
+- A section with no cavity (the plane cuts the floor or lid), a cut that would leave
+  less than `MIN_WALL` (0.4 mm) of floor or lid, or a band that does not fit each
+  give an error with a suggestion (e.g. the rim width needed).
+
+```
+Tongue & groove (tongue_on = Lower)     Lip (lip_on = Lower)
+   upper  |▓▓▓|   |▓▓▓|                    upper |▓▓▓▓▓|  ·
+          |▓▓▓|___|▓▓▓|  groove = band(Hole(w+2c))    |▓▓▓▓▓|__·  recess = R'∩(cav⊕Hole(w+c))
+          |▓▓▓| ┌─┐ |▓▓▓|  depth = h + Gap(extra)       |▓▓▓▓▓|┌─┐
+ ─ plane ─┴───┘ │ │ └───┴─                ─ plane ─────┘     │ │  lip = R'∩(cav⊕Pin(w)), height h
+          |▓▓▓▓▓│ │▓▓▓▓▓|  tongue = band(Pin(w)), h  lower |▓▓▓▓▓▓▓▓|
+   lower  |▓▓▓▓▓▓▓▓▓▓▓▓▓|                         outside ←      → cavity
+
+O-ring face seal (gland_on = Lower)     Snap fit (beam_on = Lower)
+   upper  |▓▓▓▓▓▓▓▓▓▓▓|                  upper |▓▓| window (through wall) ┐
+          |▓▓▓▓▓┌┐▓▓▓▓|  optional compression rib  |  |◄hook  ledge at z1, ramp α   │ pocket
+ ─ plane ─┴─────┘└────┴─                          |▓▓| ║ beam t×b, length L     ┘
+          |▓▓┌──────┐▓▓|  gland = band(Hole(w)), depth d(1−squeeze)+rib   ─ plane ─┴──┴─╫─
+          |▓▓│  ()  │▓▓|  w = πd²/4 /(fill·depth)        lower |▓▓▓▓|╫ root bonded to the wall
+   lower  |▓▓▓▓▓▓▓▓▓▓▓|                                         outside   → cavity
+```
+
+- **Tongue & groove.** Tongue = band(Pin(w)) of height h, with an optional lead-in
+  chamfer. Groove = band(Hole(w + 2c)) of depth h + Gap(extra). The per-side
+  clearance is (groove − tongue)/2.
+- **Lip.** The lip is the inner `Pin(w)` of the wall (measured from the cavity), of
+  height h. The recess is the inner `Hole(w + c)`, of depth h + Gap(c). The outer
+  wall at the recess must keep ≥ `MIN_WALL`.
+- **O-ring gland.** The cord comes from `data/joints/orings.json` (AS568 and metric
+  cross-sections, Parker-style face-seal guidance with TODOs). Depth is
+  `d(1 − squeeze) + rib_h`, and width keeps fill at the target (≤ 85 %). An optional
+  compression rib sits on the mating half. Warnings, never failures, cover squeeze
+  outside 15–30 % (with suggested depth × width), fill above 85 %, and a gland corner
+  radius below 3 × cord (sharp corners report 0).
+- **Snap fit.** Positions come from `Count(n)` or `At(fractions)` along the outline.
+  Each position is moved along the outline until the wall is straight over the beam
+  span ± margin, has uniform thickness (no boss or rib merged in), and is not a
+  cutout. The beam's keep-out volumes must also be free of material in both halves:
+  bosses, ribs, floor and lid. The beam sits against the inner wall (or the inner
+  rim), with its root bonded below the plane. The hook protrudes outward into a
+  window through the other half's wall, which is clearance `c` all round, plus a
+  beam pocket. The calculation uses ε = 1.5·t·y/L², P = b·t²·E·ε/(6L) and
+  W = P(μ + tan α)/(1 − μ·tan α). Materials (PLA, PETG, ABS, PC, PA6, PP) are in
+  `data/joints/snap_materials.json`. An over-strained beam is still built, with a
+  warning giving the passing length.
+
+The test matrix in `crates/model/tests/joints.rs` covers rounded rects
+(r 0.5/3/6, with 0–3° draft), an L-shape, a DXF outline with convex and concave
+arcs, a plane crossing a boss, a rib and a USB slot, 2 mm walls with rim vs 4 mm
+without, planes near the floor or lid, and the O-ring and snap checks. Each kind
+must give two valid solids with no interference, watertight meshes, and the reported
+clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) of it.
+
 ## Process profiles, fits, teardrops, build orientation
 
 - `process::ProcessProfile` has `name`, `kind` (`Fdm/Sla/Sls/Molded/Cnc`),
@@ -210,7 +298,11 @@ verified on load.
   entities are counted in `DxfDrawing::skipped`.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.
   Arc–arc tangency picks internal or external from the configuration at solve start.
-- 2D drawings are not implemented yet (phase 2).
+- 2D drawings are not implemented yet.
+- Drafts that would shrink a convex corner radius below zero over the height now fail
+  ("draft angle too large"); OCCT would otherwise build a degenerate cone.
+- `Shape::offset_solid` (hollowing by 3D offset) fails when the offset exceeds a
+  convex radius. It errors and never crashes.
 
 ## Changelog for GUI
 
@@ -234,3 +326,10 @@ verified on load.
   - `RegenResult` gained `process: ProcessReport`.
   - `occt::FaceInfo` gained `point`.
   - New module `process`; see the section above.
+- **Parting joints.**
+  - New `FeatureKind::PartingJoint` and module `joint` (`JointKind`, `Half`, `Rim`,
+    `SnapPositions`, `JointReport`).
+  - `FeatureReport` gained `joint: Option<JointReport>`.
+  - New `occt::Shape` methods: `section`, `offset_region`, `fill_holes`,
+    `region_contains`, `outer_wire_length`, `outer_wire_point`, `offset_solid`.
+  - `Shape::split` now returns kernel errors instead of silently returning `None`.

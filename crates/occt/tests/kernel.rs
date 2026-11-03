@@ -233,3 +233,29 @@ fn tessellate_and_io_roundtrip() {
     assert!(std::fs::metadata(&stl).unwrap().len() > 84);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn planar_regions_section_offset() {
+    // hollow 40×30×20 box, 2 mm walls
+    let outer = Shape::make_box(DVec3::ZERO, DVec3::new(40.0, 30.0, 20.0)).unwrap();
+    let hollow = outer.cut(&outer.offset_solid(-2.0).unwrap()).unwrap();
+    assert!((hollow.volume().unwrap() - (24000.0 - 36.0 * 26.0 * 16.0)).abs() < 1e-3);
+    let ring = hollow.section(DVec3::new(0.0, 0.0, 10.0), DVec3::Z).unwrap();
+    let ring_a = 1200.0 - 36.0 * 26.0;
+    assert!((ring.area().unwrap() - ring_a).abs() < 1e-6, "{}", ring.area().unwrap());
+    // shrinking by 0.5 on every boundary leaves a 1 mm centred band
+    let band = ring.offset_region(-0.5).unwrap();
+    let want = 39.0 * 29.0 - (37.0 * 27.0 - (4.0 - std::f64::consts::PI) * 0.25); // grown hole corners are rounded
+    assert!((band.area().unwrap() - want).abs() < 1e-3, "{} vs {want}", band.area().unwrap());
+    // growing rounds the outer corners and the hole corners stay sharp... area grows
+    assert!(ring.offset_region(0.5).unwrap().area().unwrap() > ring_a);
+    // shrinking past half the wall makes it vanish (error, not panic)
+    assert!(ring.offset_region(-1.2).is_err());
+    let filled = ring.fill_holes().unwrap();
+    assert!((filled.area().unwrap() - 1200.0).abs() < 1e-6);
+    assert!(ring.region_contains(DVec3::new(1.0, 15.0, 10.0)).unwrap());
+    assert!(!ring.region_contains(DVec3::new(20.0, 15.0, 10.0)).unwrap());
+    assert!((ring.outer_wire_length().unwrap() - 140.0).abs() < 1e-6);
+    let (p, t) = ring.outer_wire_point(0.0).unwrap();
+    assert!((p.z - 10.0).abs() < 1e-9 && (t.length() - 1.0).abs() < 1e-9);
+}

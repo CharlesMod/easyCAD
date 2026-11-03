@@ -7,6 +7,7 @@ pub mod dxf;
 pub mod export;
 pub mod feature;
 pub mod geom;
+pub mod joint;
 pub mod library;
 pub mod params;
 pub mod pick;

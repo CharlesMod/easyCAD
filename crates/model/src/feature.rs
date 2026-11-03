@@ -116,6 +116,7 @@ pub struct AutoHole {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // stored once per feature; size is irrelevant
 pub enum FeatureKind {
     Extrude {
         sketch: SketchId,
@@ -233,6 +234,26 @@ pub enum FeatureKind {
         plane: Plane,
         new_name: String,
     },
+    /// Split a (shelled) body at a plane into two halves with a mating joint.
+    /// The body keeps the lower half; the upper half becomes `BodyId::of(feature)`.
+    PartingJoint {
+        #[serde(default)]
+        body: Option<BodyId>,
+        plane: Plane,
+        /// Moves the plane along its normal (param expression, e.g. `"split_z"`).
+        #[serde(default = "zero")]
+        offset: Expr,
+        kind: crate::joint::JointKind,
+        #[serde(default)]
+        rim: Option<crate::joint::Rim>,
+        upper_name: String,
+        /// Fit class used for the joint's Hole/Pin/Gap dimensions.
+        #[serde(default = "slide")]
+        class: crate::process::FitClass,
+        /// Closing radius used to bridge wall cutouts (default and minimum 12 mm).
+        #[serde(default)]
+        closing_radius: Option<Expr>,
+    },
     /// Bring an imported STEP into the model. `reference` bodies (e.g. a PCB) are
     /// shown and exported to STEP but never booleaned or printed.
     ImportStep {
@@ -263,6 +284,9 @@ pub enum FeatureKind {
 fn zero() -> Expr {
     Expr::new("0")
 }
+fn slide() -> crate::process::FitClass {
+    crate::process::FitClass::Slide
+}
 fn yes() -> bool {
     true
 }
@@ -292,6 +316,7 @@ impl FeatureKind {
             FeatureKind::Pattern { .. } => "Pattern",
             FeatureKind::Mirror { .. } => "Mirror",
             FeatureKind::Split { .. } => "Split body",
+            FeatureKind::PartingJoint { .. } => "Parting joint",
             FeatureKind::ImportStep { .. } => "Import STEP",
             FeatureKind::InsertPart { .. } => "Insert part",
         }

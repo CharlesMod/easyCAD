@@ -116,6 +116,8 @@ pub struct FeatureReport {
     #[serde(skip)]
     pub dressup: Option<DressUpReport>,
     pub sketch: Option<SolveReport>,
+    /// Parting-joint details (checks, warnings, O-ring / snap-fit numbers).
+    pub joint: Option<crate::joint::JointReport>,
     /// Served from the regeneration cache.
     pub cached: bool,
 }
@@ -342,11 +344,11 @@ impl Regenerator {
             }
             recomputed += 1;
             let (next, report) = if f.suppressed {
-                ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, cached: false })
+                ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Suppressed, dressup: None, sketch: None, joint: None, cached: false })
             } else {
-                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None };
+                let mut ctx = Ctx { doc, vals: &vals, profile: &profile, blobs, lib, regen: self, report: None, sketch_report: None, warning: None, joint: None };
                 let res = ctx.exec(f, &state);
-                let (dressup, sketch, warning) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take());
+                let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
                 match res {
                     Ok(s) => (
                         s,
@@ -355,6 +357,7 @@ impl Regenerator {
                             status: warning.map(FeatureStatus::Warning).unwrap_or(FeatureStatus::Ok),
                             dressup,
                             sketch,
+                            joint,
                             cached: false,
                         },
                     ),
@@ -366,7 +369,7 @@ impl Regenerator {
                                 None => msg,
                             }),
                         };
-                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, cached: false })
+                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, joint, cached: false })
                     }
                 }
             };
@@ -421,6 +424,7 @@ struct Ctx<'a> {
     report: Option<DressUpReport>,
     sketch_report: Option<SolveReport>,
     warning: Option<String>,
+    joint: Option<crate::joint::JointReport>,
 }
 
 fn frame(p: &Plane) -> Frame {
@@ -682,6 +686,27 @@ impl Ctx<'_> {
                 };
                 st.bodies[i].geom = BodyGeom::new(below);
                 st.bodies.push(Body { id: BodyId::of(fid), name: new_name.clone(), reference: false, part: None, geom: BodyGeom::new(above) });
+            }
+            FeatureKind::PartingJoint { body, plane, offset, kind, rim, upper_name, class, closing_radius } => {
+                let i = self.target(&st, *body)?;
+                let pl = plane.offset(self.ev(offset)?);
+                let rim = match rim {
+                    Some(r) => Some((self.ev(&r.width)?, self.ev(&r.height)?)),
+                    None => None,
+                };
+                let shape = st.bodies[i].shape().clone();
+                let closing = match closing_radius {
+                    Some(e) => self.ev(e)?,
+                    None => 12.0,
+                };
+                let inp = crate::joint::JointInput { body: &shape, plane: pl, kind, rim, class: *class, closing, profile: self.profile, vals: self.vals };
+                let (lo, up, rep) = crate::joint::build(&inp).map_err(Fail::msg)?;
+                if !rep.warnings.is_empty() {
+                    self.warning = Some(rep.warnings.join("; "));
+                }
+                self.joint = Some(rep);
+                st.bodies[i].geom = BodyGeom::new(lo);
+                st.bodies.push(Body { id: BodyId::of(fid), name: upper_name.clone(), reference: false, part: None, geom: BodyGeom::new(up) });
             }
             FeatureKind::ImportStep { import, reference, translate } => {
                 let imp = self.doc.import(*import).ok_or_else(|| Fail::msg(format!("import {import:?} missing")))?;

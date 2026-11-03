@@ -14,8 +14,13 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Curve2d.hxx>
+#include <BRepAdaptor_CompCurve.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Solid.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -137,13 +142,33 @@ void checkValid(const TopoDS_Shape &s, const char *what) {
 }
 
 TopoDS_Shape healIfInvalid(const TopoDS_Shape &s, const char *what) {
+  if (s.IsNull()) fail(std::string(what) + " produced no shape");
   BRepCheck_Analyzer an(s);
   if (an.IsValid()) return s;
   Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(s);
   fix->Perform();
   TopoDS_Shape r = fix->Shape();
+  if (r.IsNull()) fail(std::string(what) + " produced an invalid shape");
   checkValid(r, what);
   return r;
+}
+
+// A draft that shrinks a convex corner radius below zero yields a degenerate cone that
+// BRepCheck accepts but booleans cannot handle. Reject it explicitly.
+void checkDraftCones(const TopoDS_Shape &s, const char *what) {
+  for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next()) {
+    TopoDS_Face f = TopoDS::Face(ex.Current());
+    BRepAdaptor_Surface as(f, Standard_True);
+    if (as.GetType() != GeomAbs_Cone) continue;
+    gp_Cone c = as.Cone();
+    double u0, u1, v0, v1;
+    BRepTools::UVBounds(f, u0, u1, v0, v1);
+    for (double v : {v0, v1}) {
+      double r = c.RefRadius() + v * std::sin(c.SemiAngle());
+      if (r < -1e-7)
+        fail(std::string(what) + ": draft angle too large for a convex corner radius (the radius would go negative over the height)");
+    }
+  }
 }
 
 TopTools_IndexedMapOfShape mapOf(const TopoDS_Shape &s, TopAbs_ShapeEnum kind) {
@@ -193,9 +218,12 @@ TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op
 }
 
 TopoDS_Shape doUnify(const TopoDS_Shape &s) {
+  if (s.IsNull()) fail("unify: null shape");
   ShapeUpgrade_UnifySameDomain u(s, Standard_True, Standard_True, Standard_False);
   u.Build();
-  return u.Shape();
+  TopoDS_Shape r = u.Shape();
+  if (r.IsNull()) fail("unify produced no shape");
+  return r;
 }
 
 TopoDS_Shape transformed(const TopoDS_Shape &s, const gp_Trsf &t) {
@@ -393,6 +421,7 @@ std::unique_ptr<Shape> extrude_draft(const Shape &s, V3 v, double angle_rad, con
   dr.Build();
   if (!dr.IsDone()) fail("drafted extrusion failed");
   TopoDS_Shape r = healIfInvalid(dr.Shape(), "drafted extrusion");
+  checkDraftCones(r, "drafted extrusion");
   return wrap(simplify(r));
 }
 
@@ -446,6 +475,7 @@ std::unique_ptr<Shape> heal(const Shape &s) {
   Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(s.s);
   fix->Perform();
   TopoDS_Shape r = fix->Shape();
+  if (r.IsNull()) fail("heal produced no shape");
   r = doUnify(r);
   return wrap(simplify(r));
 }
@@ -670,6 +700,7 @@ std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, 
   dr.Build();
   if (!dr.IsDone()) fail("draft failed");
   TopoDS_Shape r = healIfInvalid(dr.Shape(), "draft");
+  checkDraftCones(r, "draft");
   return wrap(simplify(r));
 }
 
@@ -720,6 +751,228 @@ std::unique_ptr<Shape> half_space_side(const Shape &s, V3 origin, V3 normal, boo
   r = simplify(r);
   if (count_sub(Shape(r), TopAbs_SOLID) == 0) fail("split: nothing on that side of the plane");
   return wrap(r);
+}
+
+// ---------------------------------------------------------------- planar regions
+
+namespace {
+double faceArea(const TopoDS_Face &f) {
+  GProp_GProps g;
+  BRepGProp::SurfaceProperties(f, g);
+  return std::abs(g.Mass());
+}
+
+std::vector<TopoDS_Face> facesOf(const TopoDS_Shape &s) {
+  std::vector<TopoDS_Face> v;
+  for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next()) v.push_back(TopoDS::Face(ex.Current()));
+  return v;
+}
+
+TopoDS_Face largestFace(const TopoDS_Shape &s) {
+  TopoDS_Face best;
+  double ba = -1;
+  for (auto &f : facesOf(s)) {
+    double a = faceArea(f);
+    if (a > ba) {
+      ba = a;
+      best = f;
+    }
+  }
+  if (best.IsNull()) fail("no face");
+  return best;
+}
+
+gp_Pln planeOf(const TopoDS_Face &f) {
+  BRepAdaptor_Surface as(f);
+  if (as.GetType() != GeomAbs_Plane) fail("face is not planar");
+  return as.Plane();
+}
+
+bool inFace(const TopoDS_Face &f, const gp_Pnt &p) {
+  BRepClass_FaceClassifier fc(f, p, 1e-6);
+  return fc.State() == TopAbs_IN || fc.State() == TopAbs_ON;
+}
+
+// Build faces on `pln` from closed wires, nesting holes by containment.
+TopoDS_Shape facesFromWires(const gp_Pln &pln, const std::vector<TopoDS_Wire> &wires, const gp_Dir &normal) {
+  struct W {
+    TopoDS_Wire w;
+    TopoDS_Face f;
+    double area;
+    int depth = 0;
+    int parent = -1;
+  };
+  std::vector<W> ws;
+  for (const auto &w : wires) {
+    BRepBuilderAPI_MakeFace mf(pln, w, Standard_True);
+    if (!mf.IsDone()) continue;
+    TopoDS_Face f = mf.Face();
+    ShapeFix_Face sff(f);
+    sff.Perform();
+    f = sff.Face();
+    double a = faceArea(f);
+    if (a < 1e-9) continue;
+    ws.push_back({w, f, a});
+  }
+  std::sort(ws.begin(), ws.end(), [](const W &a, const W &b) { return a.area > b.area; });
+  for (size_t i = 0; i < ws.size(); ++i) {
+    TopExp_Explorer vx(ws[i].w, TopAbs_VERTEX);
+    if (!vx.More()) continue;
+    gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()));
+    for (size_t j = 0; j < i; ++j) {
+      if (inFace(ws[j].f, p)) {
+        // smallest containing (sorted by area desc → last match is smallest)
+        ws[i].parent = static_cast<int>(j);
+      }
+    }
+  }
+  for (size_t i = 0; i < ws.size(); ++i) {
+    int d = 0;
+    for (int p = ws[i].parent; p >= 0; p = ws[static_cast<size_t>(p)].parent) ++d;
+    ws[i].depth = d;
+  }
+  TopoDS_Compound c;
+  BRep_Builder bb;
+  bb.MakeCompound(c);
+  int n = 0;
+  for (size_t i = 0; i < ws.size(); ++i) {
+    if (ws[i].depth % 2) continue;
+    TopoDS_Face f = ws[i].f;
+    gp_Dir fn = BRepAdaptor_Surface(f).Plane().Axis().Direction();
+    if (f.Orientation() == TopAbs_REVERSED) fn.Reverse();
+    if (fn.Dot(normal) < 0) f.Reverse();
+    for (size_t j = 0; j < ws.size(); ++j) {
+      if (ws[j].parent == static_cast<int>(i) && ws[j].depth % 2 == 1) {
+        TopoDS_Shape r = doBoolean(f, ws[j].f, 1u);
+        TopExp_Explorer fx(r, TopAbs_FACE);
+        if (!fx.More()) fail("hole removal failed");
+        f = TopoDS::Face(fx.Current());
+      }
+    }
+    bb.Add(c, f);
+    ++n;
+  }
+  if (n == 0) fail("offset region vanished");
+  return c;
+}
+} // namespace
+
+std::unique_ptr<Shape> section_face(const Shape &s, V3 origin, V3 normal) {
+  requireShape(s, "section_face");
+  Bnd_Box bb;
+  BRepBndLib::Add(s.s, bb);
+  if (bb.IsVoid()) fail("section: empty shape");
+  double L = 2.0 * std::sqrt(bb.SquareExtent()) + 10.0;
+  gp_Pln pln(P(origin), D(normal, "section normal"));
+  TopoDS_Face big = BRepBuilderAPI_MakeFace(pln, -L, L, -L, L).Face();
+  TopoDS_Shape r = doBoolean(s.s, big, 2u);
+  r = doUnify(r);
+  if (facesOf(r).empty()) fail("the plane does not cut the body");
+  return wrap(r);
+}
+
+std::unique_ptr<Shape> offset_face(const Shape &s, double d) {
+  requireShape(s, "offset_face");
+  std::vector<TopoDS_Wire> wires;
+  gp_Pln pln;
+  gp_Dir normal(0, 0, 1);
+  bool first = true;
+  for (auto &f : facesOf(s.s)) {
+    gp_Pln p = planeOf(f);
+    gp_Dir n = p.Axis().Direction();
+    if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+    if (first) {
+      pln = gp_Pln(p.Location(), n);
+      normal = n;
+      first = false;
+    }
+    if (std::abs(d) < 1e-12) {
+      for (TopExp_Explorer ex(f, TopAbs_WIRE); ex.More(); ex.Next()) wires.push_back(TopoDS::Wire(ex.Current()));
+      continue;
+    }
+    BRepOffsetAPI_MakeOffset mo(f, GeomAbs_Arc, Standard_False);
+    mo.Perform(d);
+    if (!mo.IsDone()) fail("2D offset failed");
+    for (TopExp_Explorer ex(mo.Shape(), TopAbs_WIRE); ex.More(); ex.Next()) {
+      TopoDS_Wire w = TopoDS::Wire(ex.Current());
+      if (BRep_Tool::IsClosed(w)) wires.push_back(w);
+    }
+  }
+  if (first) fail("offset_face: no planar face");
+  if (wires.empty()) fail("offset region vanished");
+  return wrap(facesFromWires(pln, wires, normal));
+}
+
+std::unique_ptr<Shape> fill_holes(const Shape &s) {
+  requireShape(s, "fill_holes");
+  TopoDS_Compound c;
+  BRep_Builder bb;
+  bb.MakeCompound(c);
+  for (auto &f : facesOf(s.s)) {
+    TopoDS_Wire ow = BRepTools::OuterWire(f);
+    BRepBuilderAPI_MakeFace mf(planeOf(f), ow, Standard_True);
+    if (!mf.IsDone()) fail("fill_holes failed");
+    TopoDS_Face nf = mf.Face();
+    ShapeFix_Face sff(nf);
+    sff.Perform();
+    nf = sff.Face();
+    if (nf.Orientation() != f.Orientation()) nf.Reverse();
+    bb.Add(c, nf);
+  }
+  return wrap(c);
+}
+
+bool face_contains(const Shape &s, V3 p) {
+  requireShape(s, "face_contains");
+  for (auto &f : facesOf(s.s))
+    if (inFace(f, P(p))) return true;
+  return false;
+}
+
+double outer_wire_length(const Shape &s) {
+  requireShape(s, "outer_wire_length");
+  BRepAdaptor_CompCurve cc(BRepTools::OuterWire(largestFace(s.s)), Standard_True);
+  return GCPnts_AbscissaPoint::Length(cc);
+}
+
+rust::Vec<V3> outer_wire_point(const Shape &s, double t) {
+  requireShape(s, "outer_wire_point");
+  BRepAdaptor_CompCurve cc(BRepTools::OuterWire(largestFace(s.s)), Standard_True);
+  double L = GCPnts_AbscissaPoint::Length(cc);
+  double tt = t - std::floor(t);
+  double u0 = cc.FirstParameter();
+  double u = u0;
+  if (tt > 1e-12) {
+    GCPnts_AbscissaPoint ap(cc, tt * L, u0);
+    if (!ap.IsDone()) fail("wire parameterisation failed");
+    u = ap.Parameter();
+  }
+  gp_Pnt p;
+  gp_Vec v;
+  cc.D1(u, p, v);
+  if (v.Magnitude() < 1e-12) fail("degenerate tangent");
+  rust::Vec<V3> out;
+  out.push_back(toV(p));
+  out.push_back(toV(gp_Dir(v)));
+  return out;
+}
+
+std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
+  requireShape(s, "offset_shape");
+  BRepOffsetAPI_MakeOffsetShape mo;
+  mo.PerformByJoin(s.s, d, 1e-4, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
+  if (!mo.IsDone()) fail("3D offset failed");
+  TopoDS_Shape r = mo.Shape();
+  if (r.IsNull()) fail("3D offset produced no shape (offset larger than a convex radius?)");
+  // an offset of a solid's skin yields a shell or solid; make it a solid
+  if (r.ShapeType() == TopAbs_SHELL) {
+    BRep_Builder bb;
+    TopoDS_Solid so;
+    bb.MakeSolid(so);
+    bb.Add(so, r);
+    r = so;
+  }
+  return wrap(simplify(healIfInvalid(r, "offset")));
 }
 
 // ---------------------------------------------------------------- queries

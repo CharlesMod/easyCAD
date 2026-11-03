@@ -387,12 +387,48 @@ impl Shape {
     /// Split by a plane: `(below, above)` relative to `normal`. Either side may be
     /// `None` if the plane misses the shape.
     pub fn split(&self, origin: DVec3, normal: DVec3) -> Result<(Option<Shape>, Option<Shape>)> {
-        let below = wrap(raw::half_space_side(self.r(), v3(origin), v3(normal), false)).ok();
-        let above = wrap(raw::half_space_side(self.r(), v3(origin), v3(normal), true)).ok();
+        let side = |above: bool| -> Result<Option<Shape>> {
+            match wrap(raw::half_space_side(self.r(), v3(origin), v3(normal), above)) {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.0.contains("nothing on that side") => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        let (below, above) = (side(false)?, side(true)?);
         if below.is_none() && above.is_none() {
             return Err(Error("split produced nothing".into()));
         }
         Ok((below, above))
+    }
+
+    // ------------------------------------------------------------ planar regions
+
+    /// Planar section of a solid at a plane, as face(s).
+    pub fn section(&self, origin: DVec3, normal: DVec3) -> Result<Shape> {
+        wrap(raw::section_face(self.r(), v3(origin), v3(normal)))
+    }
+    /// Uniform 2D offset of planar face(s); `d < 0` shrinks. Errors if it vanishes.
+    pub fn offset_region(&self, d: f64) -> Result<Shape> {
+        wrap(raw::offset_face(self.r(), d))
+    }
+    /// The same faces with their holes filled.
+    pub fn fill_holes(&self) -> Result<Shape> {
+        wrap(raw::fill_holes(self.r()))
+    }
+    pub fn region_contains(&self, p: DVec3) -> Result<bool> {
+        Ok(raw::face_contains(self.r(), v3(p))?)
+    }
+    pub fn outer_wire_length(&self) -> Result<f64> {
+        Ok(raw::outer_wire_length(self.r())?)
+    }
+    /// Point and unit tangent at arc-length fraction `t` along the outer boundary.
+    pub fn outer_wire_point(&self, t: f64) -> Result<(DVec3, DVec3)> {
+        let v = raw::outer_wire_point(self.r(), t)?;
+        Ok((dv(v[0]), dv(v[1])))
+    }
+    /// 3D skin offset of a solid (`d < 0` inward), e.g. to hollow a body.
+    pub fn offset_solid(&self, d: f64) -> Result<Shape> {
+        wrap(raw::offset_shape(self.r(), d))
     }
 
     // ------------------------------------------------------------ queries

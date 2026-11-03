@@ -89,6 +89,13 @@ std::unique_ptr<Shape> rotate(const Shape &s, V3 origin, V3 dir, double angle_ra
 std::unique_ptr<Shape> mirror(const Shape &s, V3 origin, V3 normal);
 std::unique_ptr<Shape> half_space_side(const Shape &s, V3 origin, V3 normal, bool above);
 
+std::unique_ptr<Shape> section_face(const Shape &s, V3 origin, V3 normal);
+std::unique_ptr<Shape> offset_face(const Shape &s, double d);
+std::unique_ptr<Shape> fill_holes(const Shape &s);
+bool face_contains(const Shape &s, V3 p);
+double outer_wire_length(const Shape &s);
+rust::Vec<V3> outer_wire_point(const Shape &s, double t);
+std::unique_ptr<Shape> offset_shape(const Shape &s, double d);
 rust::Vec<FaceInfo> faces(const Shape &s);
 rust::Vec<EdgeInfo> edges(const Shape &s);
 rust::Vec<uint32_t> face_edges(const Shape &s, uint32_t face);

@@ -153,6 +153,22 @@ pub mod bridge {
         /// Part of `s` on the positive (`above` = true) or negative side of a plane.
         fn half_space_side(s: &Shape, origin: V3, normal: V3, above: bool) -> Result<UniquePtr<Shape>>;
 
+        /// Planar section region(s) of a solid at a plane (solid ∩ plane), as faces.
+        fn section_face(s: &Shape, origin: V3, normal: V3) -> Result<UniquePtr<Shape>>;
+        /// Uniform 2D offset of planar face(s) (all boundaries; d < 0 shrinks).
+        /// Returns a compound of faces; errors if the region vanishes.
+        fn offset_face(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
+        /// Faces bounded by only the outer wire of each input face (holes filled).
+        fn fill_holes(s: &Shape) -> Result<UniquePtr<Shape>>;
+        /// Point-in-region test on planar face(s) (boundary counts as inside).
+        fn face_contains(s: &Shape, p: V3) -> Result<bool>;
+        /// Length of the outer wire of the largest face.
+        fn outer_wire_length(s: &Shape) -> Result<f64>;
+        /// Point and unit tangent at arc-length fraction `t` (0..1) along the outer
+        /// wire of the largest face. Returned as [point, tangent].
+        fn outer_wire_point(s: &Shape, t: f64) -> Result<Vec<V3>>;
+        /// 3D offset of a solid's skin (BRepOffsetAPI_MakeOffsetShape, d < 0 inward).
+        fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn faces(s: &Shape) -> Result<Vec<FaceInfo>>;
         fn edges(s: &Shape) -> Result<Vec<EdgeInfo>>;
         fn face_edges(s: &Shape, face: u32) -> Result<Vec<u32>>;

@@ -1,0 +1,28 @@
+{
+  "source": "Cross-sections: AS568 (SAE AS568F) standard series 0xx/1xx/2xx/3xx/4xx nominal cross-sections, and common metric ISO 3601 / DIN 3771 cords. Face-seal gland guidance after the Parker O-Ring Handbook (ORD 5700), static face seal design: squeeze roughly 15-30 % (target ~25 %), gland fill not above ~85 %.",
+  "todo": "TODO: squeeze range and minimum gland corner radius are rule-of-thumb values; verify against the Parker ORD 5700 face-seal gland tables for the chosen cord and compound before production.",
+  "squeeze_min": 0.15,
+  "squeeze_max": 0.30,
+  "squeeze_target": 0.25,
+  "fill_max": 0.85,
+  "fill_target": 0.75,
+  "min_corner_radius_factor": 3.0,
+  "cords": [
+    {"id": "AS568-0xx", "dia_in": 0.070},
+    {"id": "AS568-1xx", "dia_in": 0.103},
+    {"id": "AS568-2xx", "dia_in": 0.139},
+    {"id": "AS568-3xx", "dia_in": 0.210},
+    {"id": "AS568-4xx", "dia_in": 0.275},
+    {"id": "M1.0", "dia_mm": 1.0},
+    {"id": "M1.5", "dia_mm": 1.5},
+    {"id": "M1.78", "dia_mm": 1.78},
+    {"id": "M2.0", "dia_mm": 2.0},
+    {"id": "M2.5", "dia_mm": 2.5},
+    {"id": "M2.62", "dia_mm": 2.62},
+    {"id": "M3.0", "dia_mm": 3.0},
+    {"id": "M3.53", "dia_mm": 3.53},
+    {"id": "M4.0", "dia_mm": 4.0},
+    {"id": "M5.0", "dia_mm": 5.0},
+    {"id": "M5.33", "dia_mm": 5.33}
+  ]
+}
