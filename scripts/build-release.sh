@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Casework release packages for macOS, Linux and Windows from a Mac.
+# Build easyCAD release packages for macOS, Linux and Windows from a Mac.
 #
 #   scripts/build-release.sh              # all three
 #   scripts/build-release.sh macos        # just one (macos | linux | windows), or several
@@ -15,7 +15,7 @@
 #   JOBS=<n>                     parallel compile jobs (default: all cores)
 #
 # The first run compiles OpenCascade once per platform (~10-30 min each); later runs
-# reuse it (target/ on the Mac, Docker volumes casework-target-* for the others).
+# reuse it (target/ on the Mac, Docker volumes easycad-target-* for the others).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,24 +66,24 @@ build_macos() {
     esac
     log "macOS $arch: cargo build ($triple)"
     rustup target add "$triple" >/dev/null
-    cargo build --release --locked -p casework --target "$triple" -j "$JOBS"
-    bins+=("target/$triple/release/casework")
+    cargo build --release --locked -p easycad --target "$triple" -j "$JOBS"
+    bins+=("target/$triple/release/easycad")
   done
 
   local stage; stage="$(mktemp -d)"
-  local app="$stage/Casework.app"
+  local app="$stage/easyCAD.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-  lipo -create "${bins[@]}" -output "$app/Contents/MacOS/casework"
-  strip -x "$app/Contents/MacOS/casework"
+  lipo -create "${bins[@]}" -output "$app/Contents/MacOS/easycad"
+  strip -x "$app/Contents/MacOS/easycad"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Casework</string>
-  <key>CFBundleDisplayName</key><string>Casework</string>
-  <key>CFBundleIdentifier</key><string>local.casework.app</string>
-  <key>CFBundleExecutable</key><string>casework</string>
+  <key>CFBundleName</key><string>easyCAD</string>
+  <key>CFBundleDisplayName</key><string>easyCAD</string>
+  <key>CFBundleIdentifier</key><string>local.easycad.app</string>
+  <key>CFBundleExecutable</key><string>easycad</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${SHA}</string>
@@ -92,9 +92,9 @@ build_macos() {
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
-      <key>CFBundleTypeName</key><string>Casework document</string>
+      <key>CFBundleTypeName</key><string>easyCAD document</string>
       <key>CFBundleTypeRole</key><string>Editor</string>
-      <key>CFBundleTypeExtensions</key><array><string>cwk</string></array>
+      <key>CFBundleTypeExtensions</key><array><string>ecad</string></array>
       <key>LSTypeIsPackage</key><true/>
     </dict>
   </array>
@@ -105,7 +105,7 @@ PLIST
   codesign --force --deep --sign - "$app"
   local suffix zip
   suffix="$(echo "$MACOS_ARCHS" | tr ' ' '-' | sed 's/arm64-x86_64/universal/')"
-  zip="$DIST/Casework-${TAG}-macos-${suffix}.zip"
+  zip="$DIST/easyCAD-${TAG}-macos-${suffix}.zip"
   rm -f "$zip"
   ditto -c -k --keepParent "$app" "$zip"
   rm -rf "$stage"
@@ -116,7 +116,7 @@ docker_build() { # $1 = linux|windows, $2 = docker platform arch (amd64|arm64)
   local kind="$1" arch="$2"
   need docker "Install Docker Desktop (https://www.docker.com/products/docker-desktop/) and start it."
   docker info >/dev/null 2>&1 || die "Docker is installed but not running. Start Docker Desktop."
-  local image="casework-build:${arch}"
+  local image="easycad-build:${arch}"
   log "Docker image $image (from $RUST_IMAGE)"
   docker build --platform "linux/$arch" --build-arg "RUST_IMAGE=$RUST_IMAGE" \
     -t "$image" -f scripts/docker/Dockerfile scripts/docker
@@ -124,8 +124,8 @@ docker_build() { # $1 = linux|windows, $2 = docker platform arch (amd64|arm64)
   docker run --rm --platform "linux/$arch" \
     -v "$REPO":/src:ro \
     -v "$DIST":/out \
-    -v "casework-target-${kind}-${arch}":/target \
-    -v "casework-cargo-registry-${arch}":/usr/local/cargo/registry \
+    -v "easycad-target-${kind}-${arch}":/target \
+    -v "easycad-cargo-registry-${arch}":/usr/local/cargo/registry \
     -e JOBS="$JOBS" -e TAG="$TAG" \
     "$image" /src/scripts/docker/build-in-container.sh "$kind"
 }
@@ -147,8 +147,8 @@ for t in "${TARGETS[@]}"; do
 done
 
 log "Bundling everything into one zip"
-ALL="$DIST/Casework-${TAG}-all-platforms.zip"
+ALL="$DIST/easyCAD-${TAG}-all-platforms.zip"
 rm -f "$ALL"
-( cd "$DIST" && zip -q "$(basename "$ALL")" Casework-"${TAG}"-*.zip -x "$(basename "$ALL")" )
-ls -lh "$DIST"/Casework-"${TAG}"-*
+( cd "$DIST" && zip -q "$(basename "$ALL")" easyCAD-"${TAG}"-*.zip -x "$(basename "$ALL")" )
+ls -lh "$DIST"/easyCAD-"${TAG}"-*
 log "Done. Download/copy: $ALL"

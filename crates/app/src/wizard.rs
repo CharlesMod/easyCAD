@@ -12,14 +12,14 @@
 
 use std::path::{Path, PathBuf};
 
-use casework_model::document::Document;
-use casework_model::dxf::DxfDrawing;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::occt::{DVec3, Shape, SurfaceKind};
-use casework_model::process::ProcessKind;
-use casework_model::select::{EdgeSelector, Extremum, FaceSelector};
-use casework_model::sketch::{Geom, Sketch};
+use easycad_model::document::Document;
+use easycad_model::dxf::DxfDrawing;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::occt::{DVec3, Shape, SurfaceKind};
+use easycad_model::process::ProcessKind;
+use easycad_model::select::{EdgeSelector, Extremum, FaceSelector};
+use easycad_model::sketch::{Geom, Sketch};
 use glam::DVec2;
 
 use crate::dialogs::joint;
@@ -88,7 +88,7 @@ impl Board {
             let sk = d.to_sketch("probe", Plane::XY, &[layer]);
             for p in sk.profiles().profiles {
                 let poly = polyline(&p.outer);
-                let a = casework_model::sketch::loop_area(&p.outer).abs();
+                let a = easycad_model::sketch::loop_area(&p.outer).abs();
                 if best.as_ref().is_none_or(|b| a > b.1) {
                     best = Some((layer.to_string(), a, poly));
                 }
@@ -201,8 +201,8 @@ impl Board {
 }
 
 /// A loop as a polyline (arcs sampled every ~10°).
-fn polyline(l: &casework_model::geom::Loop2) -> Vec<DVec2> {
-    use casework_model::geom::Segment2;
+fn polyline(l: &easycad_model::geom::Loop2) -> Vec<DVec2> {
+    use easycad_model::geom::Segment2;
     let mut out = Vec::new();
     for seg in l {
         match *seg {
@@ -461,10 +461,10 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
 fn make_components(
     doc: &mut Document,
     board: &Board,
-    joint: casework_model::feature::FeatureId,
+    joint: easycad_model::feature::FeatureId,
     board_place: DVec3,
 ) -> Result<(), String> {
-    use casework_model::assembly::{ComponentId, Transform};
+    use easycad_model::assembly::{ComponentId, Transform};
     let (_, master) = doc
         .move_root_into_component("Enclosure")
         .map_err(|e| format!("components: {e}"))?;
@@ -493,7 +493,7 @@ fn make_components(
 /// with the offset's sharp corners rounded by `corner_r`.
 /// Also returns how many sharp corners were rounded with `corner_r`.
 fn enclosure_profile(doc: &Document, board: &Board) -> Result<(Sketch, usize), String> {
-    use casework_model::sketch::Constraint;
+    use easycad_model::sketch::Constraint;
     let mut sess = SketchSession::new_on(Plane::XY, &doc.data);
     sess.sketch.name = "Enclosure profile".into();
     let start = match &board.kind {
@@ -514,7 +514,7 @@ fn enclosure_profile(doc: &Document, board: &Board) -> Result<(Sketch, usize), S
                 .entities
                 .iter()
                 .position(|e| !e.construction)
-                .map(|i| casework_model::sketch::EntityId(i as u32))
+                .map(|i| easycad_model::sketch::EntityId(i as u32))
                 .ok_or("empty board outline")?
         }
         BoardKind::Dxf { outline, .. } => {
@@ -529,7 +529,7 @@ fn enclosure_profile(doc: &Document, board: &Board) -> Result<(Sketch, usize), S
             for i in 0..sess.sketch.points.len() {
                 let p = sess.sketch.points[i];
                 sess.sketch
-                    .constrain(Constraint::Fix(casework_model::sketch::PointId(i as u32), p));
+                    .constrain(Constraint::Fix(easycad_model::sketch::PointId(i as u32), p));
             }
             sess.resolve();
             // the outer loop runs through the left-most end point
@@ -546,14 +546,14 @@ fn enclosure_profile(doc: &Document, board: &Board) -> Result<(Sketch, usize), S
                 .flat_map(|(i, e)| ends(&e.geom).into_iter().map(move |p| (i, p)))
                 .min_by(|a, b| s.point(a.1).x.total_cmp(&s.point(b.1).x))
                 .ok_or("board outline has no lines or arcs")?;
-            casework_model::sketch::EntityId(i as u32)
+            easycad_model::sketch::EntityId(i as u32)
         }
     };
     let n_before = sess.sketch.entities.len();
     let source_points = sess.sketch.points.len();
     sess.offset_loop(start, "clearance + wall")?;
     // round the offset's sharp corners (round board corners stay concentric)
-    let corners: Vec<casework_model::sketch::PointId> = {
+    let corners: Vec<easycad_model::sketch::PointId> = {
         let s = &sess.sketch;
         let mut count = std::collections::HashMap::new();
         for e in &s.entities[n_before..] {

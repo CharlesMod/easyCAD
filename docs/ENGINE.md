@@ -1,6 +1,6 @@
-# Casework engine
+# easyCAD engine
 
-Headless kernel bridge and document model for Casework. The GUI (`crates/app`, a
+Headless kernel bridge and document model for easyCAD. The GUI (`crates/app`, a
 stub for now) is built against the APIs below. Units are mm and degrees throughout,
 right-handed, Z up.
 
@@ -68,7 +68,7 @@ let f  = doc.add_feature("Body", FeatureKind::Extrude { .. });  // -> FeatureId
 let out: &RegenResult = doc.regenerate();          // bodies + per-feature reports
 doc.undo(); doc.redo(); doc.undo_label();
 doc.edit("Rename", |d: &mut DocData| { ..; Ok::<_, E>(()) })?; // any change, atomic
-doc.save_to_dir(Path::new("Enclosure.cwk"))?; Document::load_from_dir(..)?;
+doc.save_to_dir(Path::new("Enclosure.ecad"))?; Document::load_from_dir(..)?;
 doc.bom(); doc.blob_refs();
 ```
 
@@ -376,7 +376,7 @@ clearance, checked by shifting one half 0.8× (no contact) and 1.6× (contact) o
 Timings for the test enclosure in `crates/model/tests/timing.rs` (6 features: shell
 cavity, 4 filleted bosses, rib, tongue & groove joint with rim; best of 5, release,
 4-core container shared with a GUI build). Run them with
-`cargo test -p casework-model --release --test timing -- --nocapture`.
+`cargo test -p easycad-model --release --test timing -- --nocapture`.
 
 | step | before | after |
 |---|---|---|
@@ -461,7 +461,7 @@ chain, and most time sits in single large booleans.
 
 ## Concurrency contract
 
-Everything in `occt` and `casework-model` may run on any number of threads at once.
+Everything in `occt` and `easycad-model` may run on any number of threads at once.
 The GUI's global kernel mutex is no longer needed.
 
 - **Shapes** (`occt::Shape`, `Body`, `RegenResult`) are `Send + Sync` and may be used
@@ -508,7 +508,7 @@ algorithm that ran directly on the shared input, and its outliner/edge data buil
 writes into the input topology. It now also loads a private copy.
 
 **What is still locked, and why.** Only STEP/XCAF translation (global translator
-parameters, see above). No other lock exists in `occt` or `casework-model`; the old
+parameters, see above). No other lock exists in `occt` or `easycad-model`; the old
 mesh mutex is gone. If a future kernel entry point is found to write into its input,
 the fix is the same `privateCopy` in the shim, not a caller-side lock.
 
@@ -659,7 +659,7 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
 - Kernel: `occt::StepTree { nodes: Vec<StepNode { name, color, shape, children:
   Vec<StepLink { child, name, matrix: [f64; 12] }> }>, roots }` with
   `StepTree::read(&str)` and `to_step_string()`; `Shape::children()`.
-- **Linked `.cwk` components.** `Document::link_component(cwk_dir, host_dir)` copies
+- **Linked `.ecad` components.** `Document::link_component(ecad_dir, host_dir)` copies
   the file's content into a locked component with `ComponentSource::Linked { path
   (relative to host_dir), hash (sha256 of its doc.json) }`: its root params become
   the component's local params, its root features/sketches/imports the component's,
@@ -723,12 +723,12 @@ component with in-context features is built in one occurrence's frame (see the
 rule above); `PartingLine` and the old `Balloon` refer to the root component;
 STEP components are read-only.
 
-## File format (`.cwk`), sync-friendly
+## File format (`.ecad`), sync-friendly
 
-A `.cwk` is a folder containing `doc.json` and `blobs/<sha256>`. `doc.json` holds
+A `.ecad` is a folder containing `doc.json` and `blobs/<sha256>`. `doc.json` holds
 `DocData`: `format`, a UUID `doc_id`, a monotonically increasing `revision` (bumped
 on every change, including undo/redo), `modified_by_device` (from
-`CASEWORK_DEVICE_ID`, then `HOSTNAME`), params, sketches, features, imports and meta.
+`EASYCAD_DEVICE_ID`, then `HOSTNAME`), params, sketches, features, imports and meta.
 It is written deterministically as pretty JSON with fixed field order. Lists replace
 maps, so diffs and three-way merges are practical. Imported STEP/DXF files and
 embedded library STEP parts are content-addressed blobs referenced by hash

@@ -1,5 +1,5 @@
 //! Autosave and crash recovery. Every few minutes (Settings → Autosave) a dirty
-//! document is copied to `<data dir>/casework/recovery/<doc id>/` (a normal `.cwk`
+//! document is copied to `<data dir>/easycad/recovery/<doc id>/` (a normal `.ecad`
 //! folder plus `info.json`), off the UI thread. Saving or closing cleanly removes
 //! the copy; closing with unsaved changes writes a last one. On the next launch,
 //! copies whose process is gone are offered for restore.
@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
-use casework_model::document::Document;
+use easycad_model::document::Document;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -48,7 +48,7 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// `$XDG_DATA_HOME/casework/recovery` (or the platform equivalent).
+/// `$XDG_DATA_HOME/easycad/recovery` (or the platform equivalent).
 pub fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -63,7 +63,7 @@ pub fn dir() -> Option<PathBuf> {
                 }
             })
         })?;
-    Some(base.join("casework").join("recovery"))
+    Some(base.join("easycad").join("recovery"))
 }
 
 fn entry_dir(doc_id: &str) -> Option<PathBuf> {
@@ -82,7 +82,7 @@ pub fn write(doc: &Document, original: Option<&Path>) -> Result<PathBuf, String>
     let tmp = d.with_extension("tmp");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    doc.save_to_dir(&tmp.join("doc.cwk"))
+    doc.save_to_dir(&tmp.join("doc.ecad"))
         .map_err(|e| e.to_string())?;
     let info = Info {
         name: doc.data.name.clone(),
@@ -137,7 +137,7 @@ pub fn orphans() -> Vec<Entry> {
             let dir = e.path();
             let info: Info =
                 serde_json::from_str(&std::fs::read_to_string(dir.join("info.json")).ok()?).ok()?;
-            dir.join("doc.cwk").is_dir().then_some(Entry { dir, info })
+            dir.join("doc.ecad").is_dir().then_some(Entry { dir, info })
         })
         .filter(|e| !alive(e.info.pid))
         .collect();
@@ -146,7 +146,7 @@ pub fn orphans() -> Vec<Entry> {
 }
 
 pub fn load(e: &Entry) -> Result<Document, String> {
-    Document::load_from_dir(&e.dir.join("doc.cwk")).map_err(|e| e.to_string())
+    Document::load_from_dir(&e.dir.join("doc.ecad")).map_err(|e| e.to_string())
 }
 
 /// Periodic autosave state (lives in the app).
@@ -222,8 +222,8 @@ mod tests {
         std::env::set_var("XDG_DATA_HOME", &base);
         let mut doc = Document::new("box");
         doc.set_param("wall", "2.5").unwrap();
-        let d = write(&doc, Some(Path::new("/tmp/box.cwk"))).unwrap();
-        assert!(d.join("doc.cwk").is_dir());
+        let d = write(&doc, Some(Path::new("/tmp/box.ecad"))).unwrap();
+        assert!(d.join("doc.ecad").is_dir());
         // our own copy is not an orphan
         assert!(orphans().iter().all(|e| e.info.doc_id != doc.data.doc_id));
         // pretend it was left by a dead process
@@ -233,7 +233,7 @@ mod tests {
         std::fs::write(d.join("info.json"), serde_json::to_string(&info).unwrap()).unwrap();
         let o = orphans();
         let e = o.iter().find(|e| e.info.doc_id == doc.data.doc_id).expect("orphan");
-        assert_eq!(e.info.original.as_deref(), Some(Path::new("/tmp/box.cwk")));
+        assert_eq!(e.info.original.as_deref(), Some(Path::new("/tmp/box.ecad")));
         let back = load(e).unwrap();
         assert_eq!(back.data.params.get("wall").map(|p| p.expr.0.clone()), Some("2.5".into()));
         discard(e);

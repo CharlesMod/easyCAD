@@ -5,9 +5,9 @@
 //! change on that view inside one undoable document edit and writes the
 //! component's content back.
 
-use casework_model::assembly::ComponentId;
-use casework_model::document::{DocData, DocError, Document};
-use casework_model::feature::Feature;
+use easycad_model::assembly::ComponentId;
+use easycad_model::document::{DocData, DocError, Document};
+use easycad_model::feature::Feature;
 
 /// The document as one component sees it (`ROOT` = the document itself).
 pub fn view(d: &DocData, c: ComponentId) -> DocData {
@@ -73,7 +73,7 @@ pub fn edit<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use casework_model::assembly::Transform;
+    use easycad_model::assembly::Transform;
 
     #[test]
     fn edits_land_in_the_component() {
@@ -85,7 +85,7 @@ mod tests {
         doc.set_component_param(c, "t", "wall * 2").unwrap();
         let v = view(&doc.data, c);
         assert!(v.params.get("wall").is_some() && v.params.get("t").is_some());
-        let sk = casework_model::sketch::Sketch::new("S", casework_model::geom::Plane::XY);
+        let sk = easycad_model::sketch::Sketch::new("S", easycad_model::geom::Plane::XY);
         edit(&mut doc, c, "Add sketch", |d| {
             d.add_sketch(sk);
             Ok(())

@@ -4,12 +4,12 @@
 
 use std::sync::Arc;
 
-use casework_model::occt::{CurveKind, EdgeInfo, FaceInfo, Mesh, SurfaceKind};
-use casework_model::pick::EdgeTolerance;
+use easycad_model::occt::{CurveKind, EdgeInfo, FaceInfo, Mesh, SurfaceKind};
+use easycad_model::pick::EdgeTolerance;
 use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use glam::{Vec2, Vec3};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::dialogs::DialogEvent;
 use crate::pickstack::{candidates, BodyFacts, Filter, PickKey, PickKind};
 use crate::theme;
@@ -70,9 +70,9 @@ pub fn edge_label(e: &EdgeInfo) -> (String, String) {
 
 /// What made a face, from the engine's provenance (GUI_NEEDS #8): "Boss top ·
 /// Standoffs", "Floor · Shell". `None` when the engine has no record.
-pub fn provenance_label(m: &Output, key: casework_model::feature::BodyId, f: u32) -> Option<String> {
-    use casework_model::assembly::ComponentId;
-    use casework_model::provenance::FaceRole;
+pub fn provenance_label(m: &Output, key: easycad_model::feature::BodyId, f: u32) -> Option<String> {
+    use easycad_model::assembly::ComponentId;
+    use easycad_model::provenance::FaceRole;
     let (regen, local, comp) = match m.ctx_body(key) {
         Some(c) => (&m.asm.as_ref()?.result.component(c.component)?.regen, c.mb.body.id, c.component),
         None => (&m.result, key, m.asm.as_ref().map(|a| a.active_comp).unwrap_or(ComponentId::ROOT)),
@@ -150,13 +150,13 @@ fn pick_label_local(b: &crate::worker::MeshedBody, kind: PickKind) -> (String, S
 
 struct Facts<'a> {
     m: &'a Output,
-    app: &'a CaseworkApp,
+    app: &'a EasyCadApp,
 }
 impl BodyFacts for Facts<'_> {
-    fn is_reference(&self, b: casework_model::feature::BodyId) -> bool {
+    fn is_reference(&self, b: easycad_model::feature::BodyId) -> bool {
         self.m.body(b).is_some_and(|x| x.reference)
     }
-    fn is_visible(&self, b: casework_model::feature::BodyId) -> bool {
+    fn is_visible(&self, b: easycad_model::feature::BodyId) -> bool {
         self.app.body_visible(b)
     }
 }
@@ -172,7 +172,7 @@ fn body_color(reference: bool, part: bool) -> [f32; 4] {
     }
 }
 
-pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let resp = ui.interact(
         rect,
@@ -420,7 +420,7 @@ pub fn viewport(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn select(app: &mut CaseworkApp, key: Option<PickKey>, additive: bool) {
+fn select(app: &mut EasyCadApp, key: Option<PickKey>, additive: bool) {
     let model = app.model.clone();
     if app.asm.mate.is_some() {
         if let Some(k) = key {
@@ -470,7 +470,7 @@ fn select(app: &mut CaseworkApp, key: Option<PickKey>, additive: bool) {
     }
 }
 
-fn mesh_of(m: &Output, b: casework_model::feature::BodyId) -> Option<&Arc<Mesh>> {
+fn mesh_of(m: &Output, b: easycad_model::feature::BodyId) -> Option<&Arc<Mesh>> {
     m.mesh(b)
 }
 
@@ -483,7 +483,7 @@ fn tp(xf: &glam::DAffine3, p: [f32; 3]) -> Vec3 {
 }
 
 /// Model matrix of a body in the current frame (drags and explode included).
-fn body_model(app: &CaseworkApp, m: &Output, b: casework_model::feature::BodyId) -> glam::Mat4 {
+fn body_model(app: &EasyCadApp, m: &Output, b: easycad_model::feature::BodyId) -> glam::Mat4 {
     match m.ctx_body(b) {
         Some(c) => to_mat4(crate::ui_assembly::display_xf(app, c)),
         None => glam::Mat4::IDENTITY,
@@ -491,21 +491,21 @@ fn body_model(app: &CaseworkApp, m: &Output, b: casework_model::feature::BodyId)
 }
 
 /// The upper half created by the previewed joint, if the preview is a joint.
-pub fn explode_body(shown: &Output) -> Option<casework_model::feature::BodyId> {
+pub fn explode_body(shown: &Output) -> Option<easycad_model::feature::BodyId> {
     let i = *shown.prefix_bodies.keys().min()?;
     let f = shown.data.features.get(i)?;
     matches!(
         f.kind,
-        casework_model::feature::FeatureKind::PartingJoint { .. }
+        easycad_model::feature::FeatureKind::PartingJoint { .. }
     )
-    .then(|| casework_model::feature::BodyId::of(f.id))
+    .then(|| easycad_model::feature::BodyId::of(f.id))
 }
 
 /// The joint dialog's exploded preview: (upper half, translation).
 pub fn explode_offset(
-    app: &CaseworkApp,
+    app: &EasyCadApp,
     shown: &Output,
-) -> Option<(casework_model::feature::BodyId, Vec3)> {
+) -> Option<(easycad_model::feature::BodyId, Vec3)> {
     let d = app.dialog.as_ref()?;
     let crate::dialogs::Body::Joint(j) = &d.body else {
         return None;
@@ -517,19 +517,19 @@ pub fn explode_offset(
     let f = shown.data.features.get(i)?;
     if !matches!(
         f.kind,
-        casework_model::feature::FeatureKind::PartingJoint { .. }
+        easycad_model::feature::FeatureKind::PartingJoint { .. }
     ) {
         return None;
     }
     let h = shown.bbox.map(|b| b.size().z as f32).unwrap_or(30.0);
     Some((
-        casework_model::feature::BodyId::of(f.id),
+        easycad_model::feature::BodyId::of(f.id),
         Vec3::Z * (h * 0.35).max(8.0),
     ))
 }
 
 fn build_frame(
-    app: &CaseworkApp,
+    app: &EasyCadApp,
     shown: &Output,
     model: Option<&Output>,
     rect: Rect,
@@ -690,7 +690,7 @@ fn build_frame(
 
 #[allow(clippy::too_many_arguments)]
 /// Is a point on the model surface visible from the camera (nothing in front of it)?
-pub fn point_visible(app: &CaseworkApp, m: &Output, p: Vec3) -> bool {
+pub fn point_visible(app: &EasyCadApp, m: &Output, p: Vec3) -> bool {
     let cam = &app.camera;
     let (o, d, dist) = if cam.ortho {
         let back = cam.distance + 4.0 * cam.scene_radius;
@@ -702,7 +702,7 @@ pub fn point_visible(app: &CaseworkApp, m: &Output, p: Vec3) -> bool {
     let eps = 0.03_f32.max(dist * 2e-3);
     let hits = m.pick_all(o, d, EdgeTolerance::ortho(0.0), &|_| false);
     !hits.iter().any(|h| {
-        matches!(h.kind, casework_model::pick::HitKind::Face(_))
+        matches!(h.kind, easycad_model::pick::HitKind::Face(_))
             && h.t < dist - eps
             && app.body_visible(h.body)
             && !m.body(h.body).is_some_and(|b| b.reference)
@@ -712,10 +712,10 @@ pub fn point_visible(app: &CaseworkApp, m: &Output, p: Vec3) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn draw_edge(
     p: &egui::Painter,
-    app: &CaseworkApp,
+    app: &EasyCadApp,
     m: &Output,
     rect: Rect,
-    body: casework_model::feature::BodyId,
+    body: easycad_model::feature::BodyId,
     e: u32,
     col: Color32,
     w: f32,
@@ -783,7 +783,7 @@ fn overlay_frame() -> Frame {
         .inner_margin(Margin::same(4))
 }
 
-fn filter_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     egui::Area::new(egui::Id::unique("filters"))
         .order(egui::Order::Middle)
         .fixed_pos(rect.min + vec2(12.0, 12.0))
@@ -824,7 +824,7 @@ fn filter_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
 }
 
 /// Section controls above the view toolbar: axis, position, flip.
-fn section_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(mut s) = app.section else { return };
     let w = 330.0;
     let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 100.0);
@@ -855,7 +855,7 @@ fn section_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     }
 }
 
-fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     section_bar(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
     let w = if asm { 560.0 } else { 380.0 };
@@ -920,7 +920,7 @@ fn display_bar(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
         });
 }
 
-fn cube(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
+fn cube(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
     let w = 88.0;
     let h = viewcube::widget_height(w);
     let r = Rect::from_min_size(
@@ -963,7 +963,7 @@ fn cube(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
 }
 
 /// The "UNDER CURSOR" popover. Returns a clicked row.
-fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> Option<usize> {
+fn pick_popover(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, m: &Output) -> Option<usize> {
     let p = app.hover_pos?;
     if app.stack.len() < 2 || !rect.contains(p) || app.asm.gizmo_screen.is_some() {
         return None;
@@ -1033,7 +1033,7 @@ fn pick_popover(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect, m: &Output) -> O
 
 /// Joint dialog: the translucent parting plane over the model and a handle that
 /// drags it along Z (coarse previews while dragging, full quality on release).
-fn joint_plane_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+fn joint_plane_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(bb) = app.model.as_ref().and_then(|m| m.bbox) else {
         return;
     };
@@ -1143,7 +1143,7 @@ fn joint_plane_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     );
 }
 
-fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(mut d) = app.dialog.take() else {
         return;
     };
@@ -1268,7 +1268,7 @@ fn dialog_overlay(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
     app.dialog = Some(d);
 }
 
-fn context_menu(app: &mut CaseworkApp, ui: &mut Ui) {
+fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
     let sel = app.selection.clone();
     if sel.is_empty() {
         if ui.button("Fit all").clicked() {

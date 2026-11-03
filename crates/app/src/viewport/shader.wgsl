@@ -1,4 +1,4 @@
-// Casework viewport shaders. Colours arrive sRGB-encoded (like egui's); lighting
+// easyCAD viewport shaders. Colours arrive sRGB-encoded (like egui's); lighting
 // runs in linear space and the result is re-encoded, so the offscreen target
 // (Rgba8Unorm) holds the same gamma-space values egui itself would write.
 

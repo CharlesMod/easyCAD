@@ -5,17 +5,17 @@
 
 use std::f64::consts::PI;
 
-use casework_model::document::Document;
-use casework_model::dxf::DxfDrawing;
-use casework_model::export::{open_edges, weld};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::joint::*;
-use casework_model::occt::{DVec3, Edge, Frame, Shape};
-use casework_model::params::Expr;
-use casework_model::process::FitClass;
-use casework_model::regen::{profile_face, FeatureStatus};
-use casework_model::sketch::profiles_from_segments;
+use easycad_model::document::Document;
+use easycad_model::dxf::DxfDrawing;
+use easycad_model::export::{open_edges, weld};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::joint::*;
+use easycad_model::occt::{DVec3, Edge, Frame, Shape};
+use easycad_model::params::Expr;
+use easycad_model::process::FitClass;
+use easycad_model::regen::{profile_face, FeatureStatus};
+use easycad_model::sketch::profiles_from_segments;
 
 const H: f64 = 30.0;
 
@@ -203,7 +203,7 @@ pub fn run(body: &Shape, z: f64, kind: JointKind, rim: Option<(f64, f64)>) -> Re
 fn verify(r: &Run, label: &str, horizontal: bool, vertical: Option<f64>) -> Vec<String> {
     let mut errs = Vec::new();
     for (n, s) in [("lower", &r.lower), ("upper", &r.upper)] {
-        if !s.is_valid() || s.count(casework_model::occt::ShapeKind::Solid) == 0 {
+        if !s.is_valid() || s.count(easycad_model::occt::ShapeKind::Solid) == 0 {
             errs.push(format!("{label}: {n} invalid"));
         }
         let m = weld(&s.tessellate(0.05, 12.0).unwrap());
@@ -485,10 +485,10 @@ fn impossible_draft_is_an_error() {
 
 /// The PCB wizard's box: rounded-rect outline, top edges filleted, closed shell
 /// (no open faces), parting joint 10 mm below the top. GUI_NEEDS 12d/12e.
-fn wizard_box(w: f64, d: f64, corner_r: f64, kind: JointKind) -> (casework_model::regen::RegenResult, FeatureId) {
-    use casework_model::select::{EdgeSelector, FaceSelector};
+fn wizard_box(w: f64, d: f64, corner_r: f64, kind: JointKind) -> (easycad_model::regen::RegenResult, FeatureId) {
+    use easycad_model::select::{EdgeSelector, FaceSelector};
     let mut doc = Document::new("Wizard box");
-    let mut s = casework_model::sketch::Sketch::new("P", Plane::XY);
+    let mut s = easycad_model::sketch::Sketch::new("P", Plane::XY);
     s.rounded_rect(glam::DVec2::ZERO, w, d, corner_r, (w, d, corner_r));
     let s = doc.add_sketch(s);
     let b = BodyId::of(doc.add_feature(
@@ -554,8 +554,8 @@ fn rim_is_added_when_it_is_the_only_blocker() {
     let jr = rep.joint.as_ref().unwrap();
     assert!(jr.rim_added && jr.effective_wall > 2.0);
     assert!(jr.adjustments.iter().any(|a| a.starts_with("rim added")), "{:?}", jr.adjustments);
-    assert!(casework_model::joint::refusal_kind("the joint plane does not cut the body") == casework_model::joint::RefusalKind::Infeasible);
-    assert!(casework_model::joint::refusal_kind("rim offset: 2D offset failed") == casework_model::joint::RefusalKind::Bailed);
+    assert!(easycad_model::joint::refusal_kind("the joint plane does not cut the body") == easycad_model::joint::RefusalKind::Infeasible);
+    assert!(easycad_model::joint::refusal_kind("rim offset: 2D offset failed") == easycad_model::joint::RefusalKind::Bailed);
 }
 
 /// GUI_NEEDS 12c: a filleted outline (r 5.3 outside, 3.3 inside) gives the gland

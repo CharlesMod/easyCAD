@@ -1,6 +1,6 @@
 [package]
-name = "casework-model"
-description = "Document, features, sketches and file I/O for Casework"
+name = "easycad-model"
+description = "Document, features, sketches and file I/O for easyCAD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

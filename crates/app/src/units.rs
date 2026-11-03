@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn ev(s: &str) -> f64 {
-        casework_model::params::eval(&normalize_input(s), &Default::default()).unwrap()
+        easycad_model::params::eval(&normalize_input(s), &Default::default()).unwrap()
     }
 
     #[test]

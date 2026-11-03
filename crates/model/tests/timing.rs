@@ -1,12 +1,12 @@
 //! Timing harness for the test enclosure (prints a table; run with
-//! `cargo test -p casework-model --release --test timing -- --nocapture`).
+//! `cargo test -p easycad-model --release --test timing -- --nocapture`).
 //! Only sanity is asserted, never absolute times.
 
 mod common;
 
 use std::time::Instant;
 
-use casework_model::params::Expr;
+use easycad_model::params::Expr;
 pub use common::enclosure_doc;
 
 fn ms(t: Instant) -> f64 {
@@ -28,7 +28,7 @@ fn best<T>(n: usize, mut f: impl FnMut(usize) -> T) -> (f64, T) {
 /// Best-of-5 timings (robust against other processes on the machine).
 #[test]
 fn enclosure_timings_best_of_5() {
-    use casework_model::regen::MeshQuality;
+    use easycad_model::regen::MeshQuality;
     let (full, _) = best(5, |_| {
         let (mut doc, _) = enclosure_doc();
         let r = doc.regenerate().clone();
@@ -88,7 +88,7 @@ fn enclosure_timings() {
     let mesh_final = ms(t);
 
     let t = Instant::now();
-    let tri: usize = r.bodies.iter().map(|b| b.mesh_quality(casework_model::regen::MeshQuality::Preview).unwrap().indices.len()).sum();
+    let tri: usize = r.bodies.iter().map(|b| b.mesh_quality(easycad_model::regen::MeshQuality::Preview).unwrap().indices.len()).sum();
     let mesh_preview = ms(t);
     let tri_final: usize = r.bodies.iter().map(|b| b.mesh().unwrap().indices.len()).sum();
 
@@ -100,7 +100,7 @@ fn enclosure_timings() {
 
     let t = Instant::now();
     for b in &r2.bodies {
-        b.mesh_quality(casework_model::regen::MeshQuality::Preview).unwrap();
+        b.mesh_quality(easycad_model::regen::MeshQuality::Preview).unwrap();
     }
     let edit_preview = ms(t);
 

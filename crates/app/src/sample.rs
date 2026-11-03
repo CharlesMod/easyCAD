@@ -2,12 +2,12 @@
 //! a PCB-driven rounded box (base + lid), standoffs from an imported STEP board,
 //! ribs, a USB-C cutout and the board outline as a DXF sketch.
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::occt::{DVec3, Shape};
-use casework_model::select::EdgeSelector;
-use casework_model::sketch::{Constraint, Geom, Sketch};
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::occt::{DVec3, Shape};
+use easycad_model::select::EdgeSelector;
+use easycad_model::sketch::{Constraint, Geom, Sketch};
 use glam::DVec2;
 
 pub const PCB_W: f64 = 86.0;
@@ -96,7 +96,7 @@ pub fn hole_positions_board() -> [(f64, f64); 4] {
 pub fn pcb_step() -> String {
     let (w, h) = (PCB_W, PCB_H);
     // rounded outline + holes straight from the DXF, so STEP and DXF agree
-    let d = casework_model::dxf::DxfDrawing::parse(&board_dxf()).unwrap();
+    let d = easycad_model::dxf::DxfDrawing::parse(&board_dxf()).unwrap();
     let mut sk = d.to_sketch(
         "board",
         Plane::XY.offset(PCB_Z),
@@ -106,7 +106,7 @@ pub fn pcb_step() -> String {
         *p -= DVec2::new(w / 2.0, h / 2.0);
     }
     let pr = sk.profiles().profiles.remove(0);
-    let board = casework_model::regen::profile_face(&sk.plane, &pr)
+    let board = easycad_model::regen::profile_face(&sk.plane, &pr)
         .unwrap()
         .extrude(DVec3::new(0.0, 0.0, 1.6))
         .unwrap();
@@ -158,7 +158,7 @@ pub fn sensor_node() -> Document {
     // Board outline sketch from the DXF (reference geometry for the profile)
     let dxf = board_dxf();
     let imp = doc.import_dxf("sensor-node_outline.dxf", dxf.clone().into_bytes());
-    let drawing = casework_model::dxf::DxfDrawing::parse(&dxf).expect("dxf");
+    let drawing = easycad_model::dxf::DxfDrawing::parse(&dxf).expect("dxf");
     let mut board = drawing.to_sketch(
         "Board outline",
         Plane::XY,
@@ -221,7 +221,7 @@ pub fn sensor_node() -> Document {
         "Shell",
         FeatureKind::Shell {
             body: None,
-            open_faces: vec![casework_model::select::FaceSelector::bottom()],
+            open_faces: vec![easycad_model::select::FaceSelector::bottom()],
             thickness: "wall".into(),
             outward: false,
         },

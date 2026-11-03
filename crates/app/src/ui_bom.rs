@@ -1,10 +1,10 @@
 //! Assembly BOM window: indented (per parent) or flat (rolled up), made vs
 //! purchased, CSV export.
 
-use casework_model::assembly::{AsmBomRow, AssemblyBom, BomKind};
+use easycad_model::assembly::{AsmBomRow, AssemblyBom, BomKind};
 use egui::{vec2, Margin, RichText, Ui};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::theme;
 use crate::widgets;
 
@@ -61,7 +61,7 @@ pub fn csv(rows: &[AsmBomRow], flat: bool) -> String {
     out
 }
 
-impl CaseworkApp {
+impl EasyCadApp {
     pub fn open_bom(&mut self) {
         if self.model.as_ref().and_then(|m| m.asm.as_ref()).is_none() {
             self.warn("The assembly BOM needs components; the parts list of a single part is on the drawing");
@@ -75,13 +75,13 @@ impl CaseworkApp {
         let a = m.asm.as_ref()?;
         let st = self.asm.bom.as_mut()?;
         if st.cache.as_ref().is_none_or(|c| c.0 != m.id) {
-            st.cache = Some((m.id, casework_model::assembly::bom(&m.data, &a.result)));
+            st.cache = Some((m.id, easycad_model::assembly::bom(&m.data, &a.result)));
         }
         st.cache.as_ref().map(|c| c.1.clone())
     }
 }
 
-pub fn window(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn window(app: &mut EasyCadApp, ui: &mut Ui) {
     if app.asm.bom.is_none() {
         return;
     }

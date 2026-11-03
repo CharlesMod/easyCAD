@@ -6,15 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use casework_model::assembly::{
+use easycad_model::assembly::{
     Component, ComponentId, ComponentSource, LinkStatus, MateStatus, OccPath, Occurrence,
     OccurrenceId, Transform,
 };
-use casework_model::document::{DocData, DocError};
+use easycad_model::document::{DocData, DocError};
 use egui::{pos2, vec2, Color32, Rect, RichText, Sense, Stroke, Ui};
 use glam::DAffine3;
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::pickstack::{PickKey, PickKind};
 use crate::theme;
 use crate::widgets::{self, Icon};
@@ -54,12 +54,12 @@ pub fn is_assembly(d: &DocData) -> bool {
 }
 
 /// The component being edited.
-pub fn active_component(app: &CaseworkApp) -> ComponentId {
+pub fn active_component(app: &EasyCadApp) -> ComponentId {
     app.doc.data.component_at(&app.active).unwrap_or(ComponentId::ROOT)
 }
 
 /// Component frame -> view frame of a context body, live drags included.
-pub fn display_xf(app: &CaseworkApp, c: &CtxBody) -> DAffine3 {
+pub fn display_xf(app: &EasyCadApp, c: &CtxBody) -> DAffine3 {
     let mut x = c.xf;
     let held = app.asm.hold.as_ref().map(|h| (&h.0, &h.1));
     for (p, d) in [app.asm.drag.as_ref().map(|d| (&d.0, &d.1)), held].into_iter().flatten() {
@@ -71,7 +71,7 @@ pub fn display_xf(app: &CaseworkApp, c: &CtxBody) -> DAffine3 {
 }
 
 /// Interference highlight: the pair shown in the report is drawn red.
-pub fn body_tint(app: &CaseworkApp, c: &CtxBody) -> Option<[f32; 4]> {
+pub fn body_tint(app: &EasyCadApp, c: &CtxBody) -> Option<[f32; 4]> {
     let i = app.asm.interference.as_ref()?;
     // translucent so the overlap inside shows through
     i.highlighted(c).then_some([0.86, 0.22, 0.18, 0.55])
@@ -104,7 +104,7 @@ pub fn is_mated(d: &DocData, path: &[OccurrenceId]) -> bool {
 
 // ---------------------------------------------------------------- commands
 
-impl CaseworkApp {
+impl EasyCadApp {
     /// Edit the component at `path` in place (`[]` = the whole assembly). The camera
     /// keeps its world pose: the view frame changes, not what the user sees.
     pub fn activate(&mut self, path: OccPath) {
@@ -245,9 +245,9 @@ impl CaseworkApp {
         }
     }
 
-    /// Insert a `.cwk` as a linked component placed in the active component.
-    pub fn insert_cwk(&mut self) {
-        let req = crate::files::Request::folder("Insert a .cwk document as a linked component");
+    /// Insert a `.ecad` as a linked component placed in the active component.
+    pub fn insert_ecad(&mut self) {
+        let req = crate::files::Request::folder("Insert a .ecad document as a linked component");
         self.ask_path(req, |app, dir| {
             let host = app.host_dir();
             let parent = active_component(app);
@@ -462,7 +462,7 @@ enum MenuAct {
     Copy,
     PlaceAgain,
     NewInside,
-    InsertCwk,
+    InsertEcad,
     Update,
     Break,
     Remove,
@@ -471,7 +471,7 @@ enum MenuAct {
 }
 
 /// The occurrence tree (and the Mates folder) of the browser.
-pub fn tree(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn tree(app: &mut EasyCadApp, ui: &mut Ui) {
     let d = app.doc.data.clone();
     let mut acts: Vec<TreeAct> = Vec::new();
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -508,9 +508,9 @@ pub fn tree(app: &mut CaseworkApp, ui: &mut Ui) {
             app.new_component(ComponentId::ROOT);
             ui.close();
         }
-        if ui.button("Insert component (.cwk)…").clicked() {
+        if ui.button("Insert component (.ecad)…").clicked() {
             app.activate(Vec::new());
-            app.insert_cwk();
+            app.insert_ecad();
             ui.close();
         }
         if ui.button("Insert from library…").clicked() {
@@ -560,7 +560,7 @@ pub fn tree(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn menu_act(app: &mut CaseworkApp, p: &OccPath, m: MenuAct) {
+fn menu_act(app: &mut EasyCadApp, p: &OccPath, m: MenuAct) {
     let d = &app.doc.data;
     let comp = d.component_at(p).unwrap_or(ComponentId::ROOT);
     let id = p.last().copied();
@@ -574,9 +574,9 @@ fn menu_act(app: &mut CaseworkApp, p: &OccPath, m: MenuAct) {
         }
         MenuAct::PlaceAgain => app.place_again(p),
         MenuAct::NewInside => app.new_component(comp),
-        MenuAct::InsertCwk => {
+        MenuAct::InsertEcad => {
             app.activate(p.clone());
-            app.insert_cwk();
+            app.insert_ecad();
         }
         MenuAct::Update => app.update_link(comp),
         MenuAct::Break => app.break_link(comp),
@@ -622,7 +622,7 @@ fn paint_pin(p: &egui::Painter, c: egui::Pos2, col: Color32) {
 
 #[allow(clippy::too_many_arguments)]
 fn rows(
-    app: &mut CaseworkApp,
+    app: &mut EasyCadApp,
     ui: &mut Ui,
     d: &DocData,
     model: Option<&Output>,
@@ -831,8 +831,8 @@ fn rows(
             if item(ui, "New component inside", !locked) {
                 chosen = Some(TreeAct::Menu(pc.clone(), MenuAct::NewInside));
             }
-            if item(ui, "Insert component (.cwk) inside…", !locked) {
-                chosen = Some(TreeAct::Menu(pc.clone(), MenuAct::InsertCwk));
+            if item(ui, "Insert component (.ecad) inside…", !locked) {
+                chosen = Some(TreeAct::Menu(pc.clone(), MenuAct::InsertEcad));
             }
             if item(ui, "Place another", true) {
                 chosen = Some(TreeAct::Menu(pc.clone(), MenuAct::PlaceAgain));
@@ -865,7 +865,7 @@ fn rows(
     }
 }
 
-fn mates_folder(app: &mut CaseworkApp, ui: &mut Ui, d: &DocData) {
+fn mates_folder(app: &mut EasyCadApp, ui: &mut Ui, d: &DocData) {
     if d.mates.is_empty() && app.asm.mate.is_none() {
         return;
     }
@@ -962,7 +962,7 @@ fn mates_folder(app: &mut CaseworkApp, ui: &mut Ui, d: &DocData) {
 // ---------------------------------------------------------------- breadcrumb
 
 /// `sensor-node / Enclosure / Lid` in the title bar; a click goes to that level.
-pub fn breadcrumb(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn breadcrumb(app: &mut EasyCadApp, ui: &mut Ui) {
     if app.active.is_empty() {
         return;
     }
@@ -992,7 +992,7 @@ pub fn breadcrumb(app: &mut CaseworkApp, ui: &mut Ui) {
 }
 
 /// Status line text while a component is active.
-pub fn active_label(app: &CaseworkApp) -> Option<String> {
+pub fn active_label(app: &EasyCadApp) -> Option<String> {
     if app.active.is_empty() {
         return None;
     }
@@ -1004,14 +1004,14 @@ pub fn active_label(app: &CaseworkApp) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use casework_model::document::Document;
+    use easycad_model::document::Document;
     use glam::DVec3;
 
-    fn app(doc: Document) -> CaseworkApp {
-        CaseworkApp::with_parts(doc, crate::worker::Worker::spawn(|| {}), false)
+    fn app(doc: Document) -> EasyCadApp {
+        EasyCadApp::with_parts(doc, crate::worker::Worker::spawn(|| {}), false)
     }
 
-    fn occ(app: &CaseworkApp, name: &str) -> OccPath {
+    fn occ(app: &EasyCadApp, name: &str) -> OccPath {
         app.doc
             .data
             .all_occurrences()
@@ -1053,12 +1053,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cw-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let part = dir.join("bracket.cwk");
+        let part = dir.join("bracket.ecad");
         let mut b = Document::new("bracket");
         b.set_param("t", "2").unwrap();
         b.save_to_dir(&part).unwrap();
         let mut a = app(Document::new("host"));
-        a.path = Some(dir.join("host.cwk"));
+        a.path = Some(dir.join("host.ecad"));
         let c = a.doc.link_component(&part, &a.host_dir()).unwrap();
         a.doc.add_occurrence(ComponentId::ROOT, c, "bracket:1", Transform::IDENTITY).unwrap();
         assert_eq!(a.link_status(c), LinkStatus::UpToDate);
@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn features_go_into_the_active_component() {
-        use casework_model::feature::{Feature, FeatureId, FeatureKind};
+        use easycad_model::feature::{Feature, FeatureId, FeatureKind};
         let mut a = app(Document::new("asm"));
         a.new_component(ComponentId::ROOT);
         let p = occ(&a, "Component1:1");

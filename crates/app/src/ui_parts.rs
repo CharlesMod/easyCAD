@@ -2,14 +2,14 @@
 //! rules, click a hole edge (or press Enter) to place, "place at all matching
 //! holes", and a BOM tab.
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::library::{hole_rules, Category, Fit, Head, HoleChoice, PartInfo, System};
-use casework_model::occt::CurveKind;
-use casework_model::select::EdgeSelector;
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::library::{hole_rules, Category, Fit, Head, HoleChoice, PartInfo, System};
+use easycad_model::occt::CurveKind;
+use easycad_model::select::EdgeSelector;
 use egui::{vec2, Color32, Frame, Margin, RichText, Stroke, Ui};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::pickstack::{Filter, PickKey, PickKind};
 use crate::theme;
 use crate::widgets;
@@ -79,7 +79,7 @@ impl PartsUi {
         };
         let builtin = self.source == 0;
         all.into_iter()
-            .filter(|p| (p.source == casework_model::library::BUILTIN) == builtin)
+            .filter(|p| (p.source == easycad_model::library::BUILTIN) == builtin)
             .filter(|p| !builtin || p.category == self.category)
             .filter(|p| !builtin || p.system.is_none_or(|s| s == self.system))
             .collect()
@@ -157,7 +157,7 @@ impl PartsUi {
 }
 
 /// Circular edges with the same radius as `edge` on the same body (matching holes).
-pub fn matching_holes(app: &CaseworkApp, key: PickKey) -> Vec<PickKey> {
+pub fn matching_holes(app: &EasyCadApp, key: PickKey) -> Vec<PickKey> {
     let PickKind::Edge(e) = key.kind else {
         return vec![];
     };
@@ -188,7 +188,7 @@ pub fn matching_holes(app: &CaseworkApp, key: PickKey) -> Vec<PickKey> {
         .collect()
 }
 
-pub fn count_standoffs(app: &CaseworkApp, f: FeatureId) -> usize {
+pub fn count_standoffs(app: &EasyCadApp, f: FeatureId) -> usize {
     let Some(feat) = app.doc.data.feature(f) else {
         return 0;
     };
@@ -224,7 +224,7 @@ pub fn count_standoffs(app: &CaseworkApp, f: FeatureId) -> usize {
         .count()
 }
 
-fn place(app: &mut CaseworkApp, keys: &[PickKey]) {
+fn place(app: &mut EasyCadApp, keys: &[PickKey]) {
     let crate::app::Mode::Parts(p) = &app.mode else {
         return;
     };
@@ -291,7 +291,7 @@ fn place(app: &mut CaseworkApp, keys: &[PickKey]) {
     app.toast(format!("Placed {size} ×{n}"));
 }
 
-pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
     app.filter = Filter::EDGES_ONLY;
     egui::Panel::left("parts")
         .default_size(400.0)
@@ -324,7 +324,7 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn banner(app: &mut CaseworkApp, ui: &mut Ui, rect: egui::Rect) {
+fn banner(app: &mut EasyCadApp, ui: &mut Ui, rect: egui::Rect) {
     let crate::app::Mode::Parts(p) = &app.mode else {
         return;
     };
@@ -436,7 +436,7 @@ fn banner(app: &mut CaseworkApp, ui: &mut Ui, rect: egui::Rect) {
 
 /// The library part as a component placed in the component being edited (at its
 /// origin), selected with the move gizmo on.
-pub fn insert_component(app: &mut CaseworkApp, info: &casework_model::library::PartInfo, size: &str) {
+pub fn insert_component(app: &mut EasyCadApp, info: &easycad_model::library::PartInfo, size: &str) {
     let parent = app.scope();
     let comp = match app.doc.add_part_component(info, size) {
         Ok(c) => c,
@@ -447,7 +447,7 @@ pub fn insert_component(app: &mut CaseworkApp, info: &casework_model::library::P
     };
     let name = app.doc.data.component_name(comp);
     let n = crate::ui_assembly::instance_count(&app.doc.data, comp) + 1;
-    match app.doc.add_occurrence(parent, comp, &format!("{name}:{n}"), casework_model::assembly::Transform::IDENTITY) {
+    match app.doc.add_occurrence(parent, comp, &format!("{name}:{n}"), easycad_model::assembly::Transform::IDENTITY) {
         Ok(occ) => {
             let mut path = app.active.clone();
             path.push(occ);
@@ -461,7 +461,7 @@ pub fn insert_component(app: &mut CaseworkApp, info: &casework_model::library::P
     }
 }
 
-fn left(app: &mut CaseworkApp, ui: &mut Ui) {
+fn left(app: &mut EasyCadApp, ui: &mut Ui) {
     let crate::app::Mode::Parts(p) = &mut app.mode else {
         return;
     };
@@ -558,7 +558,7 @@ fn left(app: &mut CaseworkApp, ui: &mut Ui) {
     let items = p.items(doc);
     if p.source == 1 && items.is_empty() {
         Frame::new().inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-            ui.label(widgets::muted("No local STEP library yet. Point Casework at a folder of STEP files described by library.json."));
+            ui.label(widgets::muted("No local STEP library yet. Point easyCAD at a folder of STEP files described by library.json."));
             ui.add_enabled(false, egui::Button::new("Add STEP files…")).on_disabled_hover_text("Folder picker for LocalStepSource: coming next");
         });
         return;
@@ -706,7 +706,7 @@ fn left(app: &mut CaseworkApp, ui: &mut Ui) {
                                 match &rules {
                                     Some(r) => {
                                         let u = |v: f64| {
-                                            if r.units == casework_model::library::Units::In {
+                                            if r.units == easycad_model::library::Units::In {
                                                 format!("{v:.4}")
                                             } else {
                                                 format!("{v:.2}")
@@ -863,7 +863,7 @@ fn glyph(p: &PartInfo) -> String {
     g.into()
 }
 
-fn right(app: &mut CaseworkApp, ui: &mut Ui) {
+fn right(app: &mut EasyCadApp, ui: &mut Ui) {
     let crate::app::Mode::Parts(p) = &mut app.mode else {
         return;
     };

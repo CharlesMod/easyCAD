@@ -6,12 +6,12 @@ pub mod fillet;
 pub mod joint;
 pub mod standoffs;
 
-use casework_model::document::DocData;
-use casework_model::feature::*;
-use casework_model::geom::{Axis, Plane};
-use casework_model::params::Expr;
-use casework_model::process::{Fit, FitClass};
-use casework_model::select::FaceSelector;
+use easycad_model::document::DocData;
+use easycad_model::feature::*;
+use easycad_model::geom::{Axis, Plane};
+use easycad_model::params::Expr;
+use easycad_model::process::{Fit, FitClass};
+use easycad_model::select::FaceSelector;
 use egui::{Color32, RichText, Ui};
 use glam::{DVec2, DVec3};
 
@@ -954,7 +954,7 @@ impl Dialog {
             if matches!(self.body, Body::Fillet(_) | Body::Joint(_)) {
                 continue;
             }
-            if let casework_model::regen::FeatureStatus::Error(e) = &r.status {
+            if let easycad_model::regen::FeatureStatus::Error(e) = &r.status {
                 self.error = Some(e.clone());
             }
         }
@@ -1462,8 +1462,8 @@ pub fn selector_desc(f: &FaceSelector) -> String {
                 "side"
             };
             match which {
-                casework_model::select::Extremum::Max => format!("{dir} face (extreme)"),
-                casework_model::select::Extremum::Min => format!("{dir} face (nearest)"),
+                easycad_model::select::Extremum::Max => format!("{dir} face (extreme)"),
+                easycad_model::select::Extremum::Min => format!("{dir} face (nearest)"),
             }
         }
         FaceSelector::Hint { normal, .. } => format!(

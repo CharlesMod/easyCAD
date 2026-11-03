@@ -2,15 +2,15 @@
 //! hidden lines and source tagging, dimensions, dangling references, title block
 //! and notes, balloons, parting line, SVG/DXF/PDF export.
 
-use casework_model::document::Document;
-use casework_model::drawing::*;
-use casework_model::dxf::DxfDrawing;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::library::{BuiltinSource, PartSource};
-use casework_model::process::CubeFace;
-use casework_model::select::{EdgeKind, EdgeSelector, FaceSelector};
-use casework_model::sketch::Sketch;
+use easycad_model::document::Document;
+use easycad_model::drawing::*;
+use easycad_model::dxf::DxfDrawing;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::library::{BuiltinSource, PartSource};
+use easycad_model::process::CubeFace;
+use easycad_model::select::{EdgeKind, EdgeSelector, FaceSelector};
+use easycad_model::sketch::Sketch;
 use glam::{DQuat, DVec2, DVec3};
 
 /// 40 × 30 × 20 block, Ø8 through hole at (20, 15), 2 mm chamfer on the top-front edge.

@@ -2,14 +2,14 @@
 
 use std::f64::consts::PI;
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::geom::{Axis, Plane};
-use casework_model::library::{BuiltinSource, HoleChoice, PartSource};
-use casework_model::params::Expr;
-use casework_model::regen::FeatureStatus;
-use casework_model::select::FaceSelector;
-use casework_model::sketch::Sketch;
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::geom::{Axis, Plane};
+use easycad_model::library::{BuiltinSource, HoleChoice, PartSource};
+use easycad_model::params::Expr;
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::FaceSelector;
+use easycad_model::sketch::Sketch;
 use glam::{DVec2, DVec3};
 
 fn plate(doc: &mut Document, size: DVec2, t: f64) -> BodyId {
@@ -104,7 +104,7 @@ fn patterned_holes_get_fits_and_teardrops() {
     assert!(out.errors().is_empty(), "{:?}", out.errors());
     assert_eq!(out.process.teardropped.len(), 3, "{:?}", out.process);
     // non-patternable sources give a clear error
-    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![casework_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
+    let fillet = doc.add_feature("F", FeatureKind::Fillet { body: Some(p), edges: vec![easycad_model::select::EdgeSelector::Parallel { dir: DVec3::Z }], radius: 1.0.into(), auto_reduce: false, sets: Vec::new(), skipped: Vec::new(), setback: false });
     let bad = doc.add_feature("Bad", FeatureKind::Pattern { source: PatternSource::Features(vec![fillet]), kind: PatternKind::Linear { dir: DVec3::X, spacing: 5.0.into(), count: Expr::from(2) } });
     assert!(matches!(doc.regenerate().report(bad).unwrap().status, FeatureStatus::Error(ref e) if e.contains("cannot be patterned")));
 }
@@ -152,8 +152,8 @@ fn rib_to_body() {
 
 #[test]
 fn xcaf_pcb_import_keeps_names_and_colors() {
-    use casework_model::occt::{Shape, StepPart};
-    use casework_model::regen::MeshQuality;
+    use easycad_model::occt::{Shape, StepPart};
+    use easycad_model::regen::MeshQuality;
     let board = Shape::make_box(DVec3::ZERO, DVec3::new(50.0, 30.0, 1.6)).unwrap();
     let usb = Shape::make_box(DVec3::new(-1.0, 10.0, 1.6), DVec3::new(7.0, 9.0, 3.2)).unwrap();
     let chip = Shape::make_box(DVec3::new(20.0, 10.0, 1.6), DVec3::new(8.0, 8.0, 1.2)).unwrap();
@@ -189,8 +189,8 @@ fn xcaf_pcb_import_keeps_names_and_colors() {
     assert_eq!(names2, vec!["Board", "J1 USB-C", "U1"]);
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("out.step");
-    let refs: Vec<&casework_model::regen::Body> = out.bodies.iter().collect();
-    casework_model::export::write_step(&refs, &p).unwrap();
+    let refs: Vec<&easycad_model::regen::Body> = out.bodies.iter().collect();
+    easycad_model::export::write_step(&refs, &p).unwrap();
     let (_, back) = Shape::read_step_xcaf(&std::fs::read_to_string(&p).unwrap()).unwrap();
     assert_eq!(back.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), vec!["Board", "J1 USB-C", "U1"]);
     assert!(back[0].color.is_some_and(|c| c[1] > 0.4));

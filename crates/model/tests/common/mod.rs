@@ -1,11 +1,11 @@
 //! Shared test fixtures.
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::joint::{Half, JointKind, Rim};
-use casework_model::process::FitClass;
-use casework_model::sketch::Sketch;
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::joint::{Half, JointKind, Rim};
+use easycad_model::process::FitClass;
+use easycad_model::sketch::Sketch;
 use glam::DVec2;
 
 /// Parametric closed enclosure: rounded-rect shell (cavity cut), 4 bosses, a rib and

@@ -1,4 +1,4 @@
-// Narrow OpenCascade shim for Casework. Every entry point either returns a valid
+// Narrow OpenCascade shim for easyCAD. Every entry point either returns a valid
 // result or throws (std::runtime_error / Standard_Failure); `shim.h` converts
 // exceptions into Rust `cxx::Exception`s.
 

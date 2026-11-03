@@ -11,11 +11,11 @@
 
 mod common;
 
-use casework_model::document::{Document, ExportFormat, ExportOptions};
-use casework_model::drawing::{PaperOrientation, PaperSize, Sheet, ViewOrientation};
-use casework_model::occt::Shape;
-use casework_model::process::CubeFace;
-use casework_model::regen::MeshQuality;
+use easycad_model::document::{Document, ExportFormat, ExportOptions};
+use easycad_model::drawing::{PaperOrientation, PaperSize, Sheet, ViewOrientation};
+use easycad_model::occt::Shape;
+use easycad_model::process::CubeFace;
+use easycad_model::regen::MeshQuality;
 use glam::{DVec2, DVec3};
 
 fn rounds() -> usize {

@@ -2,17 +2,17 @@
 //! calibration, build-plate orientation (per body / document default) with a mini
 //! plate preview, and the teardrop toggle for FDM profiles.
 
-use casework_model::document::{DocError, TeardropOverride};
-use casework_model::feature::BodyId;
-use casework_model::process::{
+use easycad_model::document::{DocError, TeardropOverride};
+use easycad_model::feature::BodyId;
+use easycad_model::process::{
     calibration_coupon, default_coupon_offsets, BuildOrientation, CalibrationResult, CubeFace,
     FitClass, ProcessKind, ProcessProfile, TeardropStyle,
 };
-use casework_model::select::FaceSelector;
+use easycad_model::select::FaceSelector;
 use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use glam::{DQuat, DVec3};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::pickstack::PickKind;
 use crate::theme;
 use crate::widgets;
@@ -60,12 +60,12 @@ fn kind_name(k: ProcessKind) -> &'static str {
     }
 }
 
-fn commit_profile(app: &mut CaseworkApp, label: &str, p: ProcessProfile) {
+fn commit_profile(app: &mut EasyCadApp, label: &str, p: ProcessProfile) {
     app.doc.update_profile(label, p);
     app.after_edit();
 }
 
-pub fn process_section(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn process_section(app: &mut EasyCadApp, ui: &mut Ui) {
     let d = &app.doc.data;
     let active = d.profile();
     let names: Vec<(String, ProcessKind)> = d
@@ -195,7 +195,7 @@ const FACES: [(CubeFace, &str); 6] = [
 ];
 
 /// Unfolded-cube picker: click the face that goes down on the plate.
-fn orientation_picker(app: &mut CaseworkApp, ui: &mut Ui) {
+fn orientation_picker(app: &mut EasyCadApp, ui: &mut Ui) {
     let bodies: Vec<(BodyId, String)> = app
         .model
         .as_ref()
@@ -387,7 +387,7 @@ fn orientation_picker(app: &mut CaseworkApp, ui: &mut Ui) {
 }
 
 /// Mini preview: the body's silhouette (convex hull, iso view) sitting on a plate.
-fn plate_preview(app: &CaseworkApp, ui: &mut Ui, body: Option<BodyId>, o: BuildOrientation) {
+fn plate_preview(app: &EasyCadApp, ui: &mut Ui, body: Option<BodyId>, o: BuildOrientation) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 6.0, theme::SKETCH_BG);
@@ -485,7 +485,7 @@ fn convex_hull(mut pts: Vec<Pos2>) -> Vec<Pos2> {
 }
 
 /// Selection context menu: per-hole teardrop override.
-pub fn teardrop_menu(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn teardrop_menu(app: &mut EasyCadApp, ui: &mut Ui) {
     if app.doc.data.profile().kind != ProcessKind::Fdm {
         return;
     }
@@ -496,7 +496,7 @@ pub fn teardrop_menu(app: &mut CaseworkApp, ui: &mut Ui) {
         .filter_map(|k| match k.kind {
             PickKind::Face(f) => {
                 let info = m.meshed(k.body)?.faces.get(f as usize)?;
-                (info.kind == casework_model::occt::SurfaceKind::Cylinder)
+                (info.kind == easycad_model::occt::SurfaceKind::Cylinder)
                     .then(|| (k.body, FaceSelector::from_pick(info)))
             }
             _ => None,
@@ -534,7 +534,7 @@ pub fn teardrop_menu(app: &mut CaseworkApp, ui: &mut Ui) {
 }
 
 /// Calibration: export the coupon, then enter what fit and update the profile.
-pub fn calibrate_window(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn calibrate_window(app: &mut EasyCadApp, ui: &mut Ui) {
     let Some(mut c) = app.calibrate.take() else {
         return;
     };

@@ -1,4 +1,4 @@
-# casework-sync: work in progress (on hold)
+# easycad-sync: work in progress (on hold)
 
 Google sign-in and Drive sync were tabled before this crate was finished.
 It is **not** in the root workspace `members`. Its `Cargo.toml` has its own
@@ -43,12 +43,12 @@ keychain entry even if the revoke fails.
 **Client credentials.** Load the Google console's downloaded file
 (`client_secret_<id>.apps.googleusercontent.com.json`, top-level key `installed`
 with client_id, client_secret, auth_uri, token_uri). Lookup order: `--client-file`
-path, env `CASEWORK_GOOGLE_CLIENT_FILE`, `<config_dir>/casework/google_client.json`,
-then env `CASEWORK_GOOGLE_CLIENT_ID` + `CASEWORK_GOOGLE_CLIENT_SECRET`. The login
+path, env `EASYCAD_GOOGLE_CLIENT_FILE`, `<config_dir>/easycad/google_client.json`,
+then env `EASYCAD_GOOGLE_CLIENT_ID` + `EASYCAD_GOOGLE_CLIENT_SECRET`. The login
 example copies a `--client-file` into the config dir (0600) on success, so it only
 needs to be passed once.
 
-**Drive layout.** Create or find `Casework/` in My Drive. Each sync root
+**Drive layout.** Create or find `easyCAD/` in My Drive. Each sync root
 (Documents, Parts Library, Settings, all configurable) maps to a subfolder of it.
 Real subfolders mirror the local tree so Drive is browsable, but files are
 *identified* by `appProperties`: `cw_root`, the path split across
@@ -69,13 +69,13 @@ resumable sessions, the root folder id, and the changes `startPageToken`.
 then runs it in phases: conflict copies, blobs, other files, `doc.json`, deletes last.
 - Equal md5 on both sides counts as synced, whatever the base says. This makes
   a lost or reset state DB and a lost upload response safe.
-- Blobs (`*.cwk/blobs/<sha256>`) never conflict. If a blob already exists on the remote by md5,
+- Blobs (`*.ecad/blobs/<sha256>`) never conflict. If a blob already exists on the remote by md5,
   it is copied server-side instead of re-uploaded (this also makes renames cheap).
   Verify sha256 against the name on download. A blob deletion propagates
   only when the other side's `doc.json` is unchanged or absent; otherwise the blob
   is restored. Skip a `doc.json` upload if any of its blobs failed.
 - A `doc.json` changed on both sides is never overwritten. The remote doc
-  (doc.json + its blobs) is written to `<name> (conflict <device> <YYYY-MM-DD HHMMSS>).cwk`,
+  (doc.json + its blobs) is written to `<name> (conflict <device> <YYYY-MM-DD HHMMSS>).ecad`,
   then local is pushed to the original path, a `Conflict` event is emitted, and the copy syncs
   as a new doc. The copy keeps the same `doc_id`, and the GUI decides later. Other files
   get the same treatment, as `<stem> (conflict ...).<ext>`.

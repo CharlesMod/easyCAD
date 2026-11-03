@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use casework_model::document::{DocError, Document};
-use casework_model::feature::{BodyId, Feature, FeatureId};
-use casework_model::regen::FeatureStatus;
+use easycad_model::document::{DocError, Document};
+use easycad_model::feature::{BodyId, Feature, FeatureId};
+use easycad_model::regen::FeatureStatus;
 use egui::{Key, Modifiers};
 
 use crate::adapters;
@@ -18,7 +18,7 @@ use crate::pickstack::{Filter, PickKey, PickStack};
 use crate::sketch_mode::SketchSession;
 use crate::viewport::gpu::DisplayMode;
 use crate::worker::{Output, Purpose, Worker};
-use casework_model::regen::MeshQuality;
+use easycad_model::regen::MeshQuality;
 
 /// Debounce for parameter / dialog edits before regenerating.
 pub const DEBOUNCE: f64 = 0.18;
@@ -54,8 +54,8 @@ pub struct UiCache {
     pub chips: std::collections::HashMap<FeatureId, String>,
     pub hot: Option<std::collections::BTreeSet<String>>,
     /// The active component's view (`None` = the root: use the document).
-    pub scoped: Option<Arc<casework_model::document::DocData>>,
-    pub scoped_key: Option<(u64, casework_model::assembly::OccPath)>,
+    pub scoped: Option<Arc<easycad_model::document::DocData>>,
+    pub scoped_key: Option<(u64, easycad_model::assembly::OccPath)>,
 }
 
 pub struct Toast {
@@ -64,7 +64,7 @@ pub struct Toast {
     pub warn: bool,
 }
 
-pub struct CaseworkApp {
+pub struct EasyCadApp {
     pub doc: Document,
     pub path: Option<PathBuf>,
     pub saved_revision: u64,
@@ -100,7 +100,7 @@ pub struct CaseworkApp {
     pub export_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     pub cube_hover: Option<crate::camera::CubeRegion>,
     /// Debounced edit of the active process profile (fit table drags).
-    pub pending_profile: Option<(casework_model::process::ProcessProfile, f64)>,
+    pub pending_profile: Option<(easycad_model::process::ProcessProfile, f64)>,
     pub cache: UiCache,
     /// "New document" prompt: (name, profile).
     pub new_doc_prompt: Option<(String, String)>,
@@ -111,7 +111,7 @@ pub struct CaseworkApp {
     pub dragging: bool,
     pub now: f64,
     pub quit: bool,
-    /// `CASEWORK_STATE_FILE` JSON dump for the E2E scripts.
+    /// `EASYCAD_STATE_FILE` JSON dump for the E2E scripts.
     pub state_dump: Option<crate::e2e_state::StateDump>,
     /// Tab / Shift+Tab presses taken from the raw input for the pick stack.
     pub pending_cycle: i32,
@@ -119,7 +119,7 @@ pub struct CaseworkApp {
     pub typing: bool,
     /// The body whose face a new sketch was placed on, and once committed the
     /// sketch's id: the default target of an Extrude / Revolve on that sketch.
-    pub sketch_body: Option<(Option<casework_model::feature::SketchId>, BodyId)>,
+    pub sketch_body: Option<(Option<easycad_model::feature::SketchId>, BodyId)>,
     /// In-app path prompt (no system file dialog) and what to do with the path.
     pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
     /// "New enclosure from PCB" wizard.
@@ -133,7 +133,7 @@ pub struct CaseworkApp {
     /// Recovery copies left by a crashed session, offered at start.
     pub recovery_offer: Vec<crate::recovery::Entry>,
     /// Assemblies: the occurrence being edited (`[]` = the root / whole assembly).
-    pub active: casework_model::assembly::OccPath,
+    pub active: easycad_model::assembly::OccPath,
     /// Assemblies: explode slider 0..1 (display only).
     pub explode: f32,
     pub asm: crate::ui_assembly::AsmUi,
@@ -142,7 +142,7 @@ pub struct CaseworkApp {
     /// Section view (view toolbar).
     pub section: Option<SectionUi>,
     /// Bounds of the uncut model, for placing the section plane.
-    pub section_bbox: Option<casework_model::occt::BBox>,
+    pub section_bbox: Option<easycad_model::occt::BBox>,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -157,9 +157,9 @@ pub struct SectionUi {
 }
 
 /// What a file chooser does with the chosen path.
-pub type OnPath = Box<dyn FnOnce(&mut CaseworkApp, PathBuf)>;
+pub type OnPath = Box<dyn FnOnce(&mut EasyCadApp, PathBuf)>;
 
-impl CaseworkApp {
+impl EasyCadApp {
     pub fn new(cc: &eframe::CreationContext<'_>, doc: Option<Document>) -> Self {
         crate::theme::apply(&cc.egui_ctx);
         let gpu = match &cc.wgpu_render_state {
@@ -180,7 +180,7 @@ impl CaseworkApp {
 
     pub fn with_parts(doc: Document, worker: Worker, gpu: bool) -> Self {
         let rev = doc.data.revision;
-        CaseworkApp {
+        EasyCadApp {
             doc,
             path: None,
             saved_revision: rev,
@@ -256,7 +256,7 @@ impl CaseworkApp {
     /// The history rollback marker of the component being edited.
     pub fn rollback(&self) -> Option<usize> {
         let c = self.scope();
-        if c == casework_model::assembly::ComponentId::ROOT {
+        if c == easycad_model::assembly::ComponentId::ROOT {
             self.doc.data.rollback
         } else {
             self.doc.data.component(c).and_then(|c| c.rollback)
@@ -302,13 +302,13 @@ impl CaseworkApp {
     }
 
     /// The component being edited (`ROOT` unless a component is active).
-    pub fn scope(&self) -> casework_model::assembly::ComponentId {
+    pub fn scope(&self) -> easycad_model::assembly::ComponentId {
         crate::ui_assembly::active_component(self)
     }
 
     /// The document as the active component sees it: its features, sketches and
     /// imports, document params with its local params on top. The root: the document.
-    pub fn view(&self) -> &casework_model::document::DocData {
+    pub fn view(&self) -> &easycad_model::document::DocData {
         match &self.cache.scoped {
             Some(v) if self.cache.scoped_key.as_ref().is_some_and(|k| k.0 == self.doc.data.revision && k.1 == self.active) => v,
             _ => &self.doc.data,
@@ -322,7 +322,7 @@ impl CaseworkApp {
             return;
         }
         let c = self.scope();
-        self.cache.scoped = (c != casework_model::assembly::ComponentId::ROOT)
+        self.cache.scoped = (c != easycad_model::assembly::ComponentId::ROOT)
             .then(|| Arc::new(crate::scope::view(&self.doc.data, c)));
         self.cache.scoped_key = Some(key);
     }
@@ -354,7 +354,7 @@ impl CaseworkApp {
     }
 
     /// Features the open dialog would add, inserted at the active position.
-    pub fn preview_data(&self) -> Option<(casework_model::document::DocData, Vec<usize>)> {
+    pub fn preview_data(&self) -> Option<(easycad_model::document::DocData, Vec<usize>)> {
         let d = self.dialog.as_ref()?;
         let scope = self.scope();
         let mut data = adapters::effective_in(&self.doc.data, scope, self.active_count());
@@ -784,7 +784,7 @@ impl CaseworkApp {
         self.request_model();
     }
 
-    pub fn open_sketch(&mut self, id: Option<casework_model::feature::SketchId>) {
+    pub fn open_sketch(&mut self, id: Option<easycad_model::feature::SketchId>) {
         let s = match id {
             Some(id) => self
                 .view()
@@ -810,13 +810,13 @@ impl CaseworkApp {
     }
 
     /// A planar face in the selection becomes the sketch plane (else XY).
-    fn sketch_plane_from_selection(&self) -> casework_model::geom::Plane {
+    fn sketch_plane_from_selection(&self) -> easycad_model::geom::Plane {
         use crate::pickstack::PickKind;
         let m = self.model.as_deref();
         for k in &self.selection {
             if let (PickKind::Face(f), Some(m)) = (k.kind, m) {
                 if let Some(info) = m.meshed(k.body).and_then(|b| b.faces.get(f as usize)) {
-                    if info.kind == casework_model::occt::SurfaceKind::Plane {
+                    if info.kind == easycad_model::occt::SurfaceKind::Plane {
                         let n = info.normal;
                         let x = if n.z.abs() > 0.9 {
                             glam::DVec3::X
@@ -824,12 +824,12 @@ impl CaseworkApp {
                             glam::DVec3::Z.cross(n)
                         };
                         let origin = n * info.point.dot(n);
-                        return casework_model::geom::Plane::new(origin, x, n);
+                        return easycad_model::geom::Plane::new(origin, x, n);
                     }
                 }
             }
         }
-        casework_model::geom::Plane::XY
+        easycad_model::geom::Plane::XY
     }
 
     pub fn finish_sketch(&mut self) {
@@ -868,7 +868,7 @@ impl CaseworkApp {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            None => format!("{}.cwk", self.doc.data.name),
+            None => format!("{}.ecad", self.doc.data.name),
         }
     }
 
@@ -928,7 +928,7 @@ impl CaseworkApp {
     pub fn ask_path(
         &mut self,
         req: crate::files::Request,
-        then: impl FnOnce(&mut CaseworkApp, PathBuf) + 'static,
+        then: impl FnOnce(&mut EasyCadApp, PathBuf) + 'static,
     ) {
         use crate::files::Pick;
         match crate::files::native(&req) {
@@ -952,7 +952,7 @@ impl CaseworkApp {
     }
 
     pub fn open_dialog_file(&mut self) {
-        let req = crate::files::Request::folder("Open a .cwk document folder");
+        let req = crate::files::Request::folder("Open a .ecad document folder");
         self.ask_path(req, |app, dir| {
             if let Err(e) = app.open_path(&dir) {
                 app.warn(format!("Open failed: {e}"));
@@ -961,24 +961,25 @@ impl CaseworkApp {
     }
 
     pub fn save(&mut self, save_as: bool) {
-        let save = |app: &mut CaseworkApp, p: PathBuf| match app.save_to(p) {
+        let save = |app: &mut EasyCadApp, p: PathBuf| match app.save_to(p) {
             Ok(p) => app.toast(format!("Saved {}", p.display())),
             Err(e) => app.warn(format!("Save failed: {e}")),
         };
         match (&self.path, save_as) {
             (Some(p), false) => save(self, p.clone()),
             _ => {
-                let name = format!("{}.cwk", self.doc.data.name);
-                let req = crate::files::Request::save("Save document", "Casework", "cwk", &name);
+                let name = format!("{}.ecad", self.doc.data.name);
+                let req = crate::files::Request::save("Save document", "easyCAD", "ecad", &name);
                 self.ask_path(req, save);
             }
         }
     }
 
-    /// Save to a `.cwk` folder (the path the Save dialogs use).
+    /// Save to a `.ecad` folder (the path the Save dialogs use).
     pub fn save_to(&mut self, mut p: PathBuf) -> Result<PathBuf, String> {
-        if p.extension().is_none_or(|e| e != "cwk") {
-            p.set_extension("cwk");
+        // `.cwk` is the pre-rename extension: keep saving those folders in place.
+        if p.extension().is_none_or(|e| e != "ecad" && e != "cwk") {
+            p.set_extension("ecad");
         }
         self.doc.save_to_dir(&p).map_err(|e| e.to_string())?;
         self.saved_revision = self.doc.data.revision;
@@ -989,7 +990,7 @@ impl CaseworkApp {
         Ok(p)
     }
 
-    /// Open a `.cwk` folder (the path the Open dialog uses).
+    /// Open a `.ecad` folder (the path the Open dialog uses).
     pub fn open_path(&mut self, dir: &std::path::Path) -> Result<(), String> {
         let d = Document::load_from_dir(dir).map_err(|e| e.to_string())?;
         self.load(d, Some(dir.to_path_buf()));
@@ -1316,7 +1317,7 @@ impl CaseworkApp {
     /// Periodic recovery copy of unsaved work (off the UI thread).
     fn autosave_tick(&mut self, ctx: &egui::Context) {
         let interval = self.settings.autosave_min as f64 * 60.0;
-        let interval = std::env::var("CASEWORK_AUTOSAVE_SECS")
+        let interval = std::env::var("EASYCAD_AUTOSAVE_SECS")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(interval);
@@ -1397,7 +1398,7 @@ impl CaseworkApp {
     }
 }
 
-impl CaseworkApp {
+impl EasyCadApp {
     /// Tab over the viewport cycles the pick stack. egui's own focus navigation
     /// would otherwise take the key first (moving focus into a parameter field),
     /// so presses are removed from the raw input before egui sees them.
@@ -1428,9 +1429,9 @@ impl CaseworkApp {
     }
 }
 
-impl eframe::App for CaseworkApp {
+impl eframe::App for EasyCadApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if std::env::var_os("CASEWORK_DEBUG_KEYS").is_some() {
+        if std::env::var_os("EASYCAD_DEBUG_KEYS").is_some() {
             for e in &raw_input.events {
                 if matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)) {
                     eprintln!("key event: {e:?}");

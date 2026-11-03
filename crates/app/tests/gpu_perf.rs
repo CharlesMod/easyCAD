@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use casework_app::camera::Camera;
-use casework_app::viewport::gpu::{DisplayMode, DrawBody, Frame3D, ViewportGpu, COLOR_FORMAT};
-use casework_model::occt::{EdgePolyline, Mesh};
+use easycad_app::camera::Camera;
+use easycad_app::viewport::gpu::{DisplayMode, DrawBody, Frame3D, ViewportGpu, COLOR_FORMAT};
+use easycad_model::occt::{EdgePolyline, Mesh};
 use eframe::egui_wgpu::wgpu;
 use glam::{Vec2, Vec3};
 

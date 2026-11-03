@@ -2,8 +2,8 @@
 //! the selection filter. Tab / Alt+wheel cycles; click selects the current one.
 //! Replaces Fusion's press-and-hold.
 
-use casework_model::feature::BodyId;
-use casework_model::pick::{Hit, HitKind};
+use easycad_model::feature::BodyId;
+use easycad_model::pick::{Hit, HitKind};
 
 /// What a selection refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -191,7 +191,7 @@ impl PickStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use casework_model::feature::FeatureId;
+    use easycad_model::feature::FeatureId;
     use glam::Vec3;
 
     struct Facts(Vec<BodyId>);

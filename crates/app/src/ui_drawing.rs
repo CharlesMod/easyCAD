@@ -8,16 +8,16 @@
 
 use std::sync::Arc;
 
-use casework_model::document::{DocError, Document};
-use casework_model::drawing::*;
-use casework_model::feature::{BodyId, FeatureKind};
-use casework_model::occt::CurveKind;
-use casework_model::process::CubeFace;
-use casework_model::select::EdgeSelector;
+use easycad_model::document::{DocError, Document};
+use easycad_model::drawing::*;
+use easycad_model::feature::{BodyId, FeatureKind};
+use easycad_model::occt::CurveKind;
+use easycad_model::process::CubeFace;
+use easycad_model::select::EdgeSelector;
 use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use glam::{DQuat, DVec2};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::theme;
 use crate::widgets;
 
@@ -113,7 +113,7 @@ pub fn orientation_label(o: &ViewOrientation) -> String {
 
 /// A first sheet: top / front / right at 1:1, an iso at 1:2, and associative
 /// annotations on the model's own edges.
-pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
+pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
     let name = format!("Sheet {}", app.doc.data.drawings.len() + 1);
     let id = app.doc.add_drawing(
         &name,
@@ -136,12 +136,12 @@ pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
     let ext = model
         .as_ref()
         .and_then(|m| {
-            let mut bb: Option<casework_model::occt::BBox> = None;
+            let mut bb: Option<easycad_model::occt::BBox> = None;
             for b in m.bodies.iter().filter(|b| !b.body.reference) {
                 if let Ok(x) = b.body.shape().bbox() {
                     bb = Some(match bb {
                         None => x,
-                        Some(o) => casework_model::occt::BBox {
+                        Some(o) => easycad_model::occt::BBox {
                             min: o.min.min(x.min),
                             max: o.max.max(x.max),
                         },
@@ -207,7 +207,7 @@ pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
             return;
         };
         let bid = base.body.id;
-        let edge = |pred: &dyn Fn(&casework_model::occt::EdgeInfo) -> bool| {
+        let edge = |pred: &dyn Fn(&easycad_model::occt::EdgeInfo) -> bool| {
             base.edges.iter().find(|e| pred(e)).map(|e| DimRef::Edge {
                 body: bid,
                 edge: EdgeSelector::from_pick(e),
@@ -275,7 +275,7 @@ pub fn default_drawing(app: &mut CaseworkApp) -> Option<DrawingId> {
 
 /// Make sure the screen has a drawing, commit paused drafts, and keep the
 /// worker's result current.
-pub fn sync(app: &mut CaseworkApp) {
+pub fn sync(app: &mut EasyCadApp) {
     let need_new = match &app.mode {
         crate::app::Mode::Drawing(d) => d.id.is_none_or(|id| app.doc.data.drawing(id).is_none()),
         _ => return,
@@ -338,7 +338,7 @@ pub fn sync(app: &mut CaseworkApp) {
                 library: app.doc.library.clone(),
                 prefixes: Vec::new(),
                 drawing: Some(draft),
-                quality: casework_model::regen::MeshQuality::Display,
+                quality: easycad_model::regen::MeshQuality::Display,
                 section: None,
                 active: Vec::new(),
                 explode: 0.0,
@@ -348,7 +348,7 @@ pub fn sync(app: &mut CaseworkApp) {
     }
 }
 
-pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
     sync(app);
     let model = app.model.clone();
     let busy = app.worker.busy_with(crate::worker::Purpose::Drawing);
@@ -1464,7 +1464,7 @@ fn click(
 }
 
 /// Commit the draft right away (tests, leaving the screen).
-pub fn commit_now(app: &mut CaseworkApp) -> Result<(), DocError> {
+pub fn commit_now(app: &mut EasyCadApp) -> Result<(), DocError> {
     let crate::app::Mode::Drawing(d) = &mut app.mode else {
         return Ok(());
     };

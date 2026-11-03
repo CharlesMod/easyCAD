@@ -1,11 +1,11 @@
 //! Window layout: title bar, toolbar, browser, the pinned Parameters panel,
 //! history strip and status bar around the viewport (or the active mode's screen).
 
-use casework_model::feature::{FeatureId, FeatureKind, SketchId};
-use casework_model::regen::FeatureStatus;
+use easycad_model::feature::{FeatureId, FeatureKind, SketchId};
+use easycad_model::regen::FeatureStatus;
 use egui::{vec2, Color32, CornerRadius, Frame, Margin, RichText, Sense, Stroke, Ui};
 
-use crate::app::{CaseworkApp, Mode};
+use crate::app::{EasyCadApp, Mode};
 use crate::dialogs::DialogKind;
 use crate::pickstack::{PickKey, PickKind};
 use crate::theme;
@@ -17,7 +17,7 @@ fn bar_frame(fill: Color32) -> Frame {
         .inner_margin(Margin::symmetric(12, 0))
 }
 
-pub fn show(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn show(app: &mut EasyCadApp, ui: &mut Ui) {
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::GROUND);
     title_bar(app, ui);
     match &app.mode {
@@ -36,11 +36,11 @@ pub fn show(app: &mut CaseworkApp, ui: &mut Ui) {
 }
 
 /// New document: name + process profile (defaults to the last one used).
-fn new_doc_window(app: &mut CaseworkApp, ui: &mut Ui) {
+fn new_doc_window(app: &mut EasyCadApp, ui: &mut Ui) {
     let Some((mut name, mut profile)) = app.new_doc_prompt.take() else {
         return;
     };
-    let profiles: Vec<String> = casework_model::process::ProcessProfile::builtins()
+    let profiles: Vec<String> = easycad_model::process::ProcessProfile::builtins()
         .into_iter()
         .map(|p| p.name)
         .collect();
@@ -77,7 +77,7 @@ fn new_doc_window(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn model_screen(app: &mut CaseworkApp, ui: &mut Ui) {
+fn model_screen(app: &mut EasyCadApp, ui: &mut Ui) {
     let in_dialog = app.dialog.is_some();
     if !in_dialog {
         toolbar(app, ui);
@@ -119,7 +119,7 @@ fn model_screen(app: &mut CaseworkApp, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- title bar
 
-pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
     egui::Panel::top("title")
         .exact_size(40.0)
         .frame(bar_frame(theme::BAR))
@@ -128,7 +128,7 @@ pub fn title_bar(app: &mut CaseworkApp, ui: &mut Ui) {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 file_menu(app, ui);
                 widgets::icon(ui, Icon::Logo, 20.0, theme::ACCENT);
-                ui.label(RichText::new("Casework").strong());
+                ui.label(RichText::new("easyCAD").strong());
                 ui.label(RichText::new("/").color(theme::TEXT_FAINT));
                 ui.label(RichText::new(app.title()).strong());
                 if !app.active.is_empty() && app.mode.is_model() {
@@ -283,7 +283,7 @@ fn chip(ui: &mut Ui, text: &str, fill: Color32) {
         });
 }
 
-fn file_menu(app: &mut CaseworkApp, ui: &mut Ui) {
+fn file_menu(app: &mut EasyCadApp, ui: &mut Ui) {
     let r = widgets::icon_button(ui, Icon::Menu, 28.0, "File", true);
     egui::Popup::menu(&r).show(|ui| {
         ui.set_min_width(220.0);
@@ -332,7 +332,7 @@ fn file_menu(app: &mut CaseworkApp, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- toolbar
 
-fn toolbar(app: &mut CaseworkApp, ui: &mut Ui) {
+fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
     egui::Panel::top("toolbar")
         .frame(
             Frame::new()
@@ -466,8 +466,8 @@ fn toolbar(app: &mut CaseworkApp, ui: &mut Ui) {
                             (
                                 Icon::Import,
                                 "Insert",
-                                "Insert a .cwk as a linked component",
-                                Cmd::InsertCwk,
+                                "Insert a .ecad as a linked component",
+                                Cmd::InsertEcad,
                             ),
                             (
                                 Icon::Joint,
@@ -576,14 +576,14 @@ enum Cmd {
     Export,
     Drawing,
     NewComponent,
-    InsertCwk,
+    InsertEcad,
     Mate,
     Move,
     Interference,
     Bom,
 }
 
-fn run(app: &mut CaseworkApp, c: Cmd) {
+fn run(app: &mut EasyCadApp, c: Cmd) {
     match c {
         Cmd::Sketch => app.open_sketch(None),
         Cmd::Dialog(k) => app.open_dialog(k),
@@ -595,7 +595,7 @@ fn run(app: &mut CaseworkApp, c: Cmd) {
             let c = app.scope();
             app.new_component(c);
         }
-        Cmd::InsertCwk => app.insert_cwk(),
+        Cmd::InsertEcad => app.insert_ecad(),
         Cmd::Mate => app.open_mate(None),
         Cmd::Move => app.toggle_gizmo(),
         Cmd::Interference => app.check_interference(),
@@ -616,7 +616,7 @@ pub(crate) fn row(ui: &mut Ui, indent: f32, height: f32, selected: bool) -> (egu
     (rect.with_min_x(rect.left() + indent), resp)
 }
 
-pub fn browser(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.add_space(10.0);
     ui.horizontal(|ui| {
@@ -917,7 +917,7 @@ pub fn browser(app: &mut CaseworkApp, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- parameters
 
-pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn params_panel(app: &mut EasyCadApp, ui: &mut Ui) {
     let hot: std::collections::BTreeSet<String> = if app.dialog.is_some() {
         app.hot_params()
     } else {
@@ -960,8 +960,8 @@ pub fn params_panel(app: &mut CaseworkApp, ui: &mut Ui) {
             .component(scope)
             .map(|c| c.params.list.clone())
             .unwrap_or_default();
-        let mut groups: Vec<(Option<String>, Vec<casework_model::params::Param>)> = Vec::new();
-        if scope != casework_model::assembly::ComponentId::ROOT {
+        let mut groups: Vec<(Option<String>, Vec<easycad_model::params::Param>)> = Vec::new();
+        if scope != easycad_model::assembly::ComponentId::ROOT {
             groups.push((Some(format!("{} · local", app.doc.data.component_name(scope))), local.clone()));
             groups.push((Some("Document".into()), app.doc.data.params.list.clone()));
         } else {
@@ -1119,9 +1119,9 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
 }
 
 /// Chip label like "Fillet r5.3", "Split @ lid_split", "Standoffs ×4".
-pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> String {
+pub fn chip_label(app: &EasyCadApp, f: &easycad_model::feature::Feature) -> String {
     let vals = crate::adapters::values(app.view());
-    let ev = |e: &casework_model::params::Expr| {
+    let ev = |e: &easycad_model::params::Expr| {
         e.eval(&vals)
             .ok()
             .map(crate::units::short)
@@ -1155,7 +1155,7 @@ pub fn chip_label(app: &CaseworkApp, f: &casework_model::feature::Feature) -> St
     }
 }
 
-fn history(app: &mut CaseworkApp, ui: &mut Ui) {
+fn history(app: &mut EasyCadApp, ui: &mut Ui) {
     egui::Panel::bottom("history")
         .exact_size(52.0)
         .frame(
@@ -1401,7 +1401,7 @@ fn history_chip(
 
 // ---------------------------------------------------------------- status
 
-pub fn status_text(app: &CaseworkApp) -> String {
+pub fn status_text(app: &EasyCadApp) -> String {
     if let Some(n) = app.rollback() {
         if let Some(f) = app.view().features.get(n.saturating_sub(1)) {
             let l = app
@@ -1436,7 +1436,7 @@ pub fn status_text(app: &CaseworkApp) -> String {
             s += &format!(" · {errs} with errors");
         }
         if let Some(sv) = &a.solve {
-            let bad = sv.mates.iter().filter(|r| matches!(r.status, casework_model::assembly::MateStatus::OverConstrained(_) | casework_model::assembly::MateStatus::Unsolved(_))).count();
+            let bad = sv.mates.iter().filter(|r| matches!(r.status, easycad_model::assembly::MateStatus::OverConstrained(_) | easycad_model::assembly::MateStatus::Unsolved(_))).count();
             if bad > 0 {
                 s += &format!(" · {bad} mate{} not solved", if bad == 1 { "" } else { "s" });
             }
@@ -1454,7 +1454,7 @@ pub fn status_text(app: &CaseworkApp) -> String {
     s
 }
 
-fn status_bar(app: &mut CaseworkApp, ui: &mut Ui) {
+fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
     egui::Panel::bottom("status")
         .exact_size(28.0)
         .frame(bar_frame(theme::BAR))
@@ -1498,7 +1498,7 @@ fn status_bar(app: &mut CaseworkApp, ui: &mut Ui) {
         });
 }
 
-fn toasts(app: &mut CaseworkApp, ui: &mut Ui) {
+fn toasts(app: &mut EasyCadApp, ui: &mut Ui) {
     if app.toasts.is_empty() {
         return;
     }

@@ -28,7 +28,7 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-deprecated-declarations")
         .flag_if_supported("-Wno-unused-function")
-        .compile("casework-occt-shim");
+        .compile("easycad-occt-shim");
 
     for lib in OCCT_LIBS {
         println!("cargo:rustc-link-lib=static={lib}");

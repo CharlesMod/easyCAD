@@ -3,8 +3,8 @@
 
 #[test]
 fn file_io_smoke() {
-    let dir = std::env::temp_dir().join(format!("casework-smoke-{}", std::process::id()));
-    let log = casework_app::smoke::run(&dir).unwrap_or_else(|e| panic!("smoke failed: {e}"));
+    let dir = std::env::temp_dir().join(format!("easycad-smoke-{}", std::process::id()));
+    let log = easycad_app::smoke::run(&dir).unwrap_or_else(|e| panic!("smoke failed: {e}"));
     assert!(log.len() >= 10, "{log:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

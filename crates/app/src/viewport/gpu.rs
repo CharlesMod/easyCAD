@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use casework_model::occt::Mesh;
+use easycad_model::occt::Mesh;
 use eframe::egui_wgpu::{self, wgpu, CallbackResources, CallbackTrait, ScreenDescriptor};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
@@ -168,11 +168,11 @@ impl ViewportGpu {
         };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("casework viewport"),
+            label: Some("easycad viewport"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("casework blit"),
+            label: Some("easycad blit"),
             source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
         });
 
@@ -705,7 +705,7 @@ impl ViewportGpu {
             None => (&t.resolve, None),
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("casework viewport"),
+            label: Some("easycad viewport"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,

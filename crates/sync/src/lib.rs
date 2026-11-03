@@ -1,7 +1,7 @@
-//! casework-sync: Google Drive sync for Casework. WORK IN PROGRESS, see TODO.md.
+//! easycad-sync: Google Drive sync for easyCAD. WORK IN PROGRESS, see TODO.md.
 //!
 //! This crate is deliberately not a member of the root workspace (it has its
-//! own `[workspace]` table) so the default Casework build stays offline-only.
+//! own `[workspace]` table) so the default easyCAD build stays offline-only.
 
 pub mod error;
 pub mod events;

@@ -4,15 +4,15 @@
 use std::f64::consts::PI;
 use std::io::Read;
 
-use casework_model::document::Document;
-use casework_model::export;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::occt::Shape;
-use casework_model::params::Expr;
-use casework_model::regen::FeatureStatus;
-use casework_model::select::{EdgeSelector, FaceSelector};
-use casework_model::sketch::{Constraint, Geom, Sketch};
+use easycad_model::document::Document;
+use easycad_model::export;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::occt::Shape;
+use easycad_model::params::Expr;
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::{EdgeSelector, FaceSelector};
+use easycad_model::sketch::{Constraint, Geom, Sketch};
 use glam::{DVec2, DVec3};
 
 fn close(a: f64, b: f64, rel: f64) -> bool {
@@ -176,7 +176,7 @@ fn enclosure_end_to_end() {
     let expected = before + boss_v + 2.0 * 480.0 - 3.0 * 80.0;
     assert!((bv - expected).abs() < 40.0, "base {bv} vs {expected} ({with_bosses})");
     assert!(base.shape().is_valid() && lid.shape().is_valid());
-    assert_eq!(base.shape().count(casework_model::occt::ShapeKind::Solid), 1);
+    assert_eq!(base.shape().count(easycad_model::occt::ShapeKind::Solid), 1);
     let bb = base.shape().bbox().unwrap();
     assert!(close(bb.size().x, 80.0, 1e-4) && close(bb.size().y, 60.0, 1e-4) && close(bb.size().z, 25.0, 1e-4));
 
@@ -226,9 +226,9 @@ fn enclosure_end_to_end() {
     }
 
     // The document round-trips through its folder format and regenerates identically.
-    let cwk = dir.path().join("Enclosure.cwk");
-    doc.save_to_dir(&cwk).unwrap();
-    let mut doc2 = Document::load_from_dir(&cwk).unwrap();
+    let ecad = dir.path().join("Enclosure.ecad");
+    doc.save_to_dir(&ecad).unwrap();
+    let mut doc2 = Document::load_from_dir(&ecad).unwrap();
     assert_eq!(doc2.data, doc.data);
     let v2 = doc2.regenerate().body_by_id(base_id).unwrap().shape().volume().unwrap();
     assert!(close(v2, bv, 1e-9));

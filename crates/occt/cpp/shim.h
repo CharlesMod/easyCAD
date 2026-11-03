@@ -1,5 +1,5 @@
 #pragma once
-// Narrow C++ shim over OpenCascade for the Casework cxx bridge.
+// Narrow C++ shim over OpenCascade for the easyCAD cxx bridge.
 
 #include <exception>
 #include <memory>

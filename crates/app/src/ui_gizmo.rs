@@ -3,11 +3,11 @@
 //! drag is shown live through a model-matrix override (no regeneration); release
 //! writes the occurrence's new placement as one undo step.
 
-use casework_model::assembly::{OccPath, Transform};
+use easycad_model::assembly::{OccPath, Transform};
 use egui::{pos2, vec2, Color32, Pos2, Rect, Stroke, Ui};
 use glam::{DAffine3, DQuat, DVec3, Vec2, Vec3};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,7 +33,7 @@ fn axis_color(i: usize) -> Color32 {
 }
 
 /// View-frame bounds of an occurrence's placed bodies (drags included).
-pub fn occ_bounds(app: &CaseworkApp, path: &[casework_model::assembly::OccurrenceId]) -> Option<(Vec3, Vec3)> {
+pub fn occ_bounds(app: &EasyCadApp, path: &[easycad_model::assembly::OccurrenceId]) -> Option<(Vec3, Vec3)> {
     let m = app.model.as_ref()?;
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
@@ -52,7 +52,7 @@ pub fn occ_bounds(app: &CaseworkApp, path: &[casework_model::assembly::Occurrenc
 }
 
 /// Centre of an occurrence's placed bodies in the view frame.
-pub fn occ_center(app: &CaseworkApp, path: &[casework_model::assembly::OccurrenceId]) -> Option<Vec3> {
+pub fn occ_center(app: &EasyCadApp, path: &[easycad_model::assembly::OccurrenceId]) -> Option<Vec3> {
     let m = app.model.as_ref()?;
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
@@ -72,7 +72,7 @@ pub fn occ_center(app: &CaseworkApp, path: &[casework_model::assembly::Occurrenc
 }
 
 /// Why the selected occurrence cannot be moved freely, if it cannot.
-pub fn blocked(app: &CaseworkApp, path: &[casework_model::assembly::OccurrenceId]) -> Option<String> {
+pub fn blocked(app: &EasyCadApp, path: &[easycad_model::assembly::OccurrenceId]) -> Option<String> {
     let d = &app.doc.data;
     let o = path.last().and_then(|o| d.occurrence(*o))?;
     if o.grounded {
@@ -97,7 +97,7 @@ fn delta(h: Handle, origin: Vec3, amount: f64) -> DAffine3 {
 }
 
 /// Draw the gizmo and run its drags. Returns true while it owns the pointer.
-pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) -> bool {
+pub fn gizmo(app: &mut EasyCadApp, ui: &Ui, rect: Rect, resp: &egui::Response) -> bool {
     app.asm.gizmo_screen = None;
     if !app.asm.gizmo || app.asm.mate.is_some() || app.dialog.is_some() {
         app.asm.gdrag = None;
@@ -243,7 +243,7 @@ pub fn gizmo(app: &mut CaseworkApp, ui: &Ui, rect: Rect, resp: &egui::Response) 
 }
 
 /// Write `delta` (view frame) into the occurrence's local placement.
-pub fn commit(app: &mut CaseworkApp, path: &OccPath, delta: DAffine3) {
+pub fn commit(app: &mut EasyCadApp, path: &OccPath, delta: DAffine3) {
     let d = &app.doc.data;
     let Some(id) = path.last().copied() else { return };
     let Some(o) = d.occurrence(id) else { return };

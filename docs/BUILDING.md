@@ -1,4 +1,4 @@
-# Building Casework
+# Building easyCAD
 
 ## Release packages for all three platforms (run on a Mac)
 
@@ -11,10 +11,10 @@ Output in `dist/`:
 
 | file | contents |
 |---|---|
-| `Casework-<ver>-<sha>-macos-universal.zip` | `Casework.app` (arm64 + x86_64, ad-hoc signed) |
-| `Casework-<ver>-<sha>-linux-x86_64.zip` | `casework` binary, `.desktop` file, README with runtime deps |
-| `Casework-<ver>-<sha>-windows-x86_64.zip` | `Casework.exe` (static, no DLLs, no console window) |
-| `Casework-<ver>-<sha>-all-platforms.zip` | the three zips above |
+| `easyCAD-<ver>-<sha>-macos-universal.zip` | `easyCAD.app` (arm64 + x86_64, ad-hoc signed) |
+| `easyCAD-<ver>-<sha>-linux-x86_64.zip` | `easycad` binary, `.desktop` file, README with runtime deps |
+| `easyCAD-<ver>-<sha>-windows-x86_64.zip` | `easyCAD.exe` (static, no DLLs, no console window) |
+| `easyCAD-<ver>-<sha>-all-platforms.zip` | the three zips above |
 
 ### One-time setup on the Mac
 1. Xcode Command Line Tools: `xcode-select --install`
@@ -24,7 +24,7 @@ Output in `dist/`:
 
 ### How it builds
 - **macOS:** native `cargo build --release` for each arch in `MACOS_ARCHS`, then `lipo` into a
-  universal binary inside `Casework.app`, with an ad-hoc `codesign`. Minimum macOS 11.
+  universal binary inside `easyCAD.app`, with an ad-hoc `codesign`. Minimum macOS 11.
 - **Linux:** inside a Debian 12 container (`scripts/docker/Dockerfile`), so the binary needs
   glibc 2.36 or newer. GPU (Vulkan) and X11/Wayland libraries are loaded at runtime.
 - **Windows:** cross-compiled in the same container with MinGW-w64 (POSIX threads) for
@@ -34,13 +34,13 @@ Output in `dist/`:
 ### Time and caching
 OpenCascade is compiled from source once per platform: roughly 10–15 min per macOS arch on
 Apple Silicon, and similar per Docker platform. Later runs reuse it (`target/` for macOS, Docker volumes
-`casework-target-*` for Linux/Windows); a rebuild after code changes takes a few minutes.
+`easycad-target-*` for Linux/Windows); a rebuild after code changes takes a few minutes.
 Speed-ups: `MACOS_ARCHS=arm64` (skip Intel), `LINUX_ARCHS=aarch64` (native on Apple
 Silicon; `x86_64` runs under emulation and is slower).
 
 ### Knobs
 `MACOS_ARCHS`, `LINUX_ARCHS`, `RUST_IMAGE`, `JOBS`: see the header of `scripts/build-release.sh`.
-Reset the Docker caches with `docker volume rm $(docker volume ls -q | grep casework-)`.
+Reset the Docker caches with `docker volume rm $(docker volume ls -q | grep easycad-)`.
 
 ### Unsigned builds
 - macOS: built and signed locally, so it opens normally on the Mac that built it. Copied to
@@ -49,6 +49,6 @@ Reset the Docker caches with `docker volume rm $(docker volume ls -q | grep case
 
 ## Development build (any platform)
 ```bash
-cargo run -p casework --release -- --sample
+cargo run -p easycad --release -- --sample
 ```
 Needs cmake and a C++17 compiler; the first build compiles OpenCascade (~20 min).

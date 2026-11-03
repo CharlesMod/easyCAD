@@ -79,7 +79,8 @@ pub fn write_stl(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     let n: usize = meshes.iter().map(|m| m.triangles.len()).sum();
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut header = [0u8; 80];
-    header[..17].copy_from_slice(b"Casework STL mm  ");
+    let tag = b"easyCAD STL mm";
+    header[..tag.len()].copy_from_slice(tag);
     w.write_all(&header)?;
     w.write_all(&(n as u32).to_le_bytes())?;
     for m in &meshes {
@@ -101,7 +102,7 @@ pub fn write_stl(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
 pub fn write_3mf(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     let meshes = print_mesh(bodies)?;
     let mut model = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n <metadata name=\"Application\">Casework</metadata>\n <resources>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n <metadata name=\"Application\">easyCAD</metadata>\n <resources>\n",
     );
     for (i, (m, b)) in meshes.iter().zip(bodies).enumerate() {
         model += &format!("  <object id=\"{}\" type=\"model\" name=\"{}\">\n   <mesh>\n    <vertices>\n", i + 1, xml_escape(&b.name));
@@ -145,7 +146,7 @@ pub fn write_3mf_assembly(objects: &[(String, Vec<&Body>)], items: &[(usize, [f6
         return Err(ExportError::Empty);
     }
     let mut model = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n <metadata name=\"Application\">Casework</metadata>\n <resources>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n <metadata name=\"Application\">easyCAD</metadata>\n <resources>\n",
     );
     for (i, (name, bodies)) in objects.iter().enumerate() {
         model += &format!("  <object id=\"{}\" type=\"model\" name=\"{}\">\n   <mesh>\n    <vertices>\n", i + 1, xml_escape(name));

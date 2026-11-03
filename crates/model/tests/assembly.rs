@@ -3,11 +3,11 @@
 
 mod common;
 
-use casework_model::assembly::*;
-use casework_model::document::{DocData, Document};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::sketch::Sketch;
+use easycad_model::assembly::*;
+use easycad_model::document::{DocData, Document};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::sketch::Sketch;
 use glam::{DQuat, DVec2, DVec3};
 
 fn block(doc: &mut Document, comp: ComponentId, name: &str, size: (&str, &str, &str), at: DVec2) -> FeatureId {
@@ -39,7 +39,7 @@ fn old_flat_document_migrates_to_a_root_component() {
     assert_eq!(data.format, 2);
     assert!(data.components.is_empty() && data.occurrences.is_empty() && data.mates.is_empty());
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("Old.cwk");
+    let p = dir.path().join("Old.ecad");
     std::fs::create_dir_all(&p).unwrap();
     std::fs::write(p.join("doc.json"), old).unwrap();
     let mut back = Document::load_from_dir(&p).unwrap();
@@ -90,8 +90,8 @@ fn tree_editing_and_nesting_cycles() {
 }
 
 fn screw_component(doc: &mut Document) -> ComponentId {
-    use casework_model::library::PartSource;
-    let shcs = casework_model::library::BuiltinSource.parts().into_iter().find(|p| p.id == "iso4762").unwrap();
+    use easycad_model::library::PartSource;
+    let shcs = easycad_model::library::BuiltinSource.parts().into_iter().find(|p| p.id == "iso4762").unwrap();
     doc.add_part_component(&shcs, "M3x10").unwrap()
 }
 
@@ -220,7 +220,7 @@ fn in_context_cycle_is_reported() {
     assert_eq!(cyc.len(), 1, "{:?}", r.issues);
     assert!(cyc[0].message.contains("Base") && cyc[0].message.contains("Lid"), "{}", cyc[0].message);
     match &r.component(base).unwrap().regen.report(f).unwrap().status {
-        casework_model::regen::FeatureStatus::Error(e) => assert!(e.contains("cycle"), "{e}"),
+        easycad_model::regen::FeatureStatus::Error(e) => assert!(e.contains("cycle"), "{e}"),
         other => panic!("{other:?}"),
     }
     // breaking the cycle (suppressing the back-reference) clears it
@@ -271,7 +271,7 @@ impl WithZ for MateConnector {
     }
 }
 
-fn world_bbox(doc: &mut Document, occ: OccurrenceId) -> casework_model::occt::BBox {
+fn world_bbox(doc: &mut Document, occ: OccurrenceId) -> easycad_model::occt::BBox {
     let r = doc.regenerate_assembly();
     assert!(r.errors().is_empty(), "{:?} {:?}", r.errors(), r.instances.iter().map(|i| i.path.clone()).collect::<Vec<_>>());
     r.instances_of(&[occ]).next().unwrap().world_shape().unwrap().bbox().unwrap()
@@ -427,7 +427,7 @@ fn bom_rolls_up_quantities() {
 }
 
 fn pcb_step() -> String {
-    use casework_model::occt::{Shape, StepLink, StepNode, StepTree};
+    use easycad_model::occt::{Shape, StepLink, StepNode, StepTree};
     let t = |x: f64, y: f64, z: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, y, 0.0, 0.0, 1.0, z];
     let board = Shape::make_box(DVec3::ZERO, DVec3::new(50.0, 30.0, 1.6)).unwrap();
     let chip = Shape::make_box(DVec3::ZERO, DVec3::new(5.0, 5.0, 1.0)).unwrap();
@@ -482,7 +482,7 @@ fn pcb_step_is_a_locked_reference_component_with_sub_parts() {
     assert!(matches!(bom.indented[0].kind, BomKind::Purchased { ref source, .. } if source == "STEP"));
     // saved with its blob, reloads and regenerates
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("E.cwk");
+    let p = dir.path().join("E.ecad");
     doc.save_to_dir(&p).unwrap();
     let mut back = Document::load_from_dir(&p).unwrap();
     assert_eq!(back.regenerate_assembly().instances.len(), 4);
@@ -495,7 +495,7 @@ fn step_assembly_export_round_trips_tree_and_transforms() {
     let p = dir.path().join("rack.step");
     doc.export_assembly(AssemblyFormat::Step, &p, &AssemblyExportOptions { include_reference: true, include_hidden: false }).unwrap();
     let data = std::fs::read_to_string(&p).unwrap();
-    let tree = casework_model::occt::StepTree::read(&data).unwrap();
+    let tree = easycad_model::occt::StepTree::read(&data).unwrap();
     let root = &tree.nodes[tree.roots[0]];
     assert_eq!(root.name, "Rack");
     let occ: Vec<&str> = root.children.iter().map(|l| l.name.as_str()).collect();
@@ -601,7 +601,7 @@ fn linked_component_status_update_and_break() {
     let mut part = Document::new("Knob");
     part.set_param("t", "5").unwrap();
     block(&mut part, ComponentId::ROOT, "Knob", ("20", "20", "t"), DVec2::ZERO);
-    let lib = dir.path().join("lib").join("Knob.cwk");
+    let lib = dir.path().join("lib").join("Knob.ecad");
     std::fs::create_dir_all(&lib).unwrap();
     part.save_to_dir(&lib).unwrap();
 
@@ -609,7 +609,7 @@ fn linked_component_status_update_and_break() {
     std::fs::create_dir_all(&host_dir).unwrap();
     let mut doc = Document::new("Panel");
     let k = doc.link_component(&lib, &host_dir).unwrap();
-    assert!(matches!(&doc.data.component(k).unwrap().source, ComponentSource::Linked { path, .. } if path == "../lib/Knob.cwk"));
+    assert!(matches!(&doc.data.component(k).unwrap().source, ComponentSource::Linked { path, .. } if path == "../lib/Knob.ecad"));
     doc.add_occurrence(ComponentId::ROOT, k, "Knob:1", Transform::IDENTITY).unwrap();
     let vol = |doc: &mut Document| doc.component_result(k).unwrap().bodies[0].shape().volume().unwrap();
     assert!((vol(&mut doc) - 2000.0).abs() < 5.0, "{}", vol(&mut doc));
@@ -625,7 +625,7 @@ fn linked_component_status_update_and_break() {
     assert_eq!(doc.link_status(k, &host_dir), LinkStatus::UpToDate);
     assert!((vol(&mut doc) - 3200.0).abs() < 8.0, "{}", vol(&mut doc));
     // the host saves and reopens without the library (embedded cache)
-    let hp = host_dir.join("Panel.cwk");
+    let hp = host_dir.join("Panel.ecad");
     doc.save_to_dir(&hp).unwrap();
     std::fs::remove_dir_all(dir.path().join("lib")).unwrap();
     let mut back = Document::load_from_dir(&hp).unwrap();
@@ -676,17 +676,17 @@ fn mates_on_nested_occurrences() {
     assert!((w.point(DVec3::ZERO) - target).length() < 1e-9);
 }
 
-/// Linked `.cwk` files that are assemblies themselves: the tree comes along with
+/// Linked `.ecad` files that are assemblies themselves: the tree comes along with
 /// stable ids across updates, and in-context features inside resolve relative to
 /// where the linked component is placed.
 #[test]
 fn linked_assembly_files() {
     let dir = tempfile::tempdir().unwrap();
     let (mut rack, _, _, [_, b2]) = bracket_assembly();
-    let rack_dir = dir.path().join("Rack.cwk");
+    let rack_dir = dir.path().join("Rack.ecad");
     rack.save_to_dir(&rack_dir).unwrap();
     let (boxdoc, ..) = base_lid_doc();
-    let box_dir = dir.path().join("Box.cwk");
+    let box_dir = dir.path().join("Box.ecad");
     boxdoc.save_to_dir(&box_dir).unwrap();
 
     let mut doc = Document::new("Cabinet");
@@ -755,9 +755,9 @@ fn in_context_frame_is_selectable() {
 /// edges, item balloons and a BOM table from the assembly BOM.
 #[test]
 fn assembly_drawings_exports_and_bom() {
-    use casework_model::document::{ExportFormat, ExportOptions};
-    use casework_model::drawing::*;
-    use casework_model::process::CubeFace;
+    use easycad_model::document::{ExportFormat, ExportOptions};
+    use easycad_model::drawing::*;
+    use easycad_model::process::CubeFace;
     let (mut doc, bracket, screw, [a, b]) = bracket_assembly();
     let r = doc.regenerate_assembly().clone();
     // purchased BOM spans the assembly: 8 screws (4 per bracket × 2)
@@ -858,7 +858,7 @@ fn assembly_drawings_exports_and_bom() {
     // Document::export covers the assembly: STEP with references = 2 plates + 8 screws
     let p = dir.path().join("asm.step");
     doc.export(ExportFormat::Step, &p, &ExportOptions { include_reference: true, ..Default::default() }).unwrap();
-    let back = casework_model::occt::Shape::read_step(&p).unwrap();
+    let back = easycad_model::occt::Shape::read_step(&p).unwrap();
     assert_eq!(back.solids().unwrap().len(), 10);
     let bb = back.bbox().unwrap();
     assert!((bb.max.x - 115.0).abs() < 0.1, "placed in world: {bb:?}");
@@ -869,7 +869,7 @@ fn assembly_drawings_exports_and_bom() {
     // one component: 1 plate + 4 screws
     let p = dir.path().join("bracket.step");
     doc.export_scoped(ExportFormat::Step, &p, &ExportOptions { include_reference: true, ..Default::default() }, &Scope::Component(bracket)).unwrap();
-    assert_eq!(casework_model::occt::Shape::read_step(&p).unwrap().solids().unwrap().len(), 5);
+    assert_eq!(easycad_model::occt::Shape::read_step(&p).unwrap().solids().unwrap().len(), 5);
     let p = dir.path().join("bracket.stl");
     doc.export_scoped(ExportFormat::Stl, &p, &ExportOptions::default(), &Scope::Component(bracket)).unwrap();
     let one = std::fs::metadata(&p).unwrap().len();

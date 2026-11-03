@@ -1,20 +1,20 @@
 [package]
-name = "casework"
-description = "Casework desktop GUI"
+name = "easycad"
+description = "easyCAD desktop GUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "casework_app"
+name = "easycad_app"
 path = "src/lib.rs"
 
 [[bin]]
-name = "casework"
+name = "easycad"
 path = "src/main.rs"
 
 [dependencies]
-casework-model = { path = "../model" }
+easycad-model = { path = "../model" }
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 egui = "0.37"
 egui-wgpu = "0.37"

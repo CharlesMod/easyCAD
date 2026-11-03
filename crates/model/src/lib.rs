@@ -1,4 +1,4 @@
-//! Casework document model: parameters, sketches, features, regeneration,
+//! easyCAD document model: parameters, sketches, features, regeneration,
 //! parts library, import/export and picking. Pure Rust apart from the `occt`
 //! kernel bridge.
 

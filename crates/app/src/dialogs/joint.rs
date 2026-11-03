@@ -2,13 +2,13 @@
 //! engine's `FeatureKind::PartingJoint`. The checks come from the preview's
 //! `JointReport`; the live wall section is drawn from the dialog's values.
 
-use casework_model::document::DocData;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::joint::{Half, JointKind as EK, JointReport, Rim, SnapPositions};
-use casework_model::params::Expr;
-use casework_model::process::{Fit, FitClass};
-use casework_model::regen::FeatureStatus;
+use easycad_model::document::DocData;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::joint::{Half, JointKind as EK, JointReport, Rim, SnapPositions};
+use easycad_model::params::Expr;
+use easycad_model::process::{Fit, FitClass};
+use easycad_model::regen::FeatureStatus;
 use egui::{pos2, vec2, Color32, RichText, Stroke, Ui};
 
 use super::{BuildCx, DialogCx, Field};
@@ -544,7 +544,7 @@ impl JointD {
                             .selected_text(&self.cord)
                             .width(150.0)
                             .show_ui(ui, |ui| {
-                                for (c, d) in casework_model::joint::cords() {
+                                for (c, d) in easycad_model::joint::cords() {
                                     if ui
                                         .selectable_label(self.cord == c, format!("{c} · ⌀{d:.2}"))
                                         .clicked()

@@ -3,7 +3,7 @@
 //! [`crate::drive::DriveClient`] implements it for Google Drive and
 //! [`crate::memory::MemoryRemote`] implements it in memory for tests.
 //! Files are addressed by `(root, path)` where `root` is a sync root name
-//! (a subfolder of `Casework/`) and `path` is a `/`-separated relative path.
+//! (a subfolder of `easyCAD/`) and `path` is a `/`-separated relative path.
 
 use std::path::Path;
 

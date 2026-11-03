@@ -1,6 +1,6 @@
 [package]
 name = "occt"
-description = "Narrow cxx bridge to the OpenCascade kernel for Casework"
+description = "Narrow cxx bridge to the OpenCascade kernel for easyCAD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

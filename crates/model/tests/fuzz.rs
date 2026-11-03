@@ -4,14 +4,14 @@
 //! reason. `realistic_joint_refusal_rate` uses parameters a designer would enter and
 //! prints the refusals split into infeasible requests and algorithm bail-outs.
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::joint::{refusal_kind, Half, JointKind, RefusalKind, Rim, SnapPositions};
-use casework_model::params::Expr;
-use casework_model::process::FitClass;
-use casework_model::regen::FeatureStatus;
-use casework_model::sketch::Sketch;
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::joint::{refusal_kind, Half, JointKind, RefusalKind, Rim, SnapPositions};
+use easycad_model::params::Expr;
+use easycad_model::process::FitClass;
+use easycad_model::regen::FeatureStatus;
+use easycad_model::sketch::Sketch;
 use glam::DVec2;
 
 struct Rng(u64);
@@ -162,7 +162,7 @@ fn random_enclosures_never_crash_and_stay_valid() {
         }
         for b in out.solids() {
             assert!(b.shape().is_valid(), "iteration {it}: body {} is invalid", b.name);
-            assert!(b.shape().count(casework_model::occt::ShapeKind::Solid) >= 1, "iteration {it}: body {} has no solid", b.name);
+            assert!(b.shape().count(easycad_model::occt::ShapeKind::Solid) >= 1, "iteration {it}: body {} has no solid", b.name);
         }
         if matches!(out.report(jf).map(|r| &r.status), Some(FeatureStatus::Ok | FeatureStatus::Warning(_))) {
             assert!(out.body_by_id(BodyId::of(jf)).is_some(), "iteration {it}: joint without an upper half");

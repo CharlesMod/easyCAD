@@ -49,7 +49,7 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictInfo {
     pub root: String,
-    /// The conflicted path relative to the root: a `.cwk` folder for
+    /// The conflicted path relative to the root: a `.ecad` folder for
     /// documents, otherwise the file.
     pub path: String,
     /// Relative path of the copy holding the remote version.

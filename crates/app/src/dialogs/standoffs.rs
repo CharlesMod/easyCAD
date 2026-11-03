@@ -6,12 +6,12 @@
 //! holes are unticked the dialog falls back to a `ScrewBoss` at the ticked centres
 //! (not linked to the board file; see GUI_NEEDS).
 
-use casework_model::document::{DocData, ImportKind};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::params::Expr;
-use casework_model::occt::{CurveKind, Shape, SurfaceKind};
-use casework_model::process::{Fit, FitClass};
+use easycad_model::document::{DocData, ImportKind};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::params::Expr;
+use easycad_model::occt::{CurveKind, Shape, SurfaceKind};
+use easycad_model::process::{Fit, FitClass};
 use egui::{RichText, Ui};
 use glam::{DVec2, DVec3};
 

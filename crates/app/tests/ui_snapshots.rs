@@ -3,15 +3,15 @@
 //! the sample enclosure and writes a PNG to `tests/snapshots/`.
 //!
 //! The PNGs are written, not compared: geometry changes in the engine move pixels.
-//! Run with `cargo test -p casework --test ui_snapshots -- --test-threads=1`.
+//! Run with `cargo test -p easycad --test ui_snapshots -- --test-threads=1`.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use casework_app::camera::CubeRegion;
-use casework_app::dialogs::{Body, DialogKind};
-use casework_app::pickstack::{PickKey, PickKind};
-use casework_app::CaseworkApp;
+use easycad_app::camera::CubeRegion;
+use easycad_app::dialogs::{Body, DialogKind};
+use easycad_app::pickstack::{PickKey, PickKind};
+use easycad_app::EasyCadApp;
 use egui_kittest::Harness;
 use glam::Vec3;
 
@@ -31,19 +31,19 @@ fn out_dir() -> PathBuf {
     d
 }
 
-fn harness(doc: casework_model::document::Document) -> Harness<'static, CaseworkApp> {
+fn harness(doc: easycad_model::document::Document) -> Harness<'static, EasyCadApp> {
     let mut h = Harness::builder()
         .with_size(egui::vec2(W, H))
         .with_pixels_per_point(1.0)
         .with_accessibility_check(false)
         .with_step_dt(1.0 / 30.0)
         .wgpu()
-        .build_eframe(move |cc| CaseworkApp::new(cc, Some(doc)));
+        .build_eframe(move |cc| EasyCadApp::new(cc, Some(doc)));
     settle(&mut h);
     h
 }
 
-fn settle(h: &mut Harness<'static, CaseworkApp>) {
+fn settle(h: &mut Harness<'static, EasyCadApp>) {
     for _ in 0..6 {
         h.run_steps(2);
         assert!(
@@ -54,7 +54,7 @@ fn settle(h: &mut Harness<'static, CaseworkApp>) {
     h.run_steps(3);
 }
 
-fn save(h: &mut Harness<'static, CaseworkApp>, name: &str) -> image::RgbaImage {
+fn save(h: &mut Harness<'static, EasyCadApp>, name: &str) -> image::RgbaImage {
     let img = h.render().expect("render");
     write_png(&img, &out_dir().join(format!("{name}.png")));
     img
@@ -106,7 +106,7 @@ fn assert_viewport_rendered(img: &image::RgbaImage, r: egui::Rect) {
     );
 }
 
-fn screen_of(h: &Harness<'static, CaseworkApp>, p: Vec3) -> egui::Pos2 {
+fn screen_of(h: &Harness<'static, EasyCadApp>, p: Vec3) -> egui::Pos2 {
     let app = h.state();
     let r = app.viewport_rect;
     let s = app
@@ -119,7 +119,7 @@ fn screen_of(h: &Harness<'static, CaseworkApp>, p: Vec3) -> egui::Pos2 {
 #[test]
 fn main_screen() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     {
         let app = h.state_mut();
         assert!(app.model.is_some());
@@ -167,7 +167,7 @@ fn main_screen() {
 #[test]
 fn view_cube_corner_highlight() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     h.state_mut().cube_hover = Some(CubeRegion([1, -1, 1]));
     h.run_steps(2);
     let img = save(&mut h, "viewcube_corner_full");
@@ -195,7 +195,7 @@ fn view_cube_corner_highlight() {
 #[test]
 fn pick_stack_popover() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     {
         let app = h.state_mut();
         let lid = app
@@ -221,7 +221,7 @@ fn pick_stack_popover() {
             .faces
             .iter()
             .find(|f| {
-                f.kind == casework_model::occt::SurfaceKind::Cylinder
+                f.kind == easycad_model::occt::SurfaceKind::Cylinder
                     && (f.radius - 1.25).abs() < 0.2
                     && f.centroid.x < 0.0
                     && f.centroid.y > 0.0
@@ -258,7 +258,7 @@ fn pick_stack_popover() {
 #[test]
 fn fillet_dialog_with_reduced_radius_report() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     {
         let app = h.state_mut();
         let m = app.model.clone().unwrap();
@@ -271,7 +271,7 @@ fn fillet_dialog_with_reduced_radius_report() {
             .id;
         app.hidden.insert(lid);
         let base = m.bodies.iter().find(|b| b.body.name == "Base").unwrap();
-        let front = -(casework_app::sample::PCB_H / 2.0 + 2.3);
+        let front = -(easycad_app::sample::PCB_H / 2.0 + 2.3);
         // the USB-C slot's outer rim (3.5 mm tall slot)
         let rim: Vec<PickKey> = base
             .edges
@@ -293,7 +293,7 @@ fn fillet_dialog_with_reduced_radius_report() {
             .edges
             .iter()
             .filter(|e| {
-                e.kind == casework_model::occt::CurveKind::Circle
+                e.kind == easycad_model::occt::CurveKind::Circle
                     && e.circle.is_some_and(|c| c.2 > 2.0 && c.2 < 3.6)
                     && (e.midpoint.z - 20.0).abs() < 0.05
             })
@@ -306,7 +306,7 @@ fn fillet_dialog_with_reduced_radius_report() {
         if let Body::Fillet(f) = &mut d.body {
             f.sets[0].radius.text = "clearance + wall".into();
             f.sets[0].name = Some("USB-C cutout".into());
-            f.sets.push(casework_app::dialogs::fillet::EdgeSet {
+            f.sets.push(easycad_app::dialogs::fillet::EdgeSet {
                 name: Some("Standoff tops".into()),
                 ..f.sets[0].clone()
             });
@@ -328,7 +328,7 @@ fn fillet_dialog_with_reduced_radius_report() {
         let failed = f.sets[0].results.iter().flatten().any(|r| {
             matches!(
                 r,
-                casework_app::dialogs::fillet::EdgeResult::Failed { max: Some(_), .. }
+                easycad_app::dialogs::fillet::EdgeResult::Failed { max: Some(_), .. }
             )
         });
         assert!(
@@ -343,7 +343,7 @@ fn fillet_dialog_with_reduced_radius_report() {
 #[test]
 fn sketch_mode_dxf_offset() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     {
         let app = h.state_mut();
         let imp = app
@@ -355,18 +355,18 @@ fn sketch_mode_dxf_offset() {
             .unwrap()
             .id;
         let d = app.doc.dxf(imp).unwrap();
-        let mut s = casework_app::sketch_mode::SketchSession::from_dxf(
+        let mut s = easycad_app::sketch_mode::SketchSession::from_dxf(
             imp,
             "sensor-node_outline.dxf",
             d,
             &app.doc.data,
         );
-        let first = casework_model::sketch::EntityId(0);
+        let first = easycad_model::sketch::EntityId(0);
         s.offset_loop(first, "clearance + wall").unwrap();
         // a dimension on the offset's width, bound to an expression
-        s.tool = casework_app::sketch_mode::Tool::Offset;
+        s.tool = easycad_app::sketch_mode::Tool::Offset;
         assert!(s.profile_count() >= 1);
-        app.mode = casework_app::app::Mode::Sketch(Box::new(s));
+        app.mode = easycad_app::app::Mode::Sketch(Box::new(s));
     }
     h.run_steps(4);
     save(&mut h, "sketch_mode");
@@ -375,7 +375,7 @@ fn sketch_mode_dxf_offset() {
 #[test]
 fn process_panel_and_fit_chips() {
     let _serial = serial();
-    let mut doc = casework_app::sample::sensor_node();
+    let mut doc = easycad_app::sample::sensor_node();
     doc.set_active_profile("FDM 0.4 generic").unwrap();
     let mut h = harness(doc);
     h.state_mut().open_dialog(DialogKind::Standoffs);
@@ -406,7 +406,7 @@ fn process_panel_and_fit_chips() {
         assert!(p.result.errors().is_empty(), "{:?}", p.result.errors());
         let feats = app.dialog.as_ref().unwrap().build(&app.dialog_cx_data()).unwrap();
         match &feats[0].kind {
-            casework_model::feature::FeatureKind::StandoffsFromPcb { exclude, gussets, lid_holes, .. } => {
+            easycad_model::feature::FeatureKind::StandoffsFromPcb { exclude, gussets, lid_holes, .. } => {
                 assert_eq!(exclude.len(), 1);
                 assert!(gussets.is_some() && lid_holes.is_some());
             }
@@ -419,10 +419,10 @@ fn process_panel_and_fit_chips() {
 #[test]
 fn parts_joint_drawing_screens() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     {
         let app = h.state_mut();
-        app.mode = casework_app::app::Mode::Parts(Box::new(casework_app::ui_parts::PartsUi::new(
+        app.mode = easycad_app::app::Mode::Parts(Box::new(easycad_app::ui_parts::PartsUi::new(
             &app.doc,
         )));
     }
@@ -430,7 +430,7 @@ fn parts_joint_drawing_screens() {
     save(&mut h, "parts");
     {
         let app = h.state_mut();
-        app.mode = casework_app::app::Mode::Model;
+        app.mode = easycad_app::app::Mode::Model;
         // FDM profile so the fit chips show resolved values
         app.doc.set_active_profile("FDM 0.4 generic").unwrap();
         // roll back to just before the plain split, then add a real parting joint there
@@ -439,7 +439,7 @@ fn parts_joint_drawing_screens() {
             .data
             .features
             .iter()
-            .position(|f| matches!(f.kind, casework_model::feature::FeatureKind::Split { .. }))
+            .position(|f| matches!(f.kind, easycad_model::feature::FeatureKind::Split { .. }))
             .unwrap();
         app.set_rollback(Some(split));
     }
@@ -460,20 +460,20 @@ fn parts_joint_drawing_screens() {
     {
         let app = h.state_mut();
         app.close_dialog(false);
-        app.mode = casework_app::app::Mode::Drawing(Box::default());
+        app.mode = easycad_app::app::Mode::Drawing(Box::default());
     }
 }
 
 #[test]
 fn drawing_sheet_with_views_and_dimensions() {
     let _serial = serial();
-    use casework_model::drawing::*;
-    let mut h = harness(casework_app::sample::sensor_node());
-    h.state_mut().mode = casework_app::app::Mode::Drawing(Box::default());
+    use easycad_model::drawing::*;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().mode = easycad_app::app::Mode::Drawing(Box::default());
     settle(&mut h);
     {
         let app = h.state();
-        let casework_app::app::Mode::Drawing(d) = &app.mode else {
+        let easycad_app::app::Mode::Drawing(d) = &app.mode else {
             panic!()
         };
         let r = d.result.as_ref().expect("drawing computed");
@@ -510,12 +510,12 @@ fn drawing_sheet_with_views_and_dimensions() {
             .body
             .id;
         let now = app.now;
-        let casework_app::app::Mode::Drawing(d) = &mut app.mode else {
+        let easycad_app::app::Mode::Drawing(d) = &mut app.mode else {
             panic!()
         };
         let dr = d.draft.as_mut().unwrap();
         let front = dr.views[1].id;
-        let gone = casework_model::select::EdgeSelector::Hint {
+        let gone = easycad_model::select::EdgeSelector::Hint {
             midpoint: glam::DVec3::new(0.0, -80.0, 50.0),
             tangent: glam::DVec3::X,
             kind: None,
@@ -536,7 +536,7 @@ fn drawing_sheet_with_views_and_dimensions() {
     settle(&mut h);
     {
         let app = h.state();
-        let casework_app::app::Mode::Drawing(d) = &app.mode else {
+        let easycad_app::app::Mode::Drawing(d) = &app.mode else {
             panic!()
         };
         let r = d.result.as_ref().unwrap();
@@ -554,9 +554,9 @@ fn new_document_prompt() {
     // keep the "last used profile" setting out of the real config dir
     std::env::set_var(
         "XDG_CONFIG_HOME",
-        std::env::temp_dir().join("casework-test-config"),
+        std::env::temp_dir().join("easycad-test-config"),
     );
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     h.state_mut().new_doc_prompt = Some(("bracket".into(), "FDM 0.4 generic".into()));
     h.run_steps(3);
     save(&mut h, "new_document");
@@ -569,16 +569,16 @@ fn welcome_and_pcb_wizard() {
     let _serial = serial();
     std::env::set_var(
         "XDG_CONFIG_HOME",
-        std::env::temp_dir().join("casework-test-config"),
+        std::env::temp_dir().join("easycad-test-config"),
     );
-    let mut h = harness(casework_model::document::Document::new("Untitled"));
+    let mut h = harness(easycad_model::document::Document::new("Untitled"));
     save(&mut h, "welcome");
     // the wizard on the sample board's DXF
-    let dir = std::env::temp_dir().join(format!("casework-wizard-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("easycad-wizard-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let dxf = dir.join("sensor-node.dxf");
-    std::fs::write(&dxf, casework_app::sample::board_dxf()).unwrap();
-    let mut w = casework_app::ui_welcome::WizardUi::new();
+    std::fs::write(&dxf, easycad_app::sample::board_dxf()).unwrap();
+    let mut w = easycad_app::ui_welcome::WizardUi::new();
     w.load(&dxf);
     assert!(w.board.is_some(), "{:?}", w.error);
     w.settings.profile = "FDM 0.4 generic".into();
@@ -590,7 +590,7 @@ fn welcome_and_pcb_wizard() {
         let w = h.state().wizard.as_ref().unwrap();
         (w.board.clone().unwrap(), w.settings.clone())
     };
-    let doc = casework_app::wizard::build(&board, &settings).unwrap();
+    let doc = easycad_app::wizard::build(&board, &settings).unwrap();
     h.state_mut().wizard = None;
     h.state_mut().load(doc, None);
     settle(&mut h);
@@ -602,19 +602,19 @@ fn welcome_and_pcb_wizard() {
 }
 
 /// The wizard's assembly from the sample STEP board.
-fn wizard_assembly() -> casework_model::document::Document {
-    let dir = std::env::temp_dir().join(format!("casework-asm-{}", std::process::id()));
+fn wizard_assembly() -> easycad_model::document::Document {
+    let dir = std::env::temp_dir().join(format!("easycad-asm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let step = dir.join("sensor-node.step");
-    std::fs::write(&step, casework_app::sample::pcb_step()).unwrap();
-    let board = casework_app::wizard::Board::read(&step).unwrap();
-    let s = casework_app::wizard::Settings::new("FDM 0.4 generic");
-    let doc = casework_app::wizard::build(&board, &s).unwrap();
+    std::fs::write(&step, easycad_app::sample::pcb_step()).unwrap();
+    let board = easycad_app::wizard::Board::read(&step).unwrap();
+    let s = easycad_app::wizard::Settings::new("FDM 0.4 generic");
+    let doc = easycad_app::wizard::build(&board, &s).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     doc
 }
 
-fn occ_path(app: &CaseworkApp, name: &str) -> Vec<casework_model::assembly::OccurrenceId> {
+fn occ_path(app: &EasyCadApp, name: &str) -> Vec<easycad_model::assembly::OccurrenceId> {
     app.doc
         .data
         .all_occurrences()
@@ -626,13 +626,13 @@ fn occ_path(app: &CaseworkApp, name: &str) -> Vec<casework_model::assembly::Occu
 
 /// A straight edge along X on an occurrence's front face (y min), at its top or
 /// bottom: the hinge line of the wizard's box.
-fn front_edge(app: &CaseworkApp, name: &str, top: bool) -> PickKey {
+fn front_edge(app: &EasyCadApp, name: &str, top: bool) -> PickKey {
     let path = occ_path(app, name);
     let m = app.model.as_ref().unwrap();
     let mut best: Option<(f64, PickKey)> = None;
     for c in m.ctx.iter().filter(|c| c.path == path && !c.mb.body.reference) {
         for e in &c.mb.edges {
-            if e.kind != casework_model::occt::CurveKind::Line || e.tangent.x.abs() < 0.99 || e.length < 20.0 {
+            if e.kind != easycad_model::occt::CurveKind::Line || e.tangent.x.abs() < 0.99 || e.length < 20.0 {
                 continue;
             }
             let p = c.xf.transform_point3(e.midpoint);
@@ -684,7 +684,7 @@ fn assembly_tree_active_mates_explode() {
     h.run_steps(3);
     save(&mut h, "assembly_gizmo");
     let before = h.state().doc.data.occurrence(lid[0]).unwrap().transform;
-    casework_app::ui_gizmo::commit(h.state_mut(), &lid, glam::DAffine3::from_translation(glam::DVec3::Z * 10.0));
+    easycad_app::ui_gizmo::commit(h.state_mut(), &lid, glam::DAffine3::from_translation(glam::DVec3::Z * 10.0));
     let after = h.state().doc.data.occurrence(lid[0]).unwrap().transform;
     assert!((after.translation.z - before.translation.z - 10.0).abs() < 1e-6, "{before:?} -> {after:?}");
     assert_eq!(h.state().doc.undo_label(), Some("Move Lid:1"));
@@ -693,7 +693,7 @@ fn assembly_tree_active_mates_explode() {
     settle(&mut h);
     // grounded parts refuse the gizmo with a reason
     let base_path = occ_path(h.state(), "Base:1");
-    assert!(casework_app::ui_gizmo::blocked(h.state(), &base_path).is_some());
+    assert!(easycad_app::ui_gizmo::blocked(h.state(), &base_path).is_some());
 
     // a revolute hinge along the front seam: Base stays, Lid swings open
     h.state_mut().open_mate(None);
@@ -703,7 +703,7 @@ fn assembly_tree_active_mates_explode() {
     assert!(h.state_mut().mate_pick(b));
     {
         let mu = h.state_mut().asm.mate.as_mut().unwrap();
-        assert_eq!(mu.kind, casework_model::assembly::MateKind::Revolute);
+        assert_eq!(mu.kind, easycad_model::assembly::MateKind::Revolute);
         mu.angle = 100.0;
     }
     h.state_mut().request_model();
@@ -750,7 +750,7 @@ fn assembly_tree_active_mates_explode() {
 #[test]
 fn section_view_and_sketch_slice() {
     let _serial = serial();
-    let mut h = harness(casework_app::sample::sensor_node());
+    let mut h = harness(easycad_app::sample::sensor_node());
     h.state_mut().toggle_section();
     settle(&mut h);
     {
@@ -767,13 +767,13 @@ fn section_view_and_sketch_slice() {
     // a sketch half way up the walls, sliced
     {
         let app = h.state_mut();
-        let plane = casework_model::geom::Plane::XY.offset(12.0);
-        let mut s = casework_app::sketch_mode::SketchSession::new_on(plane, &app.doc.data);
+        let plane = easycad_model::geom::Plane::XY.offset(12.0);
+        let mut s = easycad_app::sketch_mode::SketchSession::new_on(plane, &app.doc.data);
         s.slice = true;
-        app.mode = casework_app::app::Mode::Sketch(Box::new(s));
+        app.mode = easycad_app::app::Mode::Sketch(Box::new(s));
     }
     h.run_steps(4);
-    if let casework_app::app::Mode::Sketch(s) = &h.state().mode {
+    if let easycad_app::app::Mode::Sketch(s) = &h.state().mode {
         assert!(!s.slice_caps.is_empty() && !s.slice_outline.is_empty(), "the walls cut at z 12");
     }
     save(&mut h, "sketch_slice");

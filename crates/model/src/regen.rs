@@ -524,7 +524,7 @@ impl Regenerator {
         // Fit resolution depends on the profile's numbers: key every state on them.
         let mut key = {
             let mut h = DefaultHasher::new();
-            0x6361_7365_776f_726bu64.hash(&mut h); // "casework"
+            0x6361_7365_776f_726bu64.hash(&mut h); // "easycad"
             serde_json::to_string(&(&profile.fits, &profile.hole_comp, profile.xy_comp)).unwrap_or_default().hash(&mut h);
             h.finish()
         };

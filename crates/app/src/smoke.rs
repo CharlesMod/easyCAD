@@ -1,13 +1,13 @@
-//! `casework --smoke <dir>`: exercise file I/O without dialogs, through the same
+//! `easycad --smoke <dir>`: exercise file I/O without dialogs, through the same
 //! functions the dialogs call (save/open, import STEP/DXF, export STEP/STL/3MF,
 //! drawing PDF/DXF/SVG). Returns a log, or the first failure.
 
 use std::path::Path;
 use std::time::Duration;
 
-use casework_model::document::{ExportFormat, ExportOptions};
+use easycad_model::document::{ExportFormat, ExportOptions};
 
-use crate::app::{CaseworkApp, Mode};
+use crate::app::{EasyCadApp, Mode};
 use crate::worker::Worker;
 
 fn check_file(p: &Path, min: u64, log: &mut Vec<String>) -> Result<(), String> {
@@ -34,7 +34,7 @@ fn check_file(p: &Path, min: u64, log: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn settle(app: &mut CaseworkApp, what: &str) -> Result<(), String> {
+fn settle(app: &mut EasyCadApp, what: &str) -> Result<(), String> {
     if !app.settle(Duration::from_secs(600)) {
         return Err(format!("{what}: regeneration timed out"));
     }
@@ -45,7 +45,7 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut log = Vec::new();
     let mut app =
-        CaseworkApp::with_parts(crate::sample::sensor_node(), Worker::spawn(|| {}), false);
+        EasyCadApp::with_parts(crate::sample::sensor_node(), Worker::spawn(|| {}), false);
     settle(&mut app, "sample")?;
     let m = app.model.clone().ok_or("no model")?;
     if !m.result.errors().is_empty() {
@@ -58,7 +58,7 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
     ));
 
     // save → reopen
-    let saved = app.save_to(dir.join("sensor-node.cwk"))?;
+    let saved = app.save_to(dir.join("sensor-node.ecad"))?;
     let before = app.doc.data.clone();
     app.open_path(&saved)?;
     settle(&mut app, "reopen")?;
@@ -152,7 +152,7 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
     }
     // the drawing travels with the document
     crate::ui_drawing::commit_now(&mut app).map_err(|e| e.to_string())?;
-    let p = app.save_to(dir.join("with-drawing.cwk"))?;
+    let p = app.save_to(dir.join("with-drawing.ecad"))?;
     app.open_path(&p)?;
     if app.doc.data.drawings.is_empty() {
         return Err("drawing lost on save/reopen".into());
@@ -166,7 +166,7 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
     let doc = crate::wizard::build(&board, &crate::wizard::Settings::new("FDM 0.4 generic"))?;
     app.load(doc, None);
     settle(&mut app, "assembly")?;
-    let p = app.save_to(dir.join("assembly.cwk"))?;
+    let p = app.save_to(dir.join("assembly.ecad"))?;
     app.open_path(&p)?;
     settle(&mut app, "assembly reopened")?;
     let placed = app.model.as_ref().map(|m| m.ctx.len()).unwrap_or(0);
@@ -175,17 +175,17 @@ pub fn run(dir: &Path) -> Result<Vec<String>, String> {
     }
     log.push(format!("ok  assembly saved and reopened ({placed} placed bodies)"));
     for f in [
-        casework_model::assembly::AssemblyFormat::Step,
-        casework_model::assembly::AssemblyFormat::ThreeMf,
-        casework_model::assembly::AssemblyFormat::StlPerComponent,
+        easycad_model::assembly::AssemblyFormat::Step,
+        easycad_model::assembly::AssemblyFormat::ThreeMf,
+        easycad_model::assembly::AssemblyFormat::StlPerComponent,
     ] {
         let mut ex = crate::dialogs::export::ExportDialog::new(&app.doc.data);
         ex.assembly = Some(f);
         ex.include_reference = true;
         let out = match f {
-            casework_model::assembly::AssemblyFormat::Step => dir.join("assembly.step"),
-            casework_model::assembly::AssemblyFormat::ThreeMf => dir.join("assembly.3mf"),
-            casework_model::assembly::AssemblyFormat::StlPerComponent => dir.join("stl"),
+            easycad_model::assembly::AssemblyFormat::Step => dir.join("assembly.step"),
+            easycad_model::assembly::AssemblyFormat::ThreeMf => dir.join("assembly.3mf"),
+            easycad_model::assembly::AssemblyFormat::StlPerComponent => dir.join("stl"),
         };
         let rx = ex.start(out.clone(), app.doc.data.clone(), app.doc.blobs.clone(), app.doc.library.clone());
         let msg = rx

@@ -3,18 +3,18 @@
 
 use egui::{vec2, Margin, RichText, Ui};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::settings::{MeshPref, NavPreset};
 use crate::theme;
 use crate::widgets;
 
-pub fn windows(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn windows(app: &mut EasyCadApp, ui: &mut Ui) {
     settings_window(app, ui);
     cheat_sheet(app, ui);
     recovery_window(app, ui);
 }
 
-fn settings_window(app: &mut CaseworkApp, ui: &mut Ui) {
+fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
     if !app.show_settings {
         return;
     }
@@ -43,7 +43,7 @@ fn settings_window(app: &mut CaseworkApp, ui: &mut Ui) {
             ui.label(widgets::muted(format!("Orbit {o} · pan {p} · zoom wheel")));
             ui.add_space(6.0);
             theme::section_label(ui, "New documents");
-            let profiles: Vec<String> = casework_model::process::ProcessProfile::builtins()
+            let profiles: Vec<String> = easycad_model::process::ProcessProfile::builtins()
                 .into_iter()
                 .map(|p| p.name)
                 .collect();
@@ -121,7 +121,7 @@ fn settings_window(app: &mut CaseworkApp, ui: &mut Ui) {
 }
 
 /// Every shortcut, grouped. Shown by `?`.
-pub fn shortcuts(app: &CaseworkApp) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
+pub fn shortcuts(app: &EasyCadApp) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
     let (orbit, pan) = app.settings.nav.hints();
     let s = |k: &str, v: &'static str| (k.to_string(), v);
     vec![
@@ -193,7 +193,7 @@ pub fn shortcuts(app: &CaseworkApp) -> Vec<(&'static str, Vec<(String, &'static 
     ]
 }
 
-fn cheat_sheet(app: &mut CaseworkApp, ui: &mut Ui) {
+fn cheat_sheet(app: &mut EasyCadApp, ui: &mut Ui) {
     if !app.show_keys {
         return;
     }
@@ -236,7 +236,7 @@ fn cheat_sheet(app: &mut CaseworkApp, ui: &mut Ui) {
     }
 }
 
-fn recovery_window(app: &mut CaseworkApp, ui: &mut Ui) {
+fn recovery_window(app: &mut EasyCadApp, ui: &mut Ui) {
     if app.recovery_offer.is_empty() {
         return;
     }
@@ -250,7 +250,7 @@ fn recovery_window(app: &mut CaseworkApp, ui: &mut Ui) {
         .frame(widgets::card_frame().inner_margin(Margin::same(16)))
         .show(ui.ctx(), |ui| {
             ui.set_width(420.0);
-            ui.label("Casework did not close cleanly. These documents had changes that were not saved:");
+            ui.label("easyCAD did not close cleanly. These documents had changes that were not saved:");
             ui.add_space(6.0);
             for (i, e) in app.recovery_offer.iter().enumerate() {
                 ui.horizontal(|ui| {

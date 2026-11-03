@@ -1,4 +1,4 @@
-# Build environment for Casework's Linux and Windows (MinGW-w64 cross) releases.
+# Build environment for easyCAD's Linux and Windows (MinGW-w64 cross) releases.
 # Debian 12 keeps the Linux binary's glibc requirement at 2.36, so it runs on most
 # current distros.
 ARG RUST_IMAGE=rust:1.97-bookworm

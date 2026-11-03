@@ -6,10 +6,10 @@
 
 use std::sync::mpsc::{channel, Receiver};
 
-use casework_model::assembly::{AssemblyExportOptions, AssemblyFormat, ComponentId};
-use casework_model::document::{BlobStore, DocData, Document, ExportFormat, ExportOptions};
-use casework_model::library::Library;
-use casework_model::process::ProcessKind;
+use easycad_model::assembly::{AssemblyExportOptions, AssemblyFormat, ComponentId};
+use easycad_model::document::{BlobStore, DocData, Document, ExportFormat, ExportOptions};
+use easycad_model::library::Library;
+use easycad_model::process::ProcessKind;
 use egui::{RichText, Ui};
 
 use crate::theme;

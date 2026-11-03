@@ -1,8 +1,8 @@
 //! Small shared widgets: expression fields (with autocomplete and process-fit
 //! chips), pills, cards, toolbar buttons and painter-drawn icons.
 
-use casework_model::params::{self, Expr, Values};
-use casework_model::process::{Fit, FitClass, FitRole, ProcessProfile};
+use easycad_model::params::{self, Expr, Values};
+use easycad_model::process::{Fit, FitClass, FitRole, ProcessProfile};
 use egui::{
     pos2, vec2, Color32, CornerRadius, Frame, Margin, Pos2, Rect, Response, RichText, Sense,
     Stroke, Ui,

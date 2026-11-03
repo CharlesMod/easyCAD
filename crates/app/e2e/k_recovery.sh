@@ -2,7 +2,7 @@
 # (k) Settings window, `?` cheat sheet, autosave + crash recovery: edit `wall` on the
 # sample, wait for the recovery copy, kill -9, relaunch, Restore, the edit is back.
 . "$(dirname "$0")/lib.sh"
-export CASEWORK_AUTOSAVE_SECS=2
+export EASYCAD_AUTOSAVE_SECS=2
 start_app --sample
 move 700 760
 

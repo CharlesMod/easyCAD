@@ -4,7 +4,7 @@
 use egui::{pos2, vec2, Align2, Color32, Margin, Rect, RichText, Sense, Stroke, Ui};
 use glam::DVec2;
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::dialogs::joint::Kind as JointKind;
 use crate::theme;
 use crate::widgets;
@@ -22,7 +22,7 @@ pub struct WizardUi {
 impl WizardUi {
     pub fn new() -> WizardUi {
         let st = crate::settings::Settings::load();
-        let profiles: Vec<String> = casework_model::process::ProcessProfile::builtins()
+        let profiles: Vec<String> = easycad_model::process::ProcessProfile::builtins()
             .into_iter()
             .map(|p| p.name)
             .collect();
@@ -66,7 +66,7 @@ impl Default for WizardUi {
 }
 
 /// Is the document empty enough to greet the user?
-pub fn is_empty(app: &CaseworkApp) -> bool {
+pub fn is_empty(app: &EasyCadApp) -> bool {
     let d = &app.doc.data;
     d.features.is_empty()
         && d.sketches.is_empty()
@@ -76,7 +76,7 @@ pub fn is_empty(app: &CaseworkApp) -> bool {
 }
 
 /// Welcome card over an empty viewport.
-pub fn welcome(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+pub fn welcome(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     if !is_empty(app) || app.wizard.is_some() {
         return;
     }
@@ -97,7 +97,7 @@ pub fn welcome(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                     ui.set_width(420.0);
                     ui.horizontal(|ui| {
                         widgets::icon(ui, widgets::Icon::Logo, 26.0, theme::ACCENT);
-                        ui.label(RichText::new("Casework").size(20.0).strong());
+                        ui.label(RichText::new("easyCAD").size(20.0).strong());
                     });
                     ui.label(widgets::muted(
                         "Parametric enclosures for 3D printing and injection molding.",
@@ -139,7 +139,7 @@ pub fn welcome(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
                     }
                     ui.add_space(6.0);
                     ui.columns(2, |c| {
-                        if big(&mut c[0], "Open…", "a .cwk document", false).clicked() {
+                        if big(&mut c[0], "Open…", "a .ecad document", false).clicked() {
                             app.open_dialog_file();
                         }
                         if big(&mut c[1], "Sample", "the sensor-node box", false).clicked() {
@@ -193,7 +193,7 @@ pub fn welcome(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
 }
 
 /// The "New enclosure from PCB" window.
-pub fn wizard_window(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn wizard_window(app: &mut EasyCadApp, ui: &mut Ui) {
     let Some(mut w) = app.wizard.take() else {
         return;
     };
@@ -415,7 +415,7 @@ fn preview(ui: &mut Ui, r: Rect, w: &WizardUi) {
         return;
     };
     let vals = |e: &str| {
-        let mut v = casework_model::params::Values::new();
+        let mut v = easycad_model::params::Values::new();
         for (n, x) in [("wall", &w.settings.wall), ("clearance", &w.settings.clearance)] {
             if let Ok(x) = crate::widgets::eval(x, &v) {
                 v.insert(n.to_string(), x);

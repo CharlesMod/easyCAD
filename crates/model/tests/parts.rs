@@ -4,14 +4,14 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
-use casework_model::document::Document;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::library::*;
-use casework_model::occt::{DVec3, Shape};
-use casework_model::regen::FeatureStatus;
-use casework_model::select::{EdgeSelector, FaceSelector};
-use casework_model::sketch::Sketch;
+use easycad_model::document::Document;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::library::*;
+use easycad_model::occt::{DVec3, Shape};
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::{EdgeSelector, FaceSelector};
+use easycad_model::sketch::Sketch;
 use glam::DVec2;
 
 const IN: f64 = 25.4;
@@ -262,7 +262,7 @@ fn local_step_library_is_embedded_in_the_document() {
         },
     );
     let save = tempfile::tempdir().unwrap();
-    let p = save.path().join("Plate.cwk");
+    let p = save.path().join("Plate.ecad");
     doc.save_to_dir(&p).unwrap();
     drop(lib_dir); // the library folder is gone, the document still regenerates
     let mut back = Document::load_from_dir(&p).unwrap();
@@ -273,4 +273,4 @@ fn local_step_library_is_embedded_in_the_document() {
     assert_eq!(back.bom()[0].part_number.as_deref(), Some("KN-8-6"));
 }
 
-use casework_model::params::Expr;
+use easycad_model::params::Expr;

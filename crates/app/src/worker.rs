@@ -9,15 +9,15 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use casework_model::assembly::{
+use easycad_model::assembly::{
     AssemblyCache, AssemblyResult, ComponentId, MateSolve, OccPath, OccurrenceId, Transform,
 };
-use casework_model::document::{BlobStore, DocData};
-use casework_model::feature::{BodyId, FeatureId};
-use casework_model::library::Library;
-use casework_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
-use casework_model::pick::{BodyPicker, EdgeTolerance, Hit, HitKind, Picker};
-use casework_model::regen::{Body, MeshQuality, RegenResult, Regenerator};
+use easycad_model::document::{BlobStore, DocData};
+use easycad_model::feature::{BodyId, FeatureId};
+use easycad_model::library::Library;
+use easycad_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
+use easycad_model::pick::{BodyPicker, EdgeTolerance, Hit, HitKind, Picker};
+use easycad_model::regen::{Body, MeshQuality, RegenResult, Regenerator};
 use glam::{DAffine3, DVec3, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub struct Request {
     /// (served from the cache; the fillet dialog maps report edges with them).
     pub prefixes: Vec<usize>,
     /// For `Purpose::Drawing`: the (draft) drawing to compute.
-    pub drawing: Option<casework_model::drawing::Drawing>,
+    pub drawing: Option<easycad_model::drawing::Drawing>,
     /// Tessellation level (`Preview` while dragging).
     pub quality: MeshQuality,
     /// Section plane (origin, normal, in-plane x) to cut every solid with (joint dialog).
@@ -110,7 +110,7 @@ pub struct Output {
     pub picker: Arc<Picker>,
     pub bbox: Option<BBox>,
     pub prefix_bodies: HashMap<usize, Vec<Body>>,
-    pub drawing: Option<Arc<casework_model::drawing::DrawingResult>>,
+    pub drawing: Option<Arc<easycad_model::drawing::DrawingResult>>,
     pub sections: Vec<SectionCut>,
     pub quality: MeshQuality,
     pub elapsed: Duration,
@@ -236,7 +236,7 @@ impl Worker {
         let (tx, req_rx) = channel::<Request>();
         let (out_tx, rx) = channel::<Output>();
         let thread = std::thread::Builder::new()
-            .name("casework-regen".into())
+            .name("easycad-regen".into())
             .spawn(move || run(req_rx, out_tx, wake))
             .expect("spawn regen worker");
         Worker {
@@ -368,7 +368,7 @@ struct AsmCaches {
 
 fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
     let mut regen = Regenerator::default();
-    let mut dcache = casework_model::drawing::DrawingCache::default();
+    let mut dcache = easycad_model::drawing::DrawingCache::default();
     let mut acache = AsmCaches::default();
     while let Ok(mut req) = rx.recv() {
         // keep only the newest request of each purpose, model first
@@ -401,7 +401,7 @@ fn run(rx: Receiver<Request>, tx: Sender<Output>, wake: impl Fn()) {
 
 fn process(
     regen: &mut Regenerator,
-    dcache: &mut casework_model::drawing::DrawingCache,
+    dcache: &mut easycad_model::drawing::DrawingCache,
     acache: &mut AsmCaches,
     mut r: Request,
 ) -> Output {
@@ -413,7 +413,7 @@ fn process(
         let solve = if r.data.mates.is_empty() {
             None
         } else {
-            let (moves, solve) = casework_model::assembly::solve_mates(&r.data);
+            let (moves, solve) = easycad_model::assembly::solve_mates(&r.data);
             for (id, t) in moves {
                 if let Some(o) = r.data.occurrence_mut(id) {
                     o.transform = t;
@@ -421,7 +421,7 @@ fn process(
             }
             Some(solve)
         };
-        let ar = casework_model::assembly::regenerate_assembly(
+        let ar = easycad_model::assembly::regenerate_assembly(
             &r.data,
             &r.blobs,
             &r.library,
@@ -453,13 +453,13 @@ fn process(
         };
         let bom = r.data.bom(ar);
         let tree = r.data.bom_tree(ar);
-        let src = casework_model::drawing::DrawingSources {
+        let src = easycad_model::drawing::DrawingSources {
             regen: &result,
             bom: &bom,
             assembly: asm_out.as_ref().map(|a| &a.0),
             bom_tree: Some(&tree),
         };
-        Arc::new(casework_model::drawing::compute_with(&r.data, &src, d, dcache))
+        Arc::new(easycad_model::drawing::compute_with(&r.data, &src, d, dcache))
     });
     // face provenance is lazy: fill it here, off the UI thread (pick-stack labels)
     for b in &result.bodies {

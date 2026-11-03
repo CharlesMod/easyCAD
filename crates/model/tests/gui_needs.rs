@@ -4,13 +4,13 @@
 
 mod common;
 
-use casework_model::document::{DocData, Document};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::process::{Fit, FitClass, FitRole};
-use casework_model::regen::FeatureStatus;
-use casework_model::select::{EdgeSelector, FaceSelector};
-use casework_model::sketch::Sketch;
+use easycad_model::document::{DocData, Document};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::process::{Fit, FitClass, FitRole};
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::{EdgeSelector, FaceSelector};
+use easycad_model::sketch::Sketch;
 use glam::{DVec2, DVec3};
 
 fn block(doc: &mut Document, w: f64, d: f64, h: f64) -> BodyId {
@@ -159,7 +159,7 @@ fn standoff_exclusions_gussets_and_lid_holes() {
     let out = doc.regenerate().clone();
     assert_eq!(out.report(f).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(f).unwrap().status);
     let shape = out.body_by_id(b).unwrap().shape().clone();
-    let bosses = |s: &casework_model::occt::Shape| s.faces().unwrap().iter().filter(|f| (f.radius - 3.5).abs() < 1e-6).count();
+    let bosses = |s: &easycad_model::occt::Shape| s.faces().unwrap().iter().filter(|f| (f.radius - 3.5).abs() < 1e-6).count();
     assert_eq!(bosses(&shape), 4, "one of five holes excluded");
     let v0 = shape.volume().unwrap();
 
@@ -204,7 +204,7 @@ fn section_view_with_cap_mesh() {
     let (mut doc, body) = common::enclosure_doc();
     let out = doc.regenerate().clone();
     let b = out.body_by_id(body).unwrap();
-    let sv = b.section_view(DVec3::ZERO, DVec3::Y, casework_model::regen::MeshQuality::Display).unwrap();
+    let sv = b.section_view(DVec3::ZERO, DVec3::Y, easycad_model::regen::MeshQuality::Display).unwrap();
     let kept = sv.kept.as_ref().unwrap().shape().bbox().unwrap();
     assert!(kept.max.y.abs() < 1e-6 && kept.min.y < -20.0, "the back half stays: {kept:?}");
     let cap = sv.cap.as_ref().unwrap();
@@ -219,19 +219,19 @@ fn section_view_with_cap_mesh() {
         assert!(p(t[0]).y.abs() < 1e-4);
     }
     // a plane that misses the body: everything kept, no cap
-    let miss = b.section_view(DVec3::new(0.0, 500.0, 0.0), DVec3::Y, casework_model::regen::MeshQuality::Preview).unwrap();
+    let miss = b.section_view(DVec3::new(0.0, 500.0, 0.0), DVec3::Y, easycad_model::regen::MeshQuality::Preview).unwrap();
     assert!(miss.kept.is_some() && miss.cap.is_none());
 }
 
 #[test]
 fn face_provenance_names_the_feature_and_role() {
-    use casework_model::occt::SurfaceKind;
-    use casework_model::provenance::FaceRole;
+    use easycad_model::occt::SurfaceKind;
+    use easycad_model::provenance::FaceRole;
     let (mut doc, body) = common::enclosure_doc();
     let out = doc.regenerate().clone();
     let shape = out.body_by_id(body).unwrap().shape().clone();
     let faces = shape.faces().unwrap();
-    let origin = |pred: &dyn Fn(&casework_model::occt::FaceInfo) -> bool| {
+    let origin = |pred: &dyn Fn(&easycad_model::occt::FaceInfo) -> bool| {
         let f = faces.iter().find(|f| pred(f)).expect("face");
         (out.face_origin(body, f.index).unwrap(), f.clone())
     };

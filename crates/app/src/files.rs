@@ -2,7 +2,7 @@
 //! when there is none (no D-Bus session or portal, a remote or headless session),
 //! rfd returns at once with nothing, which used to make Save / Export silently do
 //! nothing. Then an in-app path prompt takes over (`PathPrompt`), prefilled with
-//! the last folder used. `CASEWORK_FILE_DIALOG=builtin` forces the prompt.
+//! the last folder used. `EASYCAD_FILE_DIALOG=builtin` forces the prompt.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -60,7 +60,7 @@ pub enum Pick {
 
 /// Whether a system dialog can plausibly open (cheap environment check).
 pub fn native_available() -> bool {
-    if let Ok(v) = std::env::var("CASEWORK_FILE_DIALOG") {
+    if let Ok(v) = std::env::var("EASYCAD_FILE_DIALOG") {
         return v != "builtin";
     }
     if cfg!(target_os = "linux") {
@@ -193,7 +193,7 @@ impl PathPrompt {
                 if !parent.is_dir() {
                     return Err(format!("folder {} does not exist", parent.display()));
                 }
-                if p.is_dir() && p.extension().is_none_or(|e| e != "cwk") {
+                if p.is_dir() && p.extension().is_none_or(|e| e != "ecad" && e != "cwk") {
                     return Err("that is a folder; add a file name".into());
                 }
                 Ok(p)

@@ -7,10 +7,10 @@
 //! (`FeatureReport.edge_requests`: set and selector), so results land on the
 //! picked edge exactly.
 
-use casework_model::feature::*;
-use casework_model::occt::{CurveKind, EdgeInfo, EdgeStatus, Strategy};
-use casework_model::regen::FeatureStatus;
-use casework_model::select::{EdgeSelector, Selector};
+use easycad_model::feature::*;
+use easycad_model::occt::{CurveKind, EdgeInfo, EdgeStatus, Strategy};
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::{EdgeSelector, Selector};
 use egui::{RichText, Ui};
 use glam::DVec3;
 
@@ -247,9 +247,9 @@ impl FilletD {
             return Err("pick edges in the view".into());
         };
         let sel = |s: &EdgeSet| s.edges.iter().map(|e| e.sel.clone()).collect::<Vec<_>>();
-        let more: Vec<casework_model::feature::EdgeSet> = used[1..]
+        let more: Vec<easycad_model::feature::EdgeSet> = used[1..]
             .iter()
-            .map(|s| casework_model::feature::EdgeSet {
+            .map(|s| easycad_model::feature::EdgeSet {
                 edges: sel(s),
                 size: s.radius.expr(None),
                 auto_reduce: s.auto_reduce,

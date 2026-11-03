@@ -1,13 +1,13 @@
 //! Undo/redo, regeneration caching, sync-friendly persistence, failure isolation,
 //! and picking on a real tessellation.
 
-use casework_model::document::{DocData, Document};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::pick::{EdgeTolerance, HitKind, Picker};
-use casework_model::regen::FeatureStatus;
-use casework_model::select::{EdgeSelector, FaceSelector};
-use casework_model::sketch::{Constraint, Sketch};
+use easycad_model::document::{DocData, Document};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::pick::{EdgeTolerance, HitKind, Picker};
+use easycad_model::regen::FeatureStatus;
+use easycad_model::select::{EdgeSelector, FaceSelector};
+use easycad_model::sketch::{Constraint, Sketch};
 use glam::{DVec2, DVec3, Vec3};
 
 fn block_doc() -> (Document, BodyId, FeatureId) {
@@ -16,7 +16,7 @@ fn block_doc() -> (Document, BodyId, FeatureId) {
     doc.set_param("t", "w / 4").unwrap();
     let mut s = Sketch::new("S", Plane::XY);
     let l = s.rect(DVec2::ZERO, DVec2::new(40.0, 30.0));
-    s.constrain(Constraint::Fix(casework_model::sketch::PointId(0), DVec2::ZERO));
+    s.constrain(Constraint::Fix(easycad_model::sketch::PointId(0), DVec2::ZERO));
     s.constrain(Constraint::Length(l[0], "w".into()));
     s.constrain(Constraint::Length(l[1], 30.0.into()));
     let s = doc.add_sketch(s);
@@ -115,7 +115,7 @@ fn folder_format_is_sync_friendly() {
     let dxf = "0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n8\nH\n10\n0\n20\n0\n40\n1\n0\nENDSEC\n0\nEOF\n";
     doc.import_dxf("holes.dxf", dxf.as_bytes().to_vec());
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("Block.cwk");
+    let p = dir.path().join("Block.ecad");
     doc.save_to_dir(&p).unwrap();
     let json1 = std::fs::read_to_string(p.join("doc.json")).unwrap();
     doc.save_to_dir(&p).unwrap();
@@ -124,7 +124,7 @@ fn folder_format_is_sync_friendly() {
     // blobs are content-addressed and not embedded
     let refs = doc.blob_refs();
     assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0], casework_model::document::sha256_hex(dxf.as_bytes()));
+    assert_eq!(refs[0], easycad_model::document::sha256_hex(dxf.as_bytes()));
     assert!(p.join("blobs").join(&refs[0]).exists());
     assert!(!json1.contains("CIRCLE"));
 
@@ -169,7 +169,7 @@ fn pick_stack_on_real_mesh() {
 
 #[test]
 fn revolve_draft_chamfer_circular_pattern() {
-    use casework_model::geom::Axis;
+    use easycad_model::geom::Axis;
     let mut doc = Document::new("Misc");
     // revolve a 2×4 rectangle at r = 5..7 around Z → tube
     let mut s = Sketch::new("Prof", Plane::XZ);
@@ -233,7 +233,7 @@ fn revolve_draft_chamfer_circular_pattern() {
 
 #[test]
 fn selector_threshold_reports_unresolved_after_drastic_edit() {
-    use casework_model::select::Selector;
+    use easycad_model::select::Selector;
     let (mut doc, body, block) = block_doc();
     // pick the +X side face in the viewport (a stored hint, not a semantic rule)
     let face = {
@@ -263,7 +263,7 @@ fn selector_threshold_reports_unresolved_after_drastic_edit() {
     .unwrap();
     let st = doc.regenerate().report(shell).unwrap().status.clone();
     let FeatureStatus::Unresolved(u) = st else { panic!("expected Unresolved, got {st:?}") };
-    let casework_model::regen::Unresolved { selector, best_candidate, score } = *u;
+    let easycad_model::regen::Unresolved { selector, best_candidate, score } = *u;
     assert_eq!(selector, Selector::Face(hint));
     assert!(score > 1.0);
     let best = best_candidate.expect("a candidate is offered");
@@ -297,8 +297,8 @@ fn shell_without_open_faces_is_closed_hollow() {
     assert_eq!(r.report(f).unwrap().status, FeatureStatus::Ok, "{:?}", r.report(f));
     let s = r.body_by_id(body).unwrap().shape();
     assert!(s.is_valid());
-    assert_eq!(s.count(casework_model::occt::ShapeKind::Solid), 1);
-    assert_eq!(s.count(casework_model::occt::ShapeKind::Shell), 2);
+    assert_eq!(s.count(easycad_model::occt::ShapeKind::Solid), 1);
+    assert_eq!(s.count(easycad_model::occt::ShapeKind::Shell), 2);
     let size = s.bbox().unwrap().size();
     assert!((size.x - 40.0).abs() < 1e-6 && (size.z - 10.0).abs() < 1e-6, "{size:?}");
     let v = s.volume().unwrap();

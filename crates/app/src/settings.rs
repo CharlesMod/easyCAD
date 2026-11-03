@@ -38,7 +38,7 @@ fn two() -> u32 {
 pub enum NavPreset {
     /// Shift+middle orbits, middle pans (Fusion 360 style).
     #[default]
-    Casework,
+    easyCAD,
     /// Middle orbits, Ctrl+middle pans.
     SolidWorks,
     /// Right orbits, middle pans.
@@ -49,14 +49,14 @@ pub enum NavPreset {
 
 impl NavPreset {
     pub const ALL: [NavPreset; 4] = [
-        NavPreset::Casework,
+        NavPreset::easyCAD,
         NavPreset::SolidWorks,
         NavPreset::Onshape,
         NavPreset::Blender,
     ];
     pub fn label(self) -> &'static str {
         match self {
-            NavPreset::Casework => "Fusion 360 / Casework",
+            NavPreset::easyCAD => "Fusion 360 / easyCAD",
             NavPreset::SolidWorks => "SolidWorks",
             NavPreset::Onshape => "Onshape",
             NavPreset::Blender => "Blender",
@@ -65,7 +65,7 @@ impl NavPreset {
     /// (orbit, pan) hints for the status bar and the cheat sheet.
     pub fn hints(self) -> (&'static str, &'static str) {
         match self {
-            NavPreset::Casework => ("Shift+MMB", "MMB"),
+            NavPreset::easyCAD => ("Shift+MMB", "MMB"),
             NavPreset::SolidWorks => ("MMB", "Ctrl+MMB"),
             NavPreset::Onshape => ("RMB", "MMB"),
             NavPreset::Blender => ("MMB", "Shift+MMB"),
@@ -74,7 +74,7 @@ impl NavPreset {
     /// What a drag with these buttons / modifiers does.
     pub fn classify(self, middle: bool, right: bool, shift: bool, ctrl: bool) -> Option<Nav> {
         match self {
-            NavPreset::Casework if middle => Some(if shift { Nav::Orbit } else { Nav::Pan }),
+            NavPreset::easyCAD if middle => Some(if shift { Nav::Orbit } else { Nav::Pan }),
             NavPreset::SolidWorks if middle => Some(if ctrl { Nav::Pan } else { Nav::Orbit }),
             NavPreset::Onshape if right => Some(Nav::Orbit),
             NavPreset::Onshape if middle => Some(Nav::Pan),
@@ -108,8 +108,8 @@ impl MeshPref {
             MeshPref::Fine => "Fine (export quality)",
         }
     }
-    pub fn quality(self) -> casework_model::regen::MeshQuality {
-        use casework_model::regen::MeshQuality as Q;
+    pub fn quality(self) -> easycad_model::regen::MeshQuality {
+        use easycad_model::regen::MeshQuality as Q;
         match self {
             MeshPref::Coarse => Q::Preview,
             MeshPref::Normal => Q::Display,
@@ -132,7 +132,7 @@ fn path() -> Option<std::path::PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
         })?;
-    Some(base.join("casework").join("settings.json"))
+    Some(base.join("easycad").join("settings.json"))
 }
 
 impl Settings {

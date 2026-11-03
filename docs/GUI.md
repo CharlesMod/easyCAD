@@ -1,13 +1,13 @@
-# Casework GUI (`crates/app`)
+# easyCAD GUI (`crates/app`)
 
 Desktop front end on eframe/egui 0.37 with the wgpu backend.
 
 ```
-cargo run -p casework --release              # empty document
-cargo run -p casework --release -- --sample  # the sensor-node enclosure
-cargo run -p casework --release -- path/to/Enclosure.cwk
-cargo run -p casework --release -- --smoke /tmp/cw-smoke   # file I/O smoke test, exit code 1 on failure
-cargo run -p casework --release -- --sample-board /tmp/b   # the sample PCB as STEP + DXF, for the wizard
+cargo run -p easycad --release              # empty document
+cargo run -p easycad --release -- --sample  # the sensor-node enclosure
+cargo run -p easycad --release -- path/to/Enclosure.ecad
+cargo run -p easycad --release -- --smoke /tmp/cw-smoke   # file I/O smoke test, exit code 1 on failure
+cargo run -p easycad --release -- --sample-board /tmp/b   # the sample PCB as STEP + DXF, for the wizard
 ```
 
 Display units: the `mm` chip in the title bar switches to inches (display only; the
@@ -33,11 +33,11 @@ mode a bare number means inches.
 | `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
 | `units.rs` | mm / in display and input normalization. |
-| `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `CASEWORK_FILE_DIALOG=builtin` forces the prompt. |
-| `e2e_state.rs` | `CASEWORK_STATE_FILE`: JSON dump of what the user sees, for the E2E scripts. |
+| `files.rs` | File choosers: the system dialog (rfd / XDG portal) first; when none can open (no D-Bus session or portal, remote / headless) an in-app path prompt prefilled with the last folder. `EASYCAD_FILE_DIALOG=builtin` forces the prompt. |
+| `e2e_state.rs` | `EASYCAD_STATE_FILE`: JSON dump of what the user sees, for the E2E scripts. |
 | `ui_welcome.rs` / `wizard.rs` | Empty-document welcome (New enclosure from PCB… / Open / Sample / recent files) and the PCB wizard: reads an EasyEDA STEP or DXF (outline, mounting holes, board z) and builds ordinary features: offset profile → extrude → top-edge fillet → closed shell → board + standoffs → parting joint, all on named parameters. |
-| `settings.rs` / `ui_settings.rs` | Per-user settings (navigation preset: Fusion/Casework, SolidWorks, Onshape, Blender; default process for new documents; units; mesh quality; autosave interval) and their window (File ▸ Settings…, Ctrl+,), the `?` cheat sheet, the recovery offer. |
-| `recovery.rs` | Autosave: a dirty document is copied every N minutes (off the UI thread) to `$XDG_DATA_HOME/casework/recovery/<doc id>/` (a `.cwk` + `info.json` with the pid). Saving removes it; closing unsaved writes a last one. At start, copies whose process is gone are offered (Restore / Discard / Decide later; Enter restores the newest). `CASEWORK_AUTOSAVE_SECS` overrides the interval (E2E). |
+| `settings.rs` / `ui_settings.rs` | Per-user settings (navigation preset: Fusion/easyCAD, SolidWorks, Onshape, Blender; default process for new documents; units; mesh quality; autosave interval) and their window (File ▸ Settings…, Ctrl+,), the `?` cheat sheet, the recovery offer. |
+| `recovery.rs` | Autosave: a dirty document is copied every N minutes (off the UI thread) to `$XDG_DATA_HOME/easycad/recovery/<doc id>/` (a `.ecad` + `info.json` with the pid). Saving removes it; closing unsaved writes a last one. At start, copies whose process is gone are offered (Restore / Discard / Decide later; Enter restores the newest). `EASYCAD_AUTOSAVE_SECS` overrides the interval (E2E). |
 | `ui_assembly.rs` | Assemblies: the component tree in the browser (nested occurrences, expand/collapse, ×N instance badge, eye, ground pin, linked-file status with Update / Break link, lock on references, drag a row onto another to reparent, context menu: activate, isolate, move, ground, new / insert component, place another, make independent copy, remove), activation (double-click / Activate / breadcrumb; Esc goes up), the Mates folder (orange when unsolved or over-constrained). |
 | `scope.rs` | Editing inside the active component: dialogs, sketch mode, history strip and Parameters panel see `DocData::component_view`; `scope::edit` runs a change on that view in one undoable edit and writes the component back. |
 | `ui_mates.rs` | Mates dialog: type pills, snap glyphs under the cursor (face centre + normal, circle / cylinder axis, straight-edge axis, component origin), live solve (the draft rides along with every model request), jog slider for the free motion, OK = mate + solved placements in one undo step. |
@@ -79,7 +79,7 @@ for the design-position anchors that let in-context components move.
 ## Tests
 
 ```
-cargo test -p casework                 # unit + snapshot + GPU tests
+cargo test -p easycad                 # unit + snapshot + GPU tests
 ```
 
 Snapshots (written, not compared) land in `crates/app/tests/snapshots/`. They need
@@ -92,7 +92,7 @@ The release binary under Xvfb, driven by xdotool, asserting on the state dump wi
 jq and saving screenshots to `e2e/shots/` (a selection is committed).
 
 ```
-cargo build --release -p casework
+cargo build --release -p easycad
 crates/app/e2e/run_all.sh          # or one scenario: bash crates/app/e2e/d_sketch_extrude.sh
 ```
 

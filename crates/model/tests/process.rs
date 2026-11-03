@@ -3,13 +3,13 @@
 
 use std::f64::consts::PI;
 
-use casework_model::document::{Document, ExportFormat, ExportOptions};
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::occt::Shape;
-use casework_model::params::Expr;
-use casework_model::process::*;
-use casework_model::sketch::Sketch;
+use easycad_model::document::{Document, ExportFormat, ExportOptions};
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::occt::Shape;
+use easycad_model::params::Expr;
+use easycad_model::process::*;
+use easycad_model::sketch::Sketch;
 use glam::{DVec2, DVec3};
 
 const FDM: &str = "FDM 0.4 generic";
@@ -120,7 +120,7 @@ fn teardrop_holes() {
     };
     doc.set_active_profile("FDM pointed").unwrap();
     doc.edit("No teardrop", |d| {
-        d.teardrop_overrides.push(casework_model::document::TeardropOverride { body: b, face: casework_model::select::FaceSelector::from_pick(&finfo), enabled: false });
+        d.teardrop_overrides.push(easycad_model::document::TeardropOverride { body: b, face: easycad_model::select::FaceSelector::from_pick(&finfo), enabled: false });
         Ok::<_, ()>(())
     })
     .unwrap();
@@ -209,10 +209,10 @@ fn calibration_coupon_and_from_calibration() {
     assert!((offs[2]).abs() < 1e-12 && (offs[12] - 0.5).abs() < 1e-12);
     let (coupon, cells) = calibration_coupon(5.0, &offs).unwrap();
     assert!(coupon.is_valid());
-    assert_eq!(coupon.count(casework_model::occt::ShapeKind::Solid), 1);
+    assert_eq!(coupon.count(easycad_model::occt::ShapeKind::Solid), 1);
     assert_eq!(cells.len(), 13);
     assert_eq!(cells[4].notches, 5);
-    let holes = coupon.faces().unwrap().into_iter().filter(|f| f.kind == casework_model::occt::SurfaceKind::Cylinder && f.normal.dot(f.point - f.axis.unwrap().0) < 0.0).count();
+    let holes = coupon.faces().unwrap().into_iter().filter(|f| f.kind == easycad_model::occt::SurfaceKind::Cylinder && f.normal.dot(f.point - f.axis.unwrap().0) < 0.0).count();
     assert_eq!(holes, 13);
 
     // feed back what a "true" profile would produce and recover it

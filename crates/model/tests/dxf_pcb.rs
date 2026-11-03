@@ -3,13 +3,13 @@
 
 use std::f64::consts::PI;
 
-use casework_model::document::Document;
-use casework_model::dxf::DxfDrawing;
-use casework_model::feature::*;
-use casework_model::geom::Plane;
-use casework_model::occt::{DVec3, Shape};
-use casework_model::regen::{profile_face, FeatureStatus};
-use casework_model::sketch::{loop_area, ConstraintStatus, Sketch};
+use easycad_model::document::Document;
+use easycad_model::dxf::DxfDrawing;
+use easycad_model::feature::*;
+use easycad_model::geom::Plane;
+use easycad_model::occt::{DVec3, Shape};
+use easycad_model::regen::{profile_face, FeatureStatus};
+use easycad_model::sketch::{loop_area, ConstraintStatus, Sketch};
 use glam::DVec2;
 
 /// 3.0" × 2.0" board, 0.25" corner radius (LWPOLYLINE with bulges), four Ø0.125"

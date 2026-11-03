@@ -544,42 +544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "casework"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "casework-model",
- "eframe",
- "egui",
- "egui-wgpu",
- "egui_kittest",
- "glam",
- "image",
- "pollster 1.0.1",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "casework-model"
-version = "0.1.0"
-dependencies = [
- "glam",
- "nalgebra",
- "occt",
- "pdf-writer",
- "roxmltree",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
- "zip",
-]
-
-[[package]]
 name = "cc"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -948,6 +912,42 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "easycad"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "easycad-model",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "egui_kittest",
+ "glam",
+ "image",
+ "pollster 1.0.1",
+ "rfd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "easycad-model"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "nalgebra",
+ "occt",
+ "pdf-writer",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+ "zip",
+]
 
 [[package]]
 name = "ecolor"

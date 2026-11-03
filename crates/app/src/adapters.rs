@@ -9,9 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casework_model::document::{DocData, DocError, Document};
-use casework_model::feature::{FeatureId, FeatureKind};
-use casework_model::params::Values;
+use easycad_model::document::{DocData, DocError, Document};
+use easycad_model::feature::{FeatureId, FeatureKind};
+use easycad_model::params::Values;
 
 const BIND: &str = "gui.bind.";
 
@@ -42,7 +42,7 @@ pub fn migrate_bindings(d: &mut DocData) {
                 _ => continue,
             };
             plane.origin = glam::DVec3::ZERO;
-            *offset = casework_model::params::Expr::new(expr.as_str());
+            *offset = easycad_model::params::Expr::new(expr.as_str());
         }
         d.meta.remove(&key);
     }
@@ -55,13 +55,13 @@ pub fn set_param(doc: &mut Document, name: &str, expr: &str) -> Result<(), DocEr
 
 /// The document as the worker should see it: rolled back to `active` features.
 pub fn effective(d: &DocData, active: Option<usize>) -> DocData {
-    effective_in(d, casework_model::assembly::ComponentId::ROOT, active)
+    effective_in(d, easycad_model::assembly::ComponentId::ROOT, active)
 }
 
 /// Same, with the rollback marker in component `scope`'s history.
 pub fn effective_in(
     d: &DocData,
-    scope: casework_model::assembly::ComponentId,
+    scope: easycad_model::assembly::ComponentId,
     active: Option<usize>,
 ) -> DocData {
     let mut d = d.clone();
@@ -174,7 +174,7 @@ pub fn migrate_anchors(d: &mut DocData) {
     }
     let all = d.all_occurrences();
     for (key, id) in ids {
-        let id = casework_model::assembly::OccurrenceId(id);
+        let id = easycad_model::assembly::OccurrenceId(id);
         if let Some((_, o, world)) = all.iter().find(|(_, o, _)| o.id == id) {
             if let Some(c) = d.component_mut(o.component) {
                 if c.context_frame.is_none() {
@@ -208,7 +208,7 @@ mod tests {
         // an old file: numeric plane at 28 plus the binding in meta
         if let Some(f) = doc.data.feature_mut(split) {
             if let FeatureKind::Split { plane, offset, .. } = &mut f.kind {
-                *plane = casework_model::geom::Plane::XY.offset(28.0);
+                *plane = easycad_model::geom::Plane::XY.offset(28.0);
                 *offset = "0".into();
             }
         }
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn old_anchors_become_context_frames() {
-        use casework_model::assembly::{ComponentId, Transform};
+        use easycad_model::assembly::{ComponentId, Transform};
         let mut doc = Document::new("asm");
         let master = doc.add_component("Enclosure");
         let lid = doc.add_component("Lid");

@@ -5,19 +5,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use casework_model::document::{DocData, DocError, Document};
-use casework_model::dxf::DxfDrawing;
-use casework_model::feature::{ImportId, SketchId};
-use casework_model::geom::{Plane, Segment2};
-use casework_model::params::{Expr, Values};
-use casework_model::sketch::{
+use easycad_model::document::{DocData, DocError, Document};
+use easycad_model::dxf::DxfDrawing;
+use easycad_model::feature::{ImportId, SketchId};
+use easycad_model::geom::{Plane, Segment2};
+use easycad_model::params::{Expr, Values};
+use easycad_model::sketch::{
     profiles_from_segments, Constraint, ConstraintStatus, EntityId, Geom, PointId, Sketch,
     SolveReport,
 };
 use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use glam::DVec2;
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::theme;
 use crate::widgets;
 
@@ -111,7 +111,7 @@ pub struct SketchSession {
     pub projected: Vec<Vec<DVec2>>,
     /// The model edge each projected polyline comes from (exact projection), with
     /// its 3D samples.
-    pub projected_src: Vec<Option<(casework_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
+    pub projected_src: Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
     /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
     /// sketch coordinates; `projected` then holds the kept half's edges only.
     pub slice_caps: Vec<[DVec2; 3]>,
@@ -464,7 +464,7 @@ impl SketchSession {
     pub fn commit(
         &self,
         doc: &mut Document,
-        scope: casework_model::assembly::ComponentId,
+        scope: easycad_model::assembly::ComponentId,
     ) -> Result<Option<String>, String> {
         if !self.dirty && self.id.is_some() {
             return Ok(None);
@@ -517,7 +517,7 @@ impl SketchSession {
 
     /// Carry the per-entity DXF layer tags through an engine remap; entities the
     /// engine added since get none.
-    fn remap_layers(&mut self, remap: &casework_model::sketch_edit::Remap, before: usize) {
+    fn remap_layers(&mut self, remap: &easycad_model::sketch_edit::Remap, before: usize) {
         let mut layers = vec![None; self.sketch.entities.len()];
         for i in 0..before {
             if let Some(ne) = remap.entity(EntityId(i as u32)) {
@@ -1238,7 +1238,7 @@ fn on_arc(q: DVec2, c: DVec2, s: DVec2, e: DVec2) -> bool {
 
 // ================================================================ screen
 
-pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
+pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
     let model = app.model.clone();
     let crate::app::Mode::Sketch(s) = &mut app.mode else {
         return;
@@ -1335,7 +1335,7 @@ type Slice = (Vec<Vec<DVec2>>, Vec<[DVec2; 3]>, Vec<Vec<DVec2>>);
 /// The bodies cut at the sketch plane (GUI_NEEDS #9): the kept half's edges, the
 /// cut faces as triangles and their outlines, all in sketch coordinates.
 fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
-    use casework_model::regen::MeshQuality;
+    use easycad_model::regen::MeshQuality;
     let (mut edges, mut caps, mut outline) = (Vec::new(), Vec::new(), Vec::new());
     let loc = |p: glam::DVec3| plane.to_local(p);
     for b in m.bodies.iter().filter(|b| !b.body.reference) {
@@ -1356,7 +1356,7 @@ fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
     (edges, caps, outline)
 }
 
-type Projected = (Vec<Vec<DVec2>>, Vec<Option<(casework_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
+type Projected = (Vec<Vec<DVec2>>, Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
 
 /// Model edges seen in the sketch plane (mesh polylines for display) with the edge
 /// each comes from, for exact projection.
@@ -2209,7 +2209,7 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     }
     // profile fill
     for pr in s.sketch.profiles().profiles {
-        let poly = casework_model::sketch::polygonize(&pr.outer);
+        let poly = easycad_model::sketch::polygonize(&pr.outer);
         let pts: Vec<Pos2> = poly.iter().map(|q| to(*q)).collect();
         if pts.len() > 2 {
             let mut mesh = egui::Mesh::default();
@@ -2539,7 +2539,7 @@ mod tests {
         );
         let pr = s.sketch.profiles();
         assert_eq!(pr.profiles.len(), 1, "outer loop with the source as a hole");
-        let area = casework_model::sketch::loop_area(&pr.profiles[0].outer).abs();
+        let area = easycad_model::sketch::loop_area(&pr.profiles[0].outer).abs();
         assert!((area - 24.0 * 14.0).abs() < 1e-3, "{area}");
     }
 

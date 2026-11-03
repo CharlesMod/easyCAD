@@ -1,12 +1,12 @@
 //! State dump for the click-through E2E scripts (`crates/app/e2e/`). When
-//! `CASEWORK_STATE_FILE` is set, a JSON summary of what the user would see (mode,
+//! `EASYCAD_STATE_FILE` is set, a JSON summary of what the user would see (mode,
 //! open dialog, selection, pick stack, parameters, undo labels, camera, toasts) is
 //! written there whenever it changes, so scripts can assert with `jq` next to
 //! their screenshots. Off (and free) otherwise.
 
 use serde_json::{json, Value};
 
-use crate::app::{CaseworkApp, Mode};
+use crate::app::{EasyCadApp, Mode};
 use crate::dialogs::Body;
 
 pub struct StateDump {
@@ -16,14 +16,14 @@ pub struct StateDump {
 
 impl StateDump {
     pub fn from_env() -> Option<StateDump> {
-        let p = std::env::var_os("CASEWORK_STATE_FILE")?;
+        let p = std::env::var_os("EASYCAD_STATE_FILE")?;
         Some(StateDump {
             path: p.into(),
             last: String::new(),
         })
     }
 
-    pub fn write(&mut self, app: &CaseworkApp) {
+    pub fn write(&mut self, app: &EasyCadApp) {
         let s = serde_json::to_string_pretty(&summary(app)).unwrap_or_default();
         if s == self.last {
             return;
@@ -36,7 +36,7 @@ impl StateDump {
     }
 }
 
-fn dialog(app: &CaseworkApp) -> Value {
+fn dialog(app: &EasyCadApp) -> Value {
     let Some(d) = &app.dialog else {
         return Value::Null;
     };
@@ -83,7 +83,7 @@ fn dialog(app: &CaseworkApp) -> Value {
     v
 }
 
-fn mode(app: &CaseworkApp) -> Value {
+fn mode(app: &EasyCadApp) -> Value {
     match &app.mode {
         Mode::Model => json!({ "name": "model" }),
         Mode::Sketch(s) => json!({
@@ -117,7 +117,7 @@ fn mode(app: &CaseworkApp) -> Value {
 }
 
 /// Bounding box [min x, min y, max x, max y] of the non-construction geometry.
-fn sketch_bbox(s: &casework_model::sketch::Sketch) -> Option<[f64; 4]> {
+fn sketch_bbox(s: &easycad_model::sketch::Sketch) -> Option<[f64; 4]> {
     let mut b: Option<[f64; 4]> = None;
     for e in s.entities.iter().filter(|e| !e.construction) {
         for p in crate::sketch_mode::geom_points(&e.geom) {
@@ -131,7 +131,7 @@ fn sketch_bbox(s: &casework_model::sketch::Sketch) -> Option<[f64; 4]> {
     b.map(|b| b.map(|v| (v * 100.0).round() / 100.0))
 }
 
-pub fn summary(app: &CaseworkApp) -> Value {
+pub fn summary(app: &EasyCadApp) -> Value {
     let labels = |keys: &[crate::pickstack::PickKey]| -> Vec<String> {
         match &app.model {
             Some(m) => keys
@@ -161,7 +161,7 @@ pub fn summary(app: &CaseworkApp) -> Value {
         "params": app.doc.data.params.list.iter().map(|p| (p.name.clone(), Value::String(p.expr.0.clone()))).collect::<serde_json::Map<_, _>>(),
         "features": app.doc.data.features.iter().map(|f| {
             let st = app.feature_status(f.id).map(|s| match s {
-                casework_model::regen::FeatureStatus::Ok => "ok".to_string(),
+                easycad_model::regen::FeatureStatus::Ok => "ok".to_string(),
                 other => format!("{other:?}"),
             });
             json!({ "name": f.name, "kind": f.kind.label(), "status": st })
@@ -211,7 +211,7 @@ fn rect_json(r: Option<egui::Rect>) -> Value {
 
 /// Assemblies: the tree with screen anchors (for clicking), mates, the mates
 /// dialog, explode, interference.
-fn assembly(app: &CaseworkApp) -> Value {
+fn assembly(app: &EasyCadApp) -> Value {
     let d = &app.doc.data;
     if !crate::ui_assembly::is_assembly(d) {
         return Value::Null;

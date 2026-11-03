@@ -3,9 +3,9 @@
 
 use std::f64::consts::PI;
 
-use casework_model::geom::Plane;
-use casework_model::params::Values;
-use casework_model::sketch::{loop_area, Constraint, Geom, Sketch};
+use easycad_model::geom::Plane;
+use easycad_model::params::Values;
+use easycad_model::sketch::{loop_area, Constraint, Geom, Sketch};
 use glam::{DVec2, DVec3};
 
 fn areas(s: &Sketch) -> Vec<f64> {
@@ -127,7 +127,7 @@ fn split_trim_fillet_and_remove() {
     let Geom::Line { a: corner, .. } = s.entities[bottom.0 as usize].geom else { panic!() };
     let _ = left;
     for i in 0..s.points.len() {
-        let p = casework_model::sketch::PointId(i as u32);
+        let p = easycad_model::sketch::PointId(i as u32);
         if p != corner {
             let q = s.point(p);
             s.constrain(Constraint::Fix(p, q));
@@ -151,7 +151,7 @@ fn split_trim_fillet_and_remove() {
     let n0 = s.constraints.len();
     let m = s.remove_entities(&[b0]);
     assert_eq!(m.entity(b0), None);
-    assert_eq!(m.entity(r0), Some(casework_model::sketch::EntityId(0)));
+    assert_eq!(m.entity(r0), Some(easycad_model::sketch::EntityId(0)));
     assert_eq!(s.entities.len(), 3);
     assert!(s.constraints.len() < n0);
     assert!(s.constraints.iter().any(|c| matches!(c, Constraint::Length(e, _) if Some(*e) == m.entity(t0))));
@@ -160,7 +160,7 @@ fn split_trim_fillet_and_remove() {
 
 #[test]
 fn project_model_edges() {
-    use casework_model::occt::Shape;
+    use easycad_model::occt::Shape;
     // a 20 × 10 × 5 block with a Ø4 vertical hole and a Ø3 horizontal hole
     let b = Shape::make_box(DVec3::ZERO, DVec3::new(20.0, 10.0, 5.0)).unwrap();
     let b = b.cut(&Shape::cylinder(DVec3::new(5.0, 3.0, -1.0), DVec3::Z, 2.0, 10.0).unwrap()).unwrap();

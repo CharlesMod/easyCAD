@@ -5,13 +5,13 @@
 //! draft mate rides along with every model request, so the worker's solve is the
 //! preview; OK adds it (and the solved placements) in one undo step.
 
-use casework_model::assembly::{Mate, MateConnector, MateId, MateKind, MateStatus};
-use casework_model::document::DocError;
-use casework_model::occt::{CurveKind, SurfaceKind};
+use easycad_model::assembly::{Mate, MateConnector, MateId, MateKind, MateStatus};
+use easycad_model::document::DocError;
+use easycad_model::occt::{CurveKind, SurfaceKind};
 use egui::{pos2, vec2, Color32, Frame, Margin, Rect, RichText, Stroke, Ui};
 use glam::{DVec3, Vec2, Vec3};
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::pickstack::{PickKey, PickKind};
 use crate::theme;
 use crate::widgets;
@@ -97,8 +97,8 @@ impl MateUi {
             a: a.conn.clone(),
             b: b.conn.clone(),
             flip: self.flip,
-            angle: casework_model::params::Expr::new(crate::dialogs::fmt((self.angle * 10.0).round() / 10.0)),
-            distance: casework_model::params::Expr::new(crate::dialogs::fmt((self.distance * 100.0).round() / 100.0)),
+            angle: easycad_model::params::Expr::new(crate::dialogs::fmt((self.angle * 10.0).round() / 10.0)),
+            distance: easycad_model::params::Expr::new(crate::dialogs::fmt((self.distance * 100.0).round() / 100.0)),
             suppressed: false,
             angle_limits: None,
             distance_limits: None,
@@ -156,7 +156,7 @@ pub fn snap_of(m: &Output, k: &PickKey) -> Option<Snap> {
     }
 }
 
-impl CaseworkApp {
+impl EasyCadApp {
     /// Open the mates dialog (new, or editing an existing mate). Mates are made at
     /// the top level, so a component being edited is left first.
     pub fn open_mate(&mut self, id: Option<MateId>) {
@@ -264,7 +264,7 @@ impl CaseworkApp {
                     d.mates.push(m.clone());
                 }
             }
-            let (moves, solve) = casework_model::assembly::solve_mates(d);
+            let (moves, solve) = easycad_model::assembly::solve_mates(d);
             for (id, t) in moves {
                 if let Some(o) = d.occurrence_mut(id) {
                     o.transform = t;
@@ -302,7 +302,7 @@ impl CaseworkApp {
 }
 
 /// The floating Mate card (right side, like the feature dialogs).
-pub fn mate_card(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+pub fn mate_card(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(mut mu) = app.asm.mate.take() else { return };
     let solve = app.model.as_ref().and_then(|m| m.asm.as_ref()).and_then(|a| a.solve.clone());
     let id = mu.editing.unwrap_or(DRAFT);
@@ -430,7 +430,7 @@ pub fn mate_card(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
 }
 
 /// Snap glyphs: the picked sides and what the cursor would snap to.
-pub fn glyphs(app: &CaseworkApp, ui: &Ui, rect: Rect) {
+pub fn glyphs(app: &EasyCadApp, ui: &Ui, rect: Rect) {
     let Some(mu) = &app.asm.mate else { return };
     let Some(m) = &app.model else { return };
     let size = Vec2::new(rect.width(), rect.height());

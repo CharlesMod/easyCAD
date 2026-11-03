@@ -2,9 +2,9 @@
 //! [`DocData`]), plus undo/redo snapshots, content-addressed blobs and the
 //! regeneration cache.
 //!
-//! On disk a document is a **folder** `<name>.cwk/`:
+//! On disk a document is a **folder** `<name>.ecad/`:
 //! ```text
-//! Enclosure.cwk/
+//! Enclosure.ecad/
 //!   doc.json            deterministic, pretty-printed DocData
 //!   blobs/<sha256>      imported STEP/DXF files and embedded library STEP parts
 //! ```
@@ -810,7 +810,7 @@ impl Document {
 }
 
 fn default_device() -> String {
-    std::env::var("CASEWORK_DEVICE_ID")
+    std::env::var("EASYCAD_DEVICE_ID")
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "local".into())

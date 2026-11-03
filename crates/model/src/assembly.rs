@@ -133,7 +133,7 @@ pub enum ComponentSource {
     /// Sketches and features stored in this document.
     #[default]
     Native,
-    /// Linked external `.cwk` folder: `path` is relative to the host document's
+    /// Linked external `.ecad` folder: `path` is relative to the host document's
     /// folder; `hash` is the sha256 of its `doc.json` when the content was last
     /// copied in. The embedded content is a cache so the host opens without the file.
     Linked { path: String, hash: String },
@@ -1793,7 +1793,7 @@ pub fn relative_path(base: &std::path::Path, target: &std::path::Path) -> String
     }
 }
 
-/// Read a `.cwk` folder for linking: its data, the hash of its `doc.json`, blobs.
+/// Read a `.ecad` folder for linking: its data, the hash of its `doc.json`, blobs.
 fn read_linked(dir: &std::path::Path) -> Result<(DocData, String, Vec<Vec<u8>>), DocError> {
     let json = std::fs::read_to_string(dir.join(crate::document::DOC_FILE))?;
     let hash = crate::document::sha256_hex(json.as_bytes());
@@ -1881,16 +1881,16 @@ fn import_linked(d: &mut DocData, owner: ComponentId, src: &DocData, path: Strin
 }
 
 impl Document {
-    /// Link an external `.cwk` folder as a locked component (its root content is
+    /// Link an external `.ecad` folder as a locked component (its root content is
     /// copied in as a cache; its params become the component's local params). The
     /// path is stored relative to `host_dir` (the folder the host document is saved
     /// in). Place it with `add_occurrence`.
-    pub fn link_component(&mut self, cwk: &std::path::Path, host_dir: &std::path::Path) -> Result<ComponentId, DocError> {
-        let (src, hash, blobs) = read_linked(cwk)?;
+    pub fn link_component(&mut self, ecad: &std::path::Path, host_dir: &std::path::Path) -> Result<ComponentId, DocError> {
+        let (src, hash, blobs) = read_linked(ecad)?;
         for b in blobs {
             self.blobs.put(b);
         }
-        let path = relative_path(host_dir, cwk);
+        let path = relative_path(host_dir, ecad);
         self.edit(&format!("Link {}", src.name), |d| {
             // ids inside the linked content stay unique against later allocations
             d.next_id = d.next_id.max(src.next_id);

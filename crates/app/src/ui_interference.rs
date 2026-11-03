@@ -5,11 +5,11 @@
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
-use casework_model::assembly::{InterferenceOptions, InterferenceReport};
+use easycad_model::assembly::{InterferenceOptions, InterferenceReport};
 use egui::{pos2, vec2, Frame, Margin, Rect, RichText, Sense, Stroke, Ui};
 use glam::Vec3;
 
-use crate::app::CaseworkApp;
+use crate::app::EasyCadApp;
 use crate::theme;
 use crate::widgets;
 use crate::worker::{ctx_key, CtxBody, Output};
@@ -28,7 +28,7 @@ pub struct InterferenceUi {
 impl InterferenceUi {
     pub fn highlighted(&self, c: &CtxBody) -> bool {
         let Some(r) = &self.report else { return false };
-        let hit = |p: &casework_model::assembly::Interference| {
+        let hit = |p: &easycad_model::assembly::Interference| {
             [&p.a, &p.b].iter().any(|i| ctx_key(&i.path, i.body) == c.key)
         };
         match self.sel {
@@ -38,7 +38,7 @@ impl InterferenceUi {
     }
 }
 
-impl CaseworkApp {
+impl EasyCadApp {
     /// Run the interference check on the assembly as shown (mates solved).
     pub fn check_interference(&mut self) {
         let Some(m) = self.model.clone() else { return };
@@ -75,14 +75,14 @@ fn spawn(m: Arc<Output>, include_reference: bool) -> Receiver<InterferenceReport
     std::thread::spawn(move || {
         let Some(a) = &m.asm else { return };
         let opts = InterferenceOptions { include_reference, ..Default::default() };
-        let r = casework_model::assembly::interference(&m.data, &a.result, &opts);
+        let r = easycad_model::assembly::interference(&m.data, &a.result, &opts);
         let _ = tx.send(r);
     });
     rx
 }
 
 /// View-frame bounds of a placed body (sampled vertices).
-fn body_bounds(m: &Output, key: casework_model::feature::BodyId) -> Option<(Vec3, Vec3)> {
+fn body_bounds(m: &Output, key: easycad_model::feature::BodyId) -> Option<(Vec3, Vec3)> {
     let c = m.ctx_body(key)?;
     let mesh = c.mb.mesh.as_ref()?;
     let mut lo = Vec3::splat(f32::MAX);
@@ -96,7 +96,7 @@ fn body_bounds(m: &Output, key: casework_model::feature::BodyId) -> Option<(Vec3
 }
 
 /// The report card (bottom left of the viewport).
-pub fn card(app: &mut CaseworkApp, ui: &mut Ui, rect: Rect) {
+pub fn card(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     app.poll_interference();
     let Some(mut st) = app.asm.interference.take() else { return };
     let model = app.model.clone();

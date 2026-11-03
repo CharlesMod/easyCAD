@@ -1,6 +1,6 @@
 [package]
-name = "casework-sync"
-description = "Google Drive sync (OAuth2 + Drive v3 + local-first sync engine) for Casework"
+name = "easycad-sync"
+description = "Google Drive sync (OAuth2 + Drive v3 + local-first sync engine) for easyCAD"
 version = "0.1.0"
 edition = "2021"
 license = "LGPL-2.1-only"

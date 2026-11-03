@@ -3,14 +3,14 @@
 #
 # Drives the real release binary under Xvfb with xdotool and grabs the screen with
 # ImageMagick `import`. The app writes a JSON state summary to $STATE (enabled by
-# CASEWORK_STATE_FILE) that `st` / `wait_for` read with jq.
+# EASYCAD_STATE_FILE) that `st` / `wait_for` read with jq.
 
 set -u
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$E2E_DIR/../../.." && pwd)"
-BIN="${CASEWORK_BIN:-$ROOT/target/release/casework}"
+BIN="${EASYCAD_BIN:-$ROOT/target/release/easycad}"
 SHOTS="${SHOTS:-$E2E_DIR/shots}"
-WORK="${E2E_WORK:-$(mktemp -d /tmp/casework-e2e.XXXXXX)}"
+WORK="${E2E_WORK:-$(mktemp -d /tmp/easycad-e2e.XXXXXX)}"
 STATE="$WORK/state.json"
 SCENARIO="${SCENARIO:-$(basename "$0" .sh)}"
 FAILS=0
@@ -27,11 +27,11 @@ start_app() {
     XVFB_PID=$!
     for _ in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
     rm -f "$STATE"
-    XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" CASEWORK_STATE_FILE="$STATE" \
+    XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" EASYCAD_STATE_FILE="$STATE" \
         "$BIN" "$@" >"$WORK/app.log" 2>&1 &
     APP_PID=$!
     wait_for '.model_id != null or (.features | length) == 0' 120 || { log "app did not start"; tail -20 "$WORK/app.log"; return 1; }
-    WIN=$(xdotool search --sync --name Casework | head -1)
+    WIN=$(xdotool search --sync --name easyCAD | head -1)
     # no window manager: put the window at the origin so screen = window coordinates
     xdotool windowmove "$WIN" 0 0 windowsize "$WIN" 1440 900 2>/dev/null
     # no window manager either to hand out keyboard focus; a window that maps late
@@ -62,11 +62,11 @@ crash_app() { kill -9 "$APP_PID"; wait "$APP_PID" 2>/dev/null; APP_PID=""; }
 # Restart the app on the same display and config dir.
 restart_app() {
     rm -f "$STATE"
-    XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" CASEWORK_STATE_FILE="$STATE" \
+    XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" EASYCAD_STATE_FILE="$STATE" \
         "$BIN" "$@" >>"$WORK/app.log" 2>&1 &
     APP_PID=$!
     wait_for '.revision != null' 120
-    WIN=$(xdotool search --sync --name Casework | head -1)
+    WIN=$(xdotool search --sync --name easyCAD | head -1)
     xdotool windowmove "$WIN" 0 0 windowsize "$WIN" 1440 900 2>/dev/null
     # no window manager either to hand out keyboard focus; a window that maps late
     # (an empty document starts fast) can miss the first request, so insist
