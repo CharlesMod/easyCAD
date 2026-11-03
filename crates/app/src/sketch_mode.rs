@@ -109,6 +109,9 @@ pub struct SketchSession {
     pub drag: Option<PointId>,
     pub cursor: DVec2,
     pub projected: Vec<Vec<DVec2>>,
+    /// The model edge each projected polyline comes from (exact projection), with
+    /// its 3D samples.
+    pub projected_src: Vec<Option<(casework_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
     /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
     /// sketch coordinates; `projected` then holds the kept half's edges only.
     pub slice_caps: Vec<[DVec2; 3]>,
@@ -155,6 +158,7 @@ impl SketchSession {
             drag: None,
             cursor: DVec2::ZERO,
             projected: Vec::new(),
+            projected_src: Vec::new(),
             slice_caps: Vec::new(),
             slice_outline: Vec::new(),
             projected_slice: None,
@@ -341,6 +345,57 @@ impl SketchSession {
         self.resolve();
     }
 
+    /// Entities whose ends lie on the same spot share that point (DXF imports have
+    /// separate, equal end points; the engine's chain walk follows shared points).
+    fn weld_ends(&mut self) {
+        let sk = &self.sketch;
+        let mut canon: HashMap<u32, PointId> = HashMap::new();
+        let mut seen: Vec<(DVec2, PointId)> = Vec::new();
+        for e in &sk.entities {
+            let ends = match e.geom {
+                Geom::Line { a, b } => vec![a, b],
+                Geom::Arc { start, end, .. } => vec![start, end],
+                Geom::Circle { .. } => vec![],
+            };
+            for p in ends {
+                let q = sk.point(p);
+                match seen.iter().find(|(x, _)| x.distance(q) < 1e-6) {
+                    Some((_, c)) if *c != p => {
+                        canon.insert(p.0, *c);
+                    }
+                    Some(_) => {}
+                    None => seen.push((q, p)),
+                }
+            }
+        }
+        if canon.is_empty() {
+            return;
+        }
+        let m = |p: &mut PointId| {
+            if let Some(c) = canon.get(&p.0) {
+                *p = *c;
+            }
+        };
+        for e in &mut self.sketch.entities {
+            match &mut e.geom {
+                Geom::Line { a, b } => {
+                    m(a);
+                    m(b);
+                }
+                Geom::Arc { start, end, .. } => {
+                    m(start);
+                    m(end);
+                }
+                Geom::Circle { .. } => {}
+            }
+        }
+    }
+
+    /// Drop the snapshot of an edit that did not happen.
+    fn pop_undo(&mut self) {
+        self.undo.pop();
+    }
+
     pub fn push_undo(&mut self) {
         self.undo
             .push((self.sketch.clone(), self.entity_layer.clone()));
@@ -450,69 +505,28 @@ impl SketchSession {
     // ------------------------------------------------------------ geometry edits
 
     /// Remove entities, their now-unused points and the constraints that reference
-    /// removed items, remapping ids.
+    /// removed items (the engine's `Sketch::remove_entities`), keeping the DXF
+    /// layer tags in step.
     pub fn remove_entities(&mut self, rm: &HashSet<EntityId>) {
-        let s = &self.sketch;
-        let mut used: HashSet<u32> = HashSet::new();
-        for (i, e) in s.entities.iter().enumerate() {
-            if rm.contains(&EntityId(i as u32)) {
-                continue;
-            }
-            for p in geom_points(&e.geom) {
-                used.insert(p.0);
-            }
-        }
-        let mut ref_by_kept: HashSet<u32> = HashSet::new();
-        for c in &s.constraints {
-            if constraint_entities(c).iter().any(|e| rm.contains(e)) {
-                continue;
-            }
-            let ps = constraint_points(c);
-            // a constraint only between points of removed entities goes too
-            if !ps.is_empty()
-                && ps.iter().all(|p| !used.contains(&p.0))
-                && constraint_entities(c).is_empty()
-            {
-                continue;
-            }
-            for p in ps {
-                ref_by_kept.insert(p.0);
-            }
-        }
-        let keep_point =
-            |i: u32| used.contains(&i) || (ref_by_kept.contains(&i) && !removed_only(s, rm, i));
-        let mut pmap: HashMap<u32, u32> = HashMap::new();
-        let mut points = Vec::new();
-        for (i, p) in s.points.iter().enumerate() {
-            if keep_point(i as u32) {
-                pmap.insert(i as u32, points.len() as u32);
-                points.push(*p);
-            }
-        }
-        let mut emap: HashMap<u32, u32> = HashMap::new();
-        let mut entities = Vec::new();
-        let mut layers = Vec::new();
-        for (i, e) in s.entities.iter().enumerate() {
-            if !rm.contains(&EntityId(i as u32)) {
-                emap.insert(i as u32, entities.len() as u32);
-                let mut e = e.clone();
-                e.geom = map_geom(&e.geom, &|p| PointId(pmap[&p.0]));
-                entities.push(e);
-                layers.push(self.entity_layer.get(i).cloned().flatten());
-            }
-        }
-        let pm = |p: PointId| pmap.get(&p.0).map(|v| PointId(*v));
-        let em = |e: EntityId| emap.get(&e.0).map(|v| EntityId(*v));
-        let constraints = s
-            .constraints
-            .iter()
-            .filter_map(|c| map_constraint(c, &pm, &em))
-            .collect();
-        self.sketch.points = points;
-        self.sketch.entities = entities;
-        self.sketch.constraints = constraints;
-        self.entity_layer = layers;
+        let ids: Vec<EntityId> = rm.iter().copied().collect();
+        let n = self.sketch.entities.len();
+        let remap = self.sketch.remove_entities(&ids);
+        self.remap_layers(&remap, n);
         self.selection.clear();
+    }
+
+    /// Carry the per-entity DXF layer tags through an engine remap; entities the
+    /// engine added since get none.
+    fn remap_layers(&mut self, remap: &casework_model::sketch_edit::Remap, before: usize) {
+        let mut layers = vec![None; self.sketch.entities.len()];
+        for i in 0..before {
+            if let Some(ne) = remap.entity(EntityId(i as u32)) {
+                if let Some(slot) = layers.get_mut(ne.0 as usize) {
+                    *slot = self.entity_layer.get(i).cloned().flatten();
+                }
+            }
+        }
+        self.entity_layer = layers;
     }
 
     fn add_entity(&mut self, g: Geom, construction: bool) -> EntityId {
@@ -551,76 +565,22 @@ impl SketchSession {
         }
     }
 
-    /// Replace the corner at `p` (shared by two lines) with a tangent arc.
+    /// Replace the corner at `p` (two lines) with a tangent arc of radius `r`
+    /// (an expression); the engine's `Sketch::fillet_corner`.
     pub fn fillet_corner(&mut self, p: PointId, r: &str) -> Result<(), String> {
-        let lines: Vec<(EntityId, PointId)> = self
-            .sketch
-            .entities
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| match e.geom {
-                Geom::Line { a, b } if a == p => Some((EntityId(i as u32), b)),
-                Geom::Line { a, b } if b == p => Some((EntityId(i as u32), a)),
-                _ => None,
-            })
-            .collect();
-        if lines.len() != 2 {
-            return Err("pick a corner shared by exactly two lines".into());
-        }
-        let rv = crate::widgets::eval(r, &self.values)?;
-        let c = self.sketch.point(p);
-        let u1 = (self.sketch.point(lines[0].1) - c).normalize();
-        let u2 = (self.sketch.point(lines[1].1) - c).normalize();
-        let half = u1.dot(u2).clamp(-1.0, 1.0).acos() / 2.0;
-        if half < 1e-3 || (std::f64::consts::FRAC_PI_2 - half).abs() < 1e-6 && false {
-            return Err("lines are parallel".into());
-        }
-        let d = rv / half.tan();
-        let t1 = c + u1 * d;
-        let t2 = c + u2 * d;
-        let bis = (u1 + u2).normalize();
-        let center = c + bis * (rv / half.sin());
+        let r = Expr::new(crate::units::normalize_input(r.trim()));
         self.push_undo();
-        let p1 = self.sketch.add_point(t1);
-        let p2 = self.sketch.add_point(t2);
-        let pc = self.sketch.add_point(center);
-        for (k, (e, _)) in lines.iter().enumerate() {
-            let np = if k == 0 { p1 } else { p2 };
-            if let Geom::Line { a, b } = &mut self.sketch.entities[e.0 as usize].geom {
-                if *a == p {
-                    *a = np;
-                } else {
-                    *b = np;
-                }
+        match self.sketch.fillet_corner(p, r, &self.values) {
+            Ok(_) => {
+                self.entity_layer.resize(self.sketch.entities.len(), None);
+                self.resolve();
+                Ok(())
+            }
+            Err(e) => {
+                self.pop_undo();
+                Err(e)
             }
         }
-        // CCW from start to end
-        let cross = (t1 - center).perp_dot(t2 - center);
-        let (s, e) = if cross > 0.0 { (p1, p2) } else { (p2, p1) };
-        let arc = self.add_entity(
-            Geom::Arc {
-                center: pc,
-                start: s,
-                end: e,
-            },
-            false,
-        );
-        self.sketch.constrain(Constraint::Tangent(lines[0].0, arc));
-        self.sketch.constrain(Constraint::Tangent(lines[1].0, arc));
-        self.sketch.constrain(Constraint::Radius(arc, Expr::new(r)));
-        // constraints on the old corner now apply to nothing: drop them if orphaned
-        let still = self
-            .sketch
-            .entities
-            .iter()
-            .any(|e| geom_points(&e.geom).contains(&p));
-        if !still {
-            self.sketch
-                .constraints
-                .retain(|c| !constraint_points(c).contains(&p));
-        }
-        self.resolve();
-        Ok(())
     }
 
     /// Point-connected loop containing an entity, in walking order with direction.
@@ -693,8 +653,42 @@ impl SketchSession {
         Some(out)
     }
 
-    /// Offset a closed loop by an expression distance (outward for positive).
+    /// Offset the chain through `start` by an expression distance (outward for a
+    /// closed loop): the engine's `Sketch::offset_chain`, held by one native
+    /// `Constraint::Offset` (GUI_NEEDS #12).
     pub fn offset_loop(&mut self, start: EntityId, dist: &str) -> Result<(), String> {
+        // chains with arcs: the native Offset leaves them under-determined (GUI_NEEDS #21)
+        if let Some(lp) = self.loop_of(start) {
+            if lp.len() > 1 && lp.iter().any(|(e, _)| matches!(self.sketch.entities[e.0 as usize].geom, Geom::Arc { .. })) {
+                return self.offset_loop_gui(start, dist);
+            }
+        }
+        let d = Expr::new(crate::units::normalize_input(dist.trim()));
+        self.push_undo();
+        self.weld_ends();
+        match self.sketch.offset_chain(start, d, &self.values) {
+            Ok(new) => {
+                // offsetting a reference (a DXF outline) makes real geometry: the profile
+                for e in new {
+                    if let Some(x) = self.sketch.entities.get_mut(e.0 as usize) {
+                        x.construction = false;
+                    }
+                }
+                self.entity_layer.resize(self.sketch.entities.len(), None);
+                self.resolve();
+                Ok(())
+            }
+            Err(e) => {
+                self.pop_undo();
+                Err(e)
+            }
+        }
+    }
+
+
+    /// The GUI's own offset of a closed loop (point-to-line distances, radial lines
+    /// at tangent joints), used for chains with arcs until GUI_NEEDS #21.
+    fn offset_loop_gui(&mut self, start: EntityId, dist: &str) -> Result<(), String> {
         let d = crate::widgets::eval(dist, &self.values)?;
         let lp = self
             .loop_of(start)
@@ -869,69 +863,28 @@ impl SketchSession {
         Ok(())
     }
 
-    /// Cut a line at its intersections with other geometry; removes the piece under `at`.
+    /// Trim the piece of `e` around `at` between its nearest intersections (the
+    /// engine's `Sketch::trim`: lines, arcs and circles).
     pub fn trim(&mut self, e: EntityId, at: DVec2) {
-        let Some((pa, pb)) = self.line_points(e) else {
-            self.push_undo();
-            self.remove_entities(&HashSet::from([e]));
-            self.resolve();
-            return;
-        };
-        let (a, b) = (self.sketch.point(pa), self.sketch.point(pb));
-        let mut ts: Vec<f64> = Vec::new();
-        for (i, other) in self.sketch.entities.iter().enumerate() {
-            if i as u32 == e.0 {
-                continue;
-            }
-            match other.geom {
-                Geom::Line { a: c, b: d } => {
-                    if let Some(t) = seg_param(a, b, self.sketch.point(c), self.sketch.point(d)) {
-                        ts.push(t);
-                    }
-                }
-                Geom::Circle { center, radius } => {
-                    ts.extend(circle_params(a, b, self.sketch.point(center), radius))
-                }
-                Geom::Arc { center, start, .. } => {
-                    let c = self.sketch.point(center);
-                    ts.extend(circle_params(
-                        a,
-                        b,
-                        c,
-                        (self.sketch.point(start) - c).length(),
-                    ))
-                }
-            }
-        }
-        ts.retain(|t| *t > 1e-6 && *t < 1.0 - 1e-6);
-        ts.sort_by(f64::total_cmp);
-        ts.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
-        let ab = b - a;
-        let tc = ((at - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
-        let lo = ts.iter().rev().find(|t| **t < tc).copied().unwrap_or(0.0);
-        let hi = ts.iter().find(|t| **t > tc).copied().unwrap_or(1.0);
         self.push_undo();
-        if lo == 0.0 && hi == 1.0 {
-            self.remove_entities(&HashSet::from([e]));
-        } else if lo == 0.0 {
-            let np = self.sketch.add_point(a + ab * hi);
-            if let Geom::Line { a, .. } = &mut self.sketch.entities[e.0 as usize].geom {
-                *a = np;
+        let n = self.sketch.entities.len();
+        match self.sketch.trim(e, at) {
+            Ok(remap) => {
+                // remap covers the entities that existed before; new pieces follow
+                let mut layers = self.entity_layer.clone();
+                layers.resize(n, None);
+                self.entity_layer = layers;
+                let added = self.sketch.entities.len();
+                self.remap_layers(&remap, n);
+                self.entity_layer.resize(added, None);
+                self.selection.clear();
+                self.resolve();
             }
-        } else if hi == 1.0 {
-            let np = self.sketch.add_point(a + ab * lo);
-            if let Geom::Line { b, .. } = &mut self.sketch.entities[e.0 as usize].geom {
-                *b = np;
+            Err(err) => {
+                self.pop_undo();
+                self.error = Some(err);
             }
-        } else {
-            let p1 = self.sketch.add_point(a + ab * lo);
-            let p2 = self.sketch.add_point(a + ab * hi);
-            if let Geom::Line { b, .. } = &mut self.sketch.entities[e.0 as usize].geom {
-                *b = p1;
-            }
-            self.add_entity(Geom::Line { a: p2, b: pb }, false);
         }
-        self.resolve();
     }
 
     /// Apply a constraint button to the selection.
@@ -1215,37 +1168,11 @@ fn grid_step(scale: f32) -> f64 {
     s
 }
 
-fn removed_only(s: &Sketch, rm: &HashSet<EntityId>, p: u32) -> bool {
-    let users: Vec<usize> = s
-        .entities
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| geom_points(&e.geom).contains(&PointId(p)))
-        .map(|(i, _)| i)
-        .collect();
-    !users.is_empty() && users.iter().all(|i| rm.contains(&EntityId(*i as u32)))
-}
-
 pub fn geom_points(g: &Geom) -> Vec<PointId> {
     match *g {
         Geom::Line { a, b } => vec![a, b],
         Geom::Arc { center, start, end } => vec![center, start, end],
         Geom::Circle { center, .. } => vec![center],
-    }
-}
-
-fn map_geom(g: &Geom, f: &dyn Fn(PointId) -> PointId) -> Geom {
-    match *g {
-        Geom::Line { a, b } => Geom::Line { a: f(a), b: f(b) },
-        Geom::Arc { center, start, end } => Geom::Arc {
-            center: f(center),
-            start: f(start),
-            end: f(end),
-        },
-        Geom::Circle { center, radius } => Geom::Circle {
-            center: f(center),
-            radius,
-        },
     }
 }
 
@@ -1282,39 +1209,15 @@ pub fn constraint_entities(c: &Constraint) -> Vec<EntityId> {
     }
 }
 
-fn map_constraint(
-    c: &Constraint,
-    p: &dyn Fn(PointId) -> Option<PointId>,
-    e: &dyn Fn(EntityId) -> Option<EntityId>,
-) -> Option<Constraint> {
-    use Constraint::*;
-    Some(match c {
-        Coincident(a, b) => Coincident(p(*a)?, p(*b)?),
-        Horizontal(x) => Horizontal(e(*x)?),
-        Vertical(x) => Vertical(e(*x)?),
-        Parallel(a, b) => Parallel(e(*a)?, e(*b)?),
-        Perpendicular(a, b) => Perpendicular(e(*a)?, e(*b)?),
-        Tangent(a, b) => Tangent(e(*a)?, e(*b)?),
-        Equal(a, b) => Equal(e(*a)?, e(*b)?),
-        PointOnLine(q, x) => PointOnLine(p(*q)?, e(*x)?),
-        PointOnCircle(q, x) => PointOnCircle(p(*q)?, e(*x)?),
-        Midpoint(q, x) => Midpoint(p(*q)?, e(*x)?),
-        Symmetric(a, b, x) => Symmetric(p(*a)?, p(*b)?, e(*x)?),
-        Fix(q, v) => Fix(p(*q)?, *v),
-        Distance(a, b, d) => Distance(p(*a)?, p(*b)?, d.clone()),
-        DistanceX(a, b, d) => DistanceX(p(*a)?, p(*b)?, d.clone()),
-        DistanceY(a, b, d) => DistanceY(p(*a)?, p(*b)?, d.clone()),
-        PointLineDistance(q, x, d) => PointLineDistance(p(*q)?, e(*x)?, d.clone()),
-        Length(x, d) => Length(e(*x)?, d.clone()),
-        Radius(x, d) => Radius(e(*x)?, d.clone()),
-        Diameter(x, d) => Diameter(e(*x)?, d.clone()),
-        Angle(a, b, d) => Angle(e(*a)?, e(*b)?, d.clone()),
-        Offset { source, target, distance } => Offset {
-            source: source.iter().map(|x| e(*x)).collect::<Option<Vec<_>>>()?,
-            target: target.iter().map(|x| e(*x)).collect::<Option<Vec<_>>>()?,
-            distance: distance.clone(),
-        },
-    })
+fn line_intersect(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<DVec2> {
+    let r = b - a;
+    let s = d - c;
+    let den = r.perp_dot(s);
+    if den.abs() < 1e-12 {
+        return None;
+    }
+    let t = (c - a).perp_dot(s) / den;
+    Some(a + r * t)
 }
 
 fn seg_dist(q: DVec2, a: DVec2, b: DVec2) -> f64 {
@@ -1333,42 +1236,6 @@ fn on_arc(q: DVec2, c: DVec2, s: DVec2, e: DVec2) -> bool {
     aq <= a1
 }
 
-fn line_intersect(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<DVec2> {
-    let r = b - a;
-    let s = d - c;
-    let den = r.perp_dot(s);
-    if den.abs() < 1e-12 {
-        return None;
-    }
-    let t = (c - a).perp_dot(s) / den;
-    Some(a + r * t)
-}
-
-/// Parameter on segment ab where it crosses segment cd.
-fn seg_param(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<f64> {
-    let r = b - a;
-    let s = d - c;
-    let den = r.perp_dot(s);
-    if den.abs() < 1e-12 {
-        return None;
-    }
-    let t = (c - a).perp_dot(s) / den;
-    let u = (c - a).perp_dot(r) / den;
-    ((-1e-9..=1.0 + 1e-9).contains(&u)).then_some(t)
-}
-
-fn circle_params(a: DVec2, b: DVec2, c: DVec2, r: f64) -> Vec<f64> {
-    let d = b - a;
-    let f = a - c;
-    let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
-    let disc = qb * qb - 4.0 * qa * qc;
-    if disc < 0.0 || qa < 1e-18 {
-        return vec![];
-    }
-    let s = disc.sqrt();
-    vec![(-qb - s) / (2.0 * qa), (-qb + s) / (2.0 * qa)]
-}
-
 // ================================================================ screen
 
 pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
@@ -1380,11 +1247,14 @@ pub fn screen(app: &mut CaseworkApp, ui: &mut Ui) {
         if let Some(m) = &model {
             if s.slice {
                 let (proj, caps, outline) = slice_model(m, &s.sketch.plane);
+                s.projected_src = vec![None; proj.len()];
                 s.projected = proj;
                 s.slice_caps = caps;
                 s.slice_outline = outline;
             } else {
-                s.projected = project_edges(m, &s.sketch.plane);
+                let (proj, src) = project_edges(m, &s.sketch.plane);
+                s.projected = proj;
+                s.projected_src = src;
                 s.slice_caps.clear();
                 s.slice_outline.clear();
             }
@@ -1486,23 +1356,26 @@ fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
     (edges, caps, outline)
 }
 
-fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Vec<Vec<DVec2>> {
-    let mut v = Vec::new();
+type Projected = (Vec<Vec<DVec2>>, Vec<Option<(casework_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
+
+/// Model edges seen in the sketch plane (mesh polylines for display) with the edge
+/// each comes from, for exact projection.
+fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Projected {
+    let (mut v, mut src) = (Vec::new(), Vec::new());
     for b in &m.bodies {
         if let Some(mesh) = &b.mesh {
             for e in &mesh.edges {
-                v.push(
-                    e.points
-                        .iter()
-                        .map(|p| {
-                            plane.to_local(glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
-                        })
-                        .collect(),
-                );
+                let p3: Vec<glam::DVec3> = e
+                    .points
+                    .iter()
+                    .map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
+                    .collect();
+                v.push(p3.iter().map(|p| plane.to_local(*p)).collect());
+                src.push(b.edges.get(e.edge as usize).cloned().map(|info| (info, p3)));
             }
         }
     }
-    v
+    (v, src)
 }
 
 fn left_panel(s: &mut SketchSession, ui: &mut Ui) {
@@ -2024,9 +1897,17 @@ fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
             let hit = s
                 .projected
                 .iter()
-                .find(|pl| pl.windows(2).any(|w| seg_dist(q, w[0], w[1]) < tol))
-                .cloned();
-            if let Some(pl) = hit {
+                .position(|pl| pl.windows(2).any(|w| seg_dist(q, w[0], w[1]) < tol));
+            // exact: lines stay lines, circles facing the plane stay circles (GUI_NEEDS #14)
+            if let Some((info, samples)) = hit.and_then(|i| s.projected_src.get(i).cloned().flatten()) {
+                s.push_undo();
+                if s.sketch.project_edge(&info, Some(&samples), true).is_empty() {
+                    s.pop_undo();
+                } else {
+                    s.entity_layer.resize(s.sketch.entities.len(), None);
+                    s.resolve();
+                }
+            } else if let Some(pl) = hit.and_then(|i| s.projected.get(i).cloned()) {
                 s.push_undo();
                 let first = s.sketch.points.len() as u32;
                 let mut prev = None;

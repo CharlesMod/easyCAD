@@ -61,6 +61,21 @@ today (adapter or limitation) and what would replace it.
 13. ~~Editing helpers~~ — done by the engine (`sketch_edit`): `trim`, `split_at`,
     `fillet_corner`, `remove_entities` → `Remap`.
 14. ~~Project~~ — done by the engine: `Sketch::project_edge(&EdgeInfo, samples, construction)`.
+21. **Offset of line–arc chains is under-determined.** On the sample board DXF
+    (`sample::board_dxf()`, layer BoardOutLine: 4 lines + 4 r3 corner arcs, fully
+    constrained, 52 vars / rank 52), `Sketch::offset_chain(EntityId(0),
+    "clearance + wall")` adds 16 variables and 16 equations but the rank grows by
+    only 7: 9 DOF and `OverConstrained` (redundant). Pinning each tangent joint on
+    the radial through the source joint (`PointOnLine`) still leaves 1 DOF with 9
+    redundant equations. The GUI uses `offset_chain` (native `Constraint::Offset`)
+    for line-only chains and circles and keeps its own offset (point-line
+    distances, radial lines at tangent joints; 0 DOF) for chains with arcs.
+    Also: `chain_from` follows shared points / `Coincident` only, so DXF loops
+    with separate equal end points need the GUI to weld them first
+    (`SketchSession::weld_ends`); and offsets inherit the source's construction
+    flag, so offsetting a DXF reference makes construction geometry (the GUI
+    clears it: the offset is the profile).
+
 ## Drawings
 
 15. **View orbit.** "Drag inside the view with Shift+MMB" from the mock is not
