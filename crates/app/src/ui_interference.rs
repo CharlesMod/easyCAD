@@ -19,7 +19,7 @@ pub struct InterferenceUi {
     pub report: Option<InterferenceReport>,
     /// The overlap solid of each pair (GUI_NEEDS #19), meshed off the UI thread.
     pub overlaps: Vec<Option<Arc<easycad_model::occt::Mesh>>>,
-    pub job: Option<Receiver<(InterferenceReport, Vec<Option<Arc<easycad_model::occt::Mesh>>>)>>,
+    pub job: Option<Receiver<Job>>,
     /// Highlighted pair (index into `report.pairs`); `None` highlights every pair.
     pub sel: Option<usize>,
     /// Model id the report was computed on.
@@ -84,7 +84,7 @@ impl EasyCadApp {
     }
 }
 
-type Job = (InterferenceReport, Vec<Option<Arc<easycad_model::occt::Mesh>>>);
+pub type Job = (InterferenceReport, Vec<Option<Arc<easycad_model::occt::Mesh>>>);
 
 fn spawn(m: Arc<Output>, include_reference: bool) -> Receiver<Job> {
     let (tx, rx) = channel();
