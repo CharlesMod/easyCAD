@@ -115,6 +115,9 @@ pub struct CaseworkApp {
     pub pending_cycle: i32,
     /// A text field had keyboard focus this frame.
     pub typing: bool,
+    /// The body whose face a new sketch was placed on, and once committed the
+    /// sketch's id: the default target of an Extrude / Revolve on that sketch.
+    pub sketch_body: Option<(Option<casework_model::feature::SketchId>, BodyId)>,
 }
 
 impl CaseworkApp {
@@ -181,6 +184,7 @@ impl CaseworkApp {
             state_dump: crate::e2e_state::StateDump::from_env(),
             pending_cycle: 0,
             typing: false,
+            sketch_body: None,
         }
     }
 
@@ -531,7 +535,15 @@ impl CaseworkApp {
     pub fn open_dialog(&mut self, kind: DialogKind) {
         let cx = self.dialog_cx_data();
         match Dialog::new(kind, &cx, self.model.as_deref(), &self.selection) {
-            Ok(d) => {
+            Ok(mut d) => {
+                if let (crate::dialogs::Body::Extrude(e), Some((Some(sk), body))) =
+                    (&mut d.body, self.sketch_body)
+                {
+                    let alive = self.model.as_ref().is_some_and(|m| m.meshed(body).is_some());
+                    if e.target.is_none() && e.sketch == Some(sk) && alive {
+                        e.target = Some(body);
+                    }
+                }
                 if let Some(f) = d.filter() {
                     self.filter = f;
                 }
@@ -602,10 +614,17 @@ impl CaseworkApp {
                 .sketch(id)
                 .cloned()
                 .map(|s| SketchSession::edit(id, s, &self.doc.data)),
-            None => Some(SketchSession::new_on(
-                self.sketch_plane_from_selection(),
-                &self.doc.data,
-            )),
+            None => {
+                self.sketch_body = self
+                    .selection
+                    .iter()
+                    .find(|k| matches!(k.kind, crate::pickstack::PickKind::Face(_)))
+                    .map(|k| (None, k.body));
+                Some(SketchSession::new_on(
+                    self.sketch_plane_from_selection(),
+                    &self.doc.data,
+                ))
+            }
         };
         if let Some(s) = s {
             self.dialog = None;
@@ -640,7 +659,16 @@ impl CaseworkApp {
         let mode = std::mem::replace(&mut self.mode, Mode::Model);
         if let Mode::Sketch(s) = mode {
             match s.commit(&mut self.doc) {
-                Ok(Some(label)) => self.toast(label),
+                Ok(Some(label)) => {
+                    // the face the sketch was placed on has been used up; its body
+                    // stays the default target of an extrude on this sketch
+                    self.selection.clear();
+                    if s.id.is_none() {
+                        let new = self.doc.data.sketches.last().map(|s| s.id);
+                        self.sketch_body = self.sketch_body.map(|(_, b)| (new, b));
+                    }
+                    self.toast(label)
+                }
                 Ok(None) => {}
                 Err(e) => self.warn(e),
             }

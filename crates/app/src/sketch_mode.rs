@@ -2134,12 +2134,13 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                     crate::widgets::eval(w_txt.trim_start_matches('='), &s.values).unwrap_or(val);
                 let h =
                     crate::widgets::eval(h_txt.trim_start_matches('='), &s.values).unwrap_or(val);
-                let sgn = (s.cursor - a.0).signum();
-                let b = a.0
-                    + DVec2::new(
-                        w * if sgn.x == 0.0 { 1.0 } else { sgn.x },
-                        h * if sgn.y == 0.0 { 1.0 } else { sgn.y },
-                    );
+                // The rectangle grows toward the cursor's quadrant; a cursor still
+                // within a few pixels of the (snapped) corner means +x / +y, not the
+                // sign of a sub-pixel snap residue.
+                let tol = 4.0 / s.scale.max(1e-6) as f64;
+                let d = s.cursor - a.0;
+                let dir = |v: f64| if v < -tol { -1.0 } else { 1.0 };
+                let b = a.0 + DVec2::new(w * dir(d.x), h * dir(d.y));
                 s.push_undo();
                 let l = s.sketch.rect(a.0.min(b), a.0.max(b));
                 s.entity_layer.resize(s.sketch.entities.len(), None);

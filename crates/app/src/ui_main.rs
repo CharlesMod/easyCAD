@@ -1159,6 +1159,16 @@ fn history(app: &mut CaseworkApp, ui: &mut Ui) {
                                     });
                                 }
                             }
+                            // a feature was added (or the file changed): show the
+                            // newest chip instead of leaving it off to the right
+                            let key = egui::Id::unique("history_len");
+                            let last = ui.data(|d| d.get_temp::<usize>(key));
+                            if last != Some(n) {
+                                ui.data_mut(|d| d.insert_temp(key, n));
+                                if last.is_some_and(|l| n > l) {
+                                    ui.scroll_to_cursor(Some(egui::Align::Max));
+                                }
+                            }
                         });
                     });
                 if let Some(i) = click {
@@ -1320,13 +1330,18 @@ fn toasts(app: &mut CaseworkApp, ui: &mut Ui) {
     if app.toasts.is_empty() {
         return;
     }
+    // stacked upward from just above the viewport's display-mode bar
     let screen = ui.ctx().content_rect();
+    let vp = app.viewport_rect;
+    let anchor = if vp.is_positive() && matches!(app.mode, crate::app::Mode::Model) {
+        egui::pos2(vp.center().x, vp.bottom() - 62.0)
+    } else {
+        egui::pos2(screen.center().x, screen.bottom() - 70.0)
+    };
     egui::Area::new(egui::Id::unique("toasts"))
         .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(
-            screen.center().x - 160.0,
-            screen.bottom() - 120.0,
-        ))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(anchor)
         .show(ui.ctx(), |ui| {
             for t in &app.toasts {
                 Frame::new()

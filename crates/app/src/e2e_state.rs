@@ -75,6 +75,7 @@ fn dialog(app: &CaseworkApp) -> Value {
                 "sketch": e.sketch.map(|s| s.0),
                 "distance": e.distance.text,
                 "op": format!("{:?}", e.op),
+                "target": e.target.and_then(|b| app.model.as_ref()?.body(b).map(|b| b.name.clone())),
             });
         }
         _ => {}
@@ -87,6 +88,10 @@ fn mode(app: &CaseworkApp) -> Value {
         Mode::Model => json!({ "name": "model" }),
         Mode::Sketch(s) => json!({
             "name": "sketch",
+            "plane": s.plane_name(),
+            "bbox": sketch_bbox(&s.sketch),
+            "selection": s.selection.len(),
+            "view": [s.center.x, s.center.y, s.scale as f64],
             "sketch": s.sketch.name,
             "tool": format!("{:?}", s.tool),
             "entities": s.sketch.entities.iter().filter(|e| !e.construction).count(),
@@ -107,6 +112,21 @@ fn mode(app: &CaseworkApp) -> Value {
             "computed": d.result.is_some(),
         }),
     }
+}
+
+/// Bounding box [min x, min y, max x, max y] of the non-construction geometry.
+fn sketch_bbox(s: &casework_model::sketch::Sketch) -> Option<[f64; 4]> {
+    let mut b: Option<[f64; 4]> = None;
+    for e in s.entities.iter().filter(|e| !e.construction) {
+        for p in crate::sketch_mode::geom_points(&e.geom) {
+            let q = s.points[p.0 as usize];
+            b = Some(match b {
+                None => [q.x, q.y, q.x, q.y],
+                Some(b) => [b[0].min(q.x), b[1].min(q.y), b[2].max(q.x), b[3].max(q.y)],
+            });
+        }
+    }
+    b.map(|b| b.map(|v| (v * 100.0).round() / 100.0))
 }
 
 pub fn summary(app: &CaseworkApp) -> Value {
@@ -143,6 +163,7 @@ pub fn summary(app: &CaseworkApp) -> Value {
             json!({ "name": f.name, "kind": f.kind.label(), "status": st })
         }).collect::<Vec<_>>(),
         "bodies": m.map(|m| m.bodies.iter().map(|b| b.body.name.clone()).collect::<Vec<_>>()),
+        "hidden": m.map(|m| m.bodies.iter().filter(|b| !app.body_visible(b.body.id)).map(|b| b.body.name.clone()).collect::<Vec<_>>()),
         "model_id": m.map(|m| m.id),
         "regenerating": app.regenerating(),
         "mode": mode(app),
