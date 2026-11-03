@@ -1268,6 +1268,7 @@ pub fn constraint_entities(c: &Constraint) -> Vec<EntityId> {
         | Midpoint(_, e)
         | Symmetric(_, _, e)
         | PointLineDistance(_, e, _) => vec![*e],
+        Offset { source, target, .. } => source.iter().chain(target).copied().collect(),
         _ => vec![],
     }
 }
@@ -1299,6 +1300,11 @@ fn map_constraint(
         Radius(x, d) => Radius(e(*x)?, d.clone()),
         Diameter(x, d) => Diameter(e(*x)?, d.clone()),
         Angle(a, b, d) => Angle(e(*a)?, e(*b)?, d.clone()),
+        Offset { source, target, distance } => Offset {
+            source: source.iter().map(|x| e(*x)).collect::<Option<Vec<_>>>()?,
+            target: target.iter().map(|x| e(*x)).collect::<Option<Vec<_>>>()?,
+            distance: distance.clone(),
+        },
     })
 }
 
