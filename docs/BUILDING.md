@@ -51,4 +51,4 @@ Reset the Docker caches with `docker volume rm $(docker volume ls -q | grep easy
 ```bash
 cargo run -p easycad --release -- --sample
 ```
-Needs cmake and a C++17 compiler; the first build compiles OpenCascade (~20 min).
+Needs cmake and a C++17 compiler; the first build compiles OpenCascade (~20 min). Another checkout (a git worktree) can reuse that build: `EASYCAD_OCCT_DIR=<first checkout>/target/OCCT` (the directory holding `lib/` and `include/`) skips the OCCT build.

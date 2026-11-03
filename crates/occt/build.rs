@@ -10,8 +10,16 @@ const OCCT_LIBS: &[&str] = &[
 ];
 
 fn main() {
-    occt_sys::build_occt();
-    let root = occt_sys::occt_path();
+    // EASYCAD_OCCT_DIR: an OCCT install (lib/, include/) built by another checkout,
+    // so a new worktree links against it instead of rebuilding OCCT (~20 min)
+    println!("cargo:rerun-if-env-changed=EASYCAD_OCCT_DIR");
+    let root = match std::env::var_os("EASYCAD_OCCT_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            occt_sys::build_occt();
+            occt_sys::occt_path()
+        }
+    };
     let lib_dir = root.join("lib");
     let inc_dir = root.join("include");
 
