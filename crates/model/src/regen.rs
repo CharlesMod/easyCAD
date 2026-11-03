@@ -17,7 +17,7 @@ use crate::feature::*;
 use crate::geom::{Plane, Profile, Segment2};
 use crate::library::{local_mate, place, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
-use crate::select::{resolve_edges, resolve_faces};
+use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
 use crate::sketch::{segment_point, Sketch, SolveReport};
 
 /// Geometry of a body plus its lazily computed display mesh.
@@ -93,6 +93,18 @@ pub enum FeatureStatus {
     Warning(String),
     /// Not applied; the model continues from the previous state.
     Error(String),
+    /// Not applied: a stored face/edge reference no longer matches confidently.
+    /// `best_candidate` can be accepted with `Document::accept_candidate`.
+    Unresolved(Box<Unresolved>),
+}
+
+/// A stored reference that no longer matches confidently.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Unresolved {
+    pub selector: Selector,
+    pub best_candidate: Option<Selector>,
+    /// Mismatch of the best candidate (≤ 1 would have been accepted).
+    pub score: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -165,18 +177,44 @@ impl Default for Regenerator {
 }
 
 #[derive(Debug)]
-struct Fail(String);
+struct Fail {
+    msg: String,
+    unresolved: Option<Box<Unresolved>>,
+}
 
-impl<E: std::fmt::Display> From<E> for Fail {
-    fn from(e: E) -> Self {
-        Fail(e.to_string())
+impl Fail {
+    fn msg(m: impl Into<String>) -> Self {
+        Fail { msg: m.into(), unresolved: None }
+    }
+}
+
+macro_rules! fail_from {
+    ($($t:ty),*) => {$(
+        impl From<$t> for Fail {
+            fn from(e: $t) -> Self {
+                Fail::msg(e.to_string())
+            }
+        }
+    )*};
+}
+fail_from!(occt::Error, crate::sketch::SketchError, crate::library::LibraryError, crate::dxf::DxfError, crate::params::ExprError);
+
+impl From<SelectError> for Fail {
+    fn from(e: SelectError) -> Self {
+        let msg = e.to_string();
+        match e {
+            SelectError::Unresolved { selector, best, score, .. } => {
+                Fail { msg, unresolved: Some(Box::new(Unresolved { selector: *selector, best_candidate: best.map(|b| *b), score })) }
+            }
+            SelectError::Kernel(_) => Fail::msg(msg),
+        }
     }
 }
 
 type R<T> = Result<T, Fail>;
 
 fn fail<T>(m: impl Into<String>) -> R<T> {
-    Err(Fail(m.into()))
+    Err(Fail::msg(m))
 }
 
 fn collect_idents(v: &serde_json::Value, out: &mut BTreeSet<String>) {
@@ -286,12 +324,15 @@ impl Regenerator {
                             cached: false,
                         },
                     ),
-                    Err(Fail(e)) => {
-                        let e = match &param_err {
-                            Some(pe) => format!("{e} (parameters: {pe})"),
-                            None => e,
+                    Err(Fail { msg, unresolved }) => {
+                        let status = match unresolved {
+                            Some(u) => FeatureStatus::Unresolved(u),
+                            None => FeatureStatus::Error(match &param_err {
+                                Some(pe) => format!("{msg} (parameters: {pe})"),
+                                None => msg,
+                            }),
                         };
-                        ((*state).clone(), FeatureReport { feature: f.id, status: FeatureStatus::Error(e), dressup, sketch, cached: false })
+                        ((*state).clone(), FeatureReport { feature: f.id, status, dressup, sketch, cached: false })
                     }
                 }
             };
@@ -379,18 +420,18 @@ fn tidy(s: Shape) -> Shape {
 
 impl Ctx<'_> {
     fn ev(&self, e: &Expr) -> R<f64> {
-        e.eval(self.vals).map_err(|err| Fail(format!("`{}`: {err}", e.0)))
+        e.eval(self.vals).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
     }
 
     fn target(&self, st: &ModelState, id: Option<BodyId>) -> R<usize> {
         match id {
-            Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail(format!("body {id:?} does not exist"))),
-            None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail("there is no solid body yet".into())),
+            Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail::msg(format!("body {id:?} does not exist"))),
+            None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail::msg("there is no solid body yet")),
         }
     }
 
     fn sketch(&mut self, id: SketchId) -> R<Sketch> {
-        let mut sk = self.doc.sketch(id).cloned().ok_or_else(|| Fail(format!("sketch {id:?} does not exist")))?;
+        let mut sk = self.doc.sketch(id).cloned().ok_or_else(|| Fail::msg(format!("sketch {id:?} does not exist")))?;
         if !sk.constraints.is_empty() {
             let rep = sk.solve(self.vals)?;
             let ok = rep.converged;
@@ -410,11 +451,11 @@ impl Ctx<'_> {
         }
         let picked = match sel {
             ProfileSel::All => all,
-            ProfileSel::Indices(ix) => ix.iter().map(|i| all.get(*i).cloned().ok_or_else(|| Fail(format!("profile {i} does not exist")))).collect::<R<_>>()?,
+            ProfileSel::Indices(ix) => ix.iter().map(|i| all.get(*i).cloned().ok_or_else(|| Fail::msg(format!("profile {i} does not exist")))).collect::<R<_>>()?,
             ProfileSel::Containing(pts) => {
                 let mut v = Vec::new();
                 for p in pts {
-                    let hit = all.iter().find(|pr| profile_contains(pr, *p)).ok_or_else(|| Fail(format!("no profile contains {p:?}")))?;
+                    let hit = all.iter().find(|pr| profile_contains(pr, *p)).ok_or_else(|| Fail::msg(format!("no profile contains {p:?}")))?;
                     if !v.contains(hit) {
                         v.push(hit.clone());
                     }
@@ -582,7 +623,7 @@ impl Ctx<'_> {
                 st.bodies.push(Body { id: BodyId::of(fid), name: new_name.clone(), reference: false, part: None, geom: BodyGeom::new(above) });
             }
             FeatureKind::ImportStep { import, reference, translate } => {
-                let imp = self.doc.import(*import).ok_or_else(|| Fail(format!("import {import:?} missing")))?;
+                let imp = self.doc.import(*import).ok_or_else(|| Fail::msg(format!("import {import:?} missing")))?;
                 let mut s = (*self.step_shape(&imp.blob)?).clone();
                 if *translate != DVec3::ZERO {
                     s = s.translated(*translate)?;
@@ -651,7 +692,7 @@ impl Ctx<'_> {
         if let Some(s) = self.regen.imports.get(blob) {
             return Ok(s.clone());
         }
-        let data = self.blobs.get(blob).ok_or_else(|| Fail(format!("blob {blob} is missing")))?;
+        let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
         let s = Arc::new(Shape::read_step_str(&String::from_utf8_lossy(&data))?);
         self.regen.imports.insert(blob.to_string(), s.clone());
         Ok(s)
@@ -661,7 +702,7 @@ impl Ctx<'_> {
         if let Some(d) = self.regen.dxfs.get(blob) {
             return Ok(d.clone());
         }
-        let data = self.blobs.get(blob).ok_or_else(|| Fail(format!("blob {blob} is missing")))?;
+        let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
         let d = Arc::new(DxfDrawing::parse(&String::from_utf8_lossy(&data))?);
         self.regen.dxfs.insert(blob.to_string(), d.clone());
         Ok(d)
@@ -715,7 +756,7 @@ impl Ctx<'_> {
 
     fn placement(&self, st: &ModelState, target: Option<usize>, pl: &PlacementRef) -> R<(DVec3, DVec3)> {
         let shape = || -> R<&Shape> {
-            target.map(|i| st.bodies[i].shape()).ok_or_else(|| Fail("placement needs a target body".into()))
+            target.map(|i| st.bodies[i].shape()).ok_or_else(|| Fail::msg("placement needs a target body"))
         };
         Ok(match pl {
             PlacementRef::Explicit { origin, axis } => (*origin, axis.normalize_or_zero()),
@@ -749,7 +790,7 @@ impl Ctx<'_> {
     fn pcb_points(&mut self, st: &ModelState, source: &PcbSource, plane: &Plane) -> R<Vec<DVec2>> {
         match source {
             PcbSource::Dxf { import, layers, min_dia, max_dia, offset } => {
-                let imp = self.doc.import(*import).ok_or_else(|| Fail("DXF import missing".into()))?;
+                let imp = self.doc.import(*import).ok_or_else(|| Fail::msg("DXF import missing"))?;
                 let d = self.dxf(&imp.blob.clone())?;
                 let ls: Vec<&str> = layers.iter().map(|s| s.as_str()).collect();
                 Ok(d.circles(&ls)
@@ -766,7 +807,7 @@ impl Ctx<'_> {
                 let shape = match placed {
                     Some(b) => b.shape().clone(),
                     None => {
-                        let imp = self.doc.import(*import).ok_or_else(|| Fail("STEP import missing".into()))?;
+                        let imp = self.doc.import(*import).ok_or_else(|| Fail::msg("STEP import missing"))?;
                         (*self.step_shape(&imp.blob.clone())?).clone()
                     }
                 };
@@ -776,7 +817,7 @@ impl Ctx<'_> {
                     .iter()
                     .filter(|f| f.kind == SurfaceKind::Plane && f.normal.dot(n).abs() > 0.999)
                     .max_by(|a, b| a.area.total_cmp(&b.area))
-                    .ok_or_else(|| Fail("no board face parallel to the boss plane".into()))?;
+                    .ok_or_else(|| Fail::msg("no board face parallel to the boss plane"))?;
                 let edges = shape.edges()?;
                 let mut pts: Vec<DVec2> = Vec::new();
                 for ei in shape.face_edges(board.index)? {
@@ -869,7 +910,7 @@ impl Ctx<'_> {
                 // Group transformed tools per (target, op) and apply each group once.
                 let mut groups: Vec<(BodyId, BoolOp, Vec<Shape>)> = Vec::new();
                 for f in fs {
-                    let ops = st.tools.get(f).cloned().ok_or_else(|| Fail(format!("feature {f:?} has no tool bodies to pattern (only extrude, revolve, rib, boss, hole and pattern features can be patterned)")))?;
+                    let ops = st.tools.get(f).cloned().ok_or_else(|| Fail::msg(format!("feature {f:?} has no tool bodies to pattern (only extrude, revolve, rib, boss, hole and pattern features can be patterned)")))?;
                     for op in ops {
                         let gi = match groups.iter().position(|g| g.0 == op.target && g.1 == op.op && op.op != BoolOp::NewBody) {
                             Some(g) => g,

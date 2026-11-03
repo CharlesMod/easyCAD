@@ -229,3 +229,58 @@ fn revolve_draft_chamfer_circular_pattern() {
     let v = vol(&mut doc, BodyId::of(tube));
     assert!((v - (tv + 6.0 * std::f64::consts::PI * 0.25 * 3.0)).abs() < 1e-4, "{v}");
 }
+
+#[test]
+fn selector_threshold_reports_unresolved_after_drastic_edit() {
+    use casework_model::select::Selector;
+    let (mut doc, body, block) = block_doc();
+    // pick the +X side face in the viewport (a stored hint, not a semantic rule)
+    let face = {
+        let out = doc.regenerate();
+        let faces = out.body_by_id(body).unwrap().shape().faces().unwrap();
+        faces.into_iter().find(|f| f.normal.x > 0.99).unwrap()
+    };
+    let hint = FaceSelector::from_pick(&face);
+    let shell = doc.add_feature("Shell", FeatureKind::Shell { body: None, open_faces: vec![hint.clone()], thickness: 1.0.into(), outward: false });
+    assert_eq!(doc.regenerate().report(shell).unwrap().status, FeatureStatus::Ok);
+
+    // a dimension edit moves the face (w 40 → 50): still resolves
+    doc.set_param("w", "50").unwrap();
+    assert_eq!(doc.regenerate().report(shell).unwrap().status, FeatureStatus::Ok);
+
+    // drastic edit: the outline becomes a circle, so the planar side face is gone
+    let sk = match &doc.data.feature(block).unwrap().kind {
+        FeatureKind::Extrude { sketch, .. } => *sketch,
+        _ => unreachable!(),
+    };
+    doc.edit("Circle outline", |d| {
+        let s = d.sketch_mut(sk).unwrap();
+        *s = Sketch::new("S", Plane::XY);
+        s.circle(DVec2::new(20.0, 15.0), 15.0);
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    let st = doc.regenerate().report(shell).unwrap().status.clone();
+    let FeatureStatus::Unresolved(u) = st else { panic!("expected Unresolved, got {st:?}") };
+    let casework_model::regen::Unresolved { selector, best_candidate, score } = *u;
+    assert_eq!(selector, Selector::Face(hint));
+    assert!(score > 1.0);
+    let best = best_candidate.expect("a candidate is offered");
+    assert!(matches!(best, Selector::Face(FaceSelector::Hint { .. })));
+    // the shell was not applied to a wrong face: the body is still the solid cylinder
+    let v = doc.regenerate().body_by_id(body).unwrap().shape().volume().unwrap();
+    // (solid cylinder minus the r2 top fillet; a shell would remove far more)
+    let solid = std::f64::consts::PI * 225.0 * 12.5;
+    assert!(v < solid && v > solid - 100.0, "{v}");
+
+    // accepting the candidate re-binds the reference and the feature applies
+    assert!(doc.accept_candidate(shell, &selector, &best));
+    assert_eq!(doc.undo_label(), Some("Re-pick reference"));
+    let out = doc.regenerate();
+    assert_eq!(out.report(shell).unwrap().status, FeatureStatus::Ok, "{:?}", out.report(shell));
+    assert!(out.body_by_id(body).unwrap().shape().volume().unwrap() < v);
+
+    // a semantic selector that matches nothing is also Unresolved (no candidate)
+    let f = doc.add_feature("No such face", FeatureKind::Shell { body: None, open_faces: vec![FaceSelector::AllWithNormal { normal: DVec3::X }], thickness: 1.0.into(), outward: false });
+    assert!(matches!(doc.regenerate().report(f).unwrap().status, FeatureStatus::Unresolved(ref u) if u.best_candidate.is_none()));
+}

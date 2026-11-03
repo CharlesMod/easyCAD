@@ -148,10 +148,10 @@ verified on load.
 
 ## Known limitations
 
-- Topological naming is geometric. A `Hint` selector always takes the best match,
-  so after drastic edits it can land on the wrong face or edge. Semantic selectors
-  (`Extreme`, `Parallel`, `OfFace`, ...) are more robust; there is no "could not
-  find" threshold yet.
+- Topological naming is geometric. `Hint` selectors accept the best candidate only
+  if it is within 25 % of the part diagonal, within 20° of the stored
+  normal/tangent, and of the same surface/curve type. Otherwise the feature reports
+  `FeatureStatus::Unresolved`.
 - OCCT's limits apply. Shell fails when an inward thickness exceeds a concave
   fillet radius, and draft on faces adjacent to fillets can fail. Both return
   `FeatureStatus::Error`; nothing panics.
@@ -171,3 +171,15 @@ verified on load.
 - The solver uses a numeric Jacobian, which is fine up to a few hundred variables.
   Arc–arc tangency picks internal or external from the configuration at solve start.
 - 2D drawings are not implemented yet (phase 2).
+
+## Changelog for GUI
+
+- **Selector confidence (breaking).** `FaceSelector::Hint` and `EdgeSelector::Hint`
+  gained `kind: Option<FaceKind / EdgeKind>`. It is serde-defaulted, so old files
+  load; build hints with `from_pick`. `SelectError::NoMatch` was replaced by
+  `SelectError::Unresolved { selector, best, best_index, score }`. There is a new
+  `FeatureStatus::Unresolved(Box<Unresolved { selector, best_candidate, score }>)`:
+  show it orange with "re-pick", and accept the candidate with
+  `Document::accept_candidate(feature, &selector, &best_candidate)` (undoable,
+  label "Re-pick reference"). `select::replace_selector` does the same on any
+  value. A score ≤ 1 is accepted.

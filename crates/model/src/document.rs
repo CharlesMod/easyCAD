@@ -387,6 +387,20 @@ impl Document {
         })
     }
 
+    /// Accept the best candidate of an `Unresolved` feature: replaces `old` by `new`
+    /// inside the feature (undoable). Returns false if the selector was not found.
+    pub fn accept_candidate(&mut self, feature: FeatureId, old: &crate::select::Selector, new: &crate::select::Selector) -> bool {
+        self.edit("Re-pick reference", |d| {
+            let f = d.feature_mut(feature).ok_or(())?;
+            if crate::select::replace_selector(f, old, new) > 0 {
+                Ok(())
+            } else {
+                Err(())
+            }
+        })
+        .is_ok()
+    }
+
     // ---------------------------------------------------------------- regen
 
     /// Regenerate (cached per feature prefix). Cheap when nothing changed.
