@@ -1587,3 +1587,203 @@ impl Document {
         }
     }
 }
+
+// ---------------------------------------------------------------- linked components
+
+/// State of a linked component against its file.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum LinkStatus {
+    NotLinked,
+    UpToDate,
+    /// The file changed since the content was last copied in.
+    OutOfDate,
+    /// The file cannot be read (path, reason).
+    Missing(String),
+}
+
+/// `target` relative to `base` (both folders), with `..` where needed.
+pub fn relative_path(base: &std::path::Path, target: &std::path::Path) -> String {
+    use std::path::Component as C;
+    let abs = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (b, t) = (abs(base), abs(target));
+    let bc: Vec<C> = b.components().collect();
+    let tc: Vec<C> = t.components().collect();
+    let common = bc.iter().zip(&tc).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = vec!["..".into(); bc.len() - common];
+    parts.extend(tc[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// Read a `.cwk` folder for linking: its data, the hash of its `doc.json`, blobs.
+fn read_linked(dir: &std::path::Path) -> Result<(DocData, String, Vec<Vec<u8>>), DocError> {
+    let json = std::fs::read_to_string(dir.join(crate::document::DOC_FILE))?;
+    let hash = crate::document::sha256_hex(json.as_bytes());
+    let src = Document::load_from_dir(dir)?;
+    if !src.data.components.is_empty() || !src.data.occurrences.is_empty() {
+        // TODO: link files that are assemblies themselves (remap their component ids).
+        return Err(DocError::Other("linking a file that is itself an assembly is not supported yet; link its parts".into()));
+    }
+    let blobs = src.blob_refs().iter().filter_map(|h| src.blobs.get(h)).map(|b| (*b).clone()).collect();
+    Ok((src.data, hash, blobs))
+}
+
+fn copy_linked(c: &mut Component, src: &DocData) {
+    c.params = src.params.clone();
+    c.sketches = src.sketches.clone();
+    c.features = src.features.clone();
+    c.imports = src.imports.clone();
+}
+
+impl Document {
+    /// Link an external `.cwk` folder as a locked component (its root content is
+    /// copied in as a cache; its params become the component's local params). The
+    /// path is stored relative to `host_dir` (the folder the host document is saved
+    /// in). Place it with `add_occurrence`.
+    pub fn link_component(&mut self, cwk: &std::path::Path, host_dir: &std::path::Path) -> Result<ComponentId, DocError> {
+        let (src, hash, blobs) = read_linked(cwk)?;
+        for b in blobs {
+            self.blobs.put(b);
+        }
+        let path = relative_path(host_dir, cwk);
+        self.edit(&format!("Link {}", src.name), |d| {
+            let id = ComponentId(d.alloc());
+            let mut c = Component { id, name: src.name.clone(), source: ComponentSource::Linked { path, hash }, locked: true, ..Default::default() };
+            copy_linked(&mut c, &src);
+            // ids inside the linked content stay unique against later allocations
+            d.next_id = d.next_id.max(src.next_id);
+            d.components.push(c);
+            Ok::<_, DocError>(id)
+        })
+    }
+
+    pub fn link_status(&self, id: ComponentId, host_dir: &std::path::Path) -> LinkStatus {
+        let Some(ComponentSource::Linked { path, hash }) = self.data.component(id).map(|c| &c.source) else { return LinkStatus::NotLinked };
+        let p = host_dir.join(path);
+        match std::fs::read_to_string(p.join(crate::document::DOC_FILE)) {
+            Ok(j) if crate::document::sha256_hex(j.as_bytes()) == *hash => LinkStatus::UpToDate,
+            Ok(_) => LinkStatus::OutOfDate,
+            Err(e) => LinkStatus::Missing(format!("{}: {e}", p.display())),
+        }
+    }
+
+    /// Re-copy a linked component's content from its file (undoable).
+    pub fn update_link(&mut self, id: ComponentId, host_dir: &std::path::Path) -> Result<(), DocError> {
+        let Some(ComponentSource::Linked { path, .. }) = self.data.component(id).map(|c| c.source.clone()) else {
+            return Err(DocError::Other("not a linked component".into()));
+        };
+        let (src, hash, blobs) = read_linked(&host_dir.join(&path))?;
+        for b in blobs {
+            self.blobs.put(b);
+        }
+        self.edit(&format!("Update link {}", src.name), |d| {
+            d.next_id = d.next_id.max(src.next_id);
+            let c = d.component_mut(id).ok_or_else(|| DocError::Other("no such component".into()))?;
+            copy_linked(c, &src);
+            c.source = ComponentSource::Linked { path, hash };
+            Ok(())
+        })
+    }
+
+    /// Break a link: the cached content becomes a normal, editable component.
+    pub fn break_link(&mut self, id: ComponentId) -> Result<(), DocError> {
+        self.edit("Break link", |d| {
+            let c = d.component_mut(id).ok_or_else(|| DocError::Other("no such component".into()))?;
+            if !matches!(c.source, ComponentSource::Linked { .. }) {
+                return Err(DocError::Other("not a linked component".into()));
+            }
+            c.source = ComponentSource::Native;
+            c.locked = false;
+            Ok(())
+        })
+    }
+
+    // ------------------------------------------------------------ structure helpers
+
+    /// Turn a flat document into an assembly: the root's sketches, features and
+    /// imports move into a new component (document params stay shared), placed once
+    /// at the origin. Root feature ids are kept.
+    pub fn move_root_into_component(&mut self, name: &str) -> Result<(ComponentId, OccurrenceId), DocError> {
+        self.edit(&format!("Make component {name}"), |d| {
+            if d.features.iter().any(|f| matches!(f.kind, FeatureKind::ContextRef { .. })) {
+                return Err(DocError::Other("the root has in-context references; move them first".into()));
+            }
+            let id = ComponentId(d.alloc());
+            let c = Component {
+                id,
+                name: name.into(),
+                sketches: std::mem::take(&mut d.sketches),
+                features: std::mem::take(&mut d.features),
+                imports: std::mem::take(&mut d.imports),
+                ..Default::default()
+            };
+            d.components.push(c);
+            let occ = OccurrenceId(d.alloc());
+            d.occurrences.push(Occurrence { id: occ, component: id, name: format!("{name}:1"), transform: Transform::IDENTITY, visible: true, grounded: true, explode: DVec3::ZERO, in_bom: true });
+            Ok((id, occ))
+        })
+    }
+
+    /// Split / PartingJoint output as components: for the `Split` or `PartingJoint`
+    /// feature `feature` of the component at `source`, make one new component per
+    /// half (named after the bodies, e.g. "Body" and "Lid"), each built in context
+    /// from that half (`ContextRef`, so they follow every edit of the source), placed
+    /// in the root where the source is. The source occurrence is hidden and left out
+    /// of the BOM (it is the design master). `names` overrides the component names.
+    /// Returns (lower, upper).
+    pub fn split_to_components(&mut self, source: &[OccurrenceId], feature: FeatureId, names: Option<(&str, &str)>) -> Result<[(ComponentId, OccurrenceId); 2], DocError> {
+        let err = |m: String| DocError::Other(m);
+        if source.is_empty() {
+            return Err(err("the source must be an occurrence; use move_root_into_component first".into()));
+        }
+        let comp = self.data.component_at(source).map_err(err)?;
+        let world = self.data.world_transform(source).map_err(err)?;
+        let f = self.data.component(comp).and_then(|c| c.features.iter().find(|f| f.id == feature)).cloned().ok_or_else(|| err(format!("feature {feature:?} is not in that component")))?;
+        let target = match &f.kind {
+            FeatureKind::Split { body, .. } | FeatureKind::PartingJoint { body, .. } => *body,
+            _ => return Err(err(format!("`{}` is not a split or parting joint", f.name))),
+        };
+        let r = self.component_result(comp).ok_or_else(|| err("the source did not regenerate".into()))?;
+        if let Some(e) = r.report(feature).and_then(|rep| match &rep.status {
+            crate::regen::FeatureStatus::Error(e) => Some(e.clone()),
+            _ => None,
+        }) {
+            return Err(err(format!("`{}` failed: {e}", f.name)));
+        }
+        let upper = r.body_by_id(crate::feature::BodyId::of(feature)).ok_or_else(|| err("the split made no upper body".into()))?.name.clone();
+        let lower = match target {
+            Some(t) => r.body_by_id(t).map(|b| b.name.clone()),
+            None => r.bodies.iter().find(|b| !b.reference && b.name != upper).map(|b| b.name.clone()),
+        }
+        .ok_or_else(|| err("cannot find the lower body".into()))?;
+        let src = source.to_vec();
+        let cnames = match names {
+            Some((a, b)) => [a.to_string(), b.to_string()],
+            None => [lower.clone(), upper.clone()],
+        };
+        self.edit(&format!("Split {} into components", f.name), |d| {
+            let mut out = Vec::new();
+            for (body, cname) in [&lower, &upper].into_iter().zip(&cnames) {
+                let id = ComponentId(d.alloc());
+                let fid = FeatureId(d.alloc());
+                let feat = Feature {
+                    id: fid,
+                    name: format!("{body} (in context)"),
+                    suppressed: false,
+                    kind: FeatureKind::ContextRef { source: src.clone(), body: Some(body.clone()), op: crate::feature::BoolOp::NewBody, target: None, offset: zero(), reference: false },
+                };
+                d.components.push(Component { id, name: cname.clone(), features: vec![feat], ..Default::default() });
+                let occ = OccurrenceId(d.alloc());
+                d.occurrences.push(Occurrence { id: occ, component: id, name: format!("{cname}:1"), transform: world, visible: true, grounded: false, explode: DVec3::ZERO, in_bom: true });
+                out.push((id, occ));
+            }
+            let o = d.occurrence_mut(src[src.len() - 1]).ok_or_else(|| err("source occurrence vanished".into()))?;
+            o.visible = false;
+            o.in_bom = false;
+            Ok([out[0], out[1]])
+        })
+    }
+}

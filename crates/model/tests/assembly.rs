@@ -546,3 +546,75 @@ fn three_mf_and_stl_per_component() {
         assert!(n > 0 && b.len() == 84 + 50 * n);
     }
 }
+
+#[test]
+fn parting_joint_outputs_base_and_lid_components_in_context() {
+    let (mut doc, _) = common::enclosure_doc();
+    let joint = doc.data.features.iter().find(|f| f.name == "Joint").unwrap().id;
+    let (enc, occ) = doc.move_root_into_component("Enclosure").unwrap();
+    assert!(doc.data.features.is_empty() && doc.data.component(enc).unwrap().features.len() == 5);
+    let [(base, ob), (lid, ol)] = doc.split_to_components(&[occ], joint, Some(("Base", "Lid"))).unwrap();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let src = r.component(enc).unwrap().regen.clone();
+    let v = |c: ComponentId, r: &AssemblyResult| r.component(c).unwrap().regen.solids().map(|b| b.shape().volume().unwrap()).sum::<f64>();
+    assert!((v(base, &r) - src.body("Body").unwrap().shape().volume().unwrap()).abs() < 1e-6);
+    assert!((v(lid, &r) - src.body("Lid").unwrap().shape().volume().unwrap()).abs() < 1e-6);
+    // the master is hidden and out of the BOM; Base and Lid are made parts
+    assert!(r.instances.iter().filter(|i| i.path == vec![occ]).all(|i| !i.visible && !i.in_bom));
+    assert!(r.instances_of(&[ob]).next().unwrap().visible && r.instances_of(&[ol]).next().is_some());
+    let names: Vec<String> = doc.bom_tree().flat.iter().map(|r| r.name.clone()).collect();
+    assert_eq!(names, ["Base", "Lid"]);
+    // a parameter edit flows through the master into both halves
+    let v_lid = v(lid, &r);
+    doc.set_param("split", "18").unwrap();
+    let r = doc.regenerate_assembly().clone();
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    assert!(v(lid, &r) > v_lid * 1.02, "{} vs {v_lid}", v(lid, &r));
+    // splitting something that is not a split is refused
+    let body_f = doc.data.component(enc).unwrap().features[0].id;
+    assert!(doc.split_to_components(&[occ], body_f, None).is_err());
+}
+
+#[test]
+fn linked_component_status_update_and_break() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut part = Document::new("Knob");
+    part.set_param("t", "5").unwrap();
+    block(&mut part, ComponentId::ROOT, "Knob", ("20", "20", "t"), DVec2::ZERO);
+    let lib = dir.path().join("lib").join("Knob.cwk");
+    std::fs::create_dir_all(&lib).unwrap();
+    part.save_to_dir(&lib).unwrap();
+
+    let host_dir = dir.path().join("proj");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let mut doc = Document::new("Panel");
+    let k = doc.link_component(&lib, &host_dir).unwrap();
+    assert!(matches!(&doc.data.component(k).unwrap().source, ComponentSource::Linked { path, .. } if path == "../lib/Knob.cwk"));
+    doc.add_occurrence(ComponentId::ROOT, k, "Knob:1", Transform::IDENTITY).unwrap();
+    let vol = |doc: &mut Document| doc.component_result(k).unwrap().bodies[0].shape().volume().unwrap();
+    assert!((vol(&mut doc) - 2000.0).abs() < 5.0, "{}", vol(&mut doc));
+    assert_eq!(doc.link_status(k, &host_dir), LinkStatus::UpToDate);
+    // locked while linked
+    assert!(doc.set_component_param(k, "t", "6").is_err());
+    // the file changes: out of date until updated
+    part.set_param("t", "8").unwrap();
+    part.save_to_dir(&lib).unwrap();
+    assert_eq!(doc.link_status(k, &host_dir), LinkStatus::OutOfDate);
+    assert!((vol(&mut doc) - 2000.0).abs() < 5.0, "the cached copy is used until updated");
+    doc.update_link(k, &host_dir).unwrap();
+    assert_eq!(doc.link_status(k, &host_dir), LinkStatus::UpToDate);
+    assert!((vol(&mut doc) - 3200.0).abs() < 8.0, "{}", vol(&mut doc));
+    // the host saves and reopens without the library (embedded cache)
+    let hp = host_dir.join("Panel.cwk");
+    doc.save_to_dir(&hp).unwrap();
+    std::fs::remove_dir_all(dir.path().join("lib")).unwrap();
+    let mut back = Document::load_from_dir(&hp).unwrap();
+    assert!(matches!(back.link_status(k, &host_dir), LinkStatus::Missing(_)));
+    assert!((vol(&mut back) - 3200.0).abs() < 8.0);
+    // break the link: editable, no longer tracked
+    back.break_link(k).unwrap();
+    assert_eq!(back.link_status(k, &host_dir), LinkStatus::NotLinked);
+    back.set_component_param(k, "t", "2").unwrap();
+    assert!((vol(&mut back) - 800.0).abs() < 3.0, "{}", vol(&mut back));
+}

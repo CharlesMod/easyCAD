@@ -444,7 +444,13 @@ was not run: both need the static OCCT build and the Rust side instrumented toge
 
 ## Assemblies (`assembly`)
 
-Work in progress; see the BREAKING "Assemblies" entry in the changelog.
+Fusion-like and simpler. Everything below is in `crates/model/src/assembly.rs` and
+tested in `crates/model/tests/assembly.rs` (2-level nesting with 4 instanced screws,
+a PCB STEP reference component with sub-parts, a lid in context to the base that
+follows `wall`, a cycle error, a revolute hinge lid and a slider, interference found
+and cleared, STEP assembly export and re-import, 3MF multi-object, STL per
+component, migration of a flat document, linked files, Base/Lid from a parting
+joint). See the BREAKING "Assemblies" changelog entry for what changed for the GUI.
 
 - The root fields of `DocData` (`params`, `sketches`, `features`, `imports`) are
   the root component (`ComponentId::ROOT`). `DocData.components` holds the other
@@ -550,6 +556,29 @@ Work in progress; see the BREAKING "Assemblies" entry in the changelog.
 - Kernel: `occt::StepTree { nodes: Vec<StepNode { name, color, shape, children:
   Vec<StepLink { child, name, matrix: [f64; 12] }> }>, roots }` with
   `StepTree::read(&str)` and `to_step_string()`; `Shape::children()`.
+- **Linked `.cwk` components.** `Document::link_component(cwk_dir, host_dir)` copies
+  the file's root content (params become the component's local params, blobs are
+  copied) into a locked component with `ComponentSource::Linked { path (relative to
+  host_dir), hash (sha256 of its doc.json) }`. The copy is a cache, so the host
+  opens without the file. `link_status(id, host_dir) -> LinkStatus::{NotLinked,
+  UpToDate, OutOfDate, Missing(reason)}`, `update_link(id, host_dir)` (undoable),
+  `break_link(id)` (becomes a normal editable component). Linking a file that is
+  itself an assembly is refused (TODO).
+- **Structure helpers.** `Document::move_root_into_component(name)` turns a flat
+  document into an assembly: root sketches/features/imports move into a new
+  component placed once (grounded); params stay at the document level.
+  `Document::split_to_components(source_path, feature, names)` takes a `Split` or
+  `PartingJoint` feature of the component at `source_path` and makes two components
+  (lower, upper; e.g. `Some(("Base", "Lid"))`), each a `ContextRef` to its half, so
+  they follow every edit of the master. They are placed in the root where the
+  source is; the source occurrence is hidden and `in_bom = false`.
+
+Limits (all return clean errors or are documented here): mates move top-level
+occurrences only and solve by propagation (a closed loop of mates is checked, not
+solved; no joint limits); in-context features use the frame of their component's
+first occurrence; drawings, `Document::export` and `Document::bom()` still see the
+root component only; linked files cannot be assemblies; STEP components are
+read-only.
 
 ## File format (`.cwk`), sync-friendly
 
@@ -604,6 +633,39 @@ verified on load.
   convex radius. It errors and never crashes.
 
 ## Changelog for GUI
+
+- **Assemblies (BREAKING).** See "Assemblies" above. What moved and what did not:
+  - **Nothing moved out of `DocData`.** `params`, `sketches`, `features`,
+    `imports`, `drawings`, process fields stay where they were; they *are* the root
+    component (`ComponentId::ROOT`). Existing GUI code that edits them keeps
+    working for the root.
+  - **`DocData.format` is 2** (`FORMAT_VERSION`). New serde-defaulted fields:
+    `components: Vec<Component>`, `occurrences: Vec<Occurrence>` (the root's
+    children) and `mates: Vec<Mate>`. Format-1 files load as a root with no
+    children and are saved as format 2; builds before this change refuse format-2
+    files (`DocError::Format(2)`).
+  - **New `FeatureKind::ContextRef`** (in-context reference). Exhaustive matches on
+    `FeatureKind` need an arm; I added `ContextRef { .. } => ("CX", theme::GREEN)` in
+    `crates/app/src/ui_main.rs` (committed by the GUI worker with its own changes).
+  - **Placed components are only in `Document::regenerate_assembly()`.**
+    `Document::regenerate()` still returns the root's own bodies (unchanged for flat
+    documents; a root with `ContextRef`s regenerates through the assembly). To show an
+    assembly, draw `AssemblyResult.instances` (each `body` with its `display`
+    transform; skip `!visible`). Meshes are per body, so instances share them; pick
+    in each instance's local frame (inverse transform).
+  - **Exports and BOM.** `Document::export` and `Document::bom()` are unchanged
+    (root bodies only). For assemblies use `export_assembly(AssemblyFormat::{Step,
+    ThreeMf, StlPerComponent}, ..)` and `bom_tree()` (indented + flat, made vs
+    purchased, rolled-up quantities).
+  - **New calls** (all edits undoable): `add_component`, `add_occurrence`,
+    `edit_occurrence`, `remove_occurrence`, `edit_component` (refused on locked
+    content), `add_sketch_in`, `add_feature_in`, `set_component_param`,
+    `add_part_component`, `import_step_assembly`, `link_component`, `link_status`,
+    `update_link`, `break_link`, `move_root_into_component`, `split_to_components`,
+    `add_mate`, `edit_mate`, `solve_mates`, `interference`, `component_result`.
+  - Library parts can still be inserted with `InsertPart` features; as assembly
+    components use `add_part_component` + `add_occurrence`.
+  - `occt`: new `StepTree`/`StepNode`/`StepLink` and `Shape::children()`.
 
 - **Fractional inches (GUI_NEEDS #12a).** The parser reads `1/8"`, `3/4 in` and
   `1 1/2"` as fractional inches (previously `1/8"` was 1 ÷ 8 in).
