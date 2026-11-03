@@ -55,7 +55,7 @@ Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui
 - [ ] Sync follow-ups: read the synced parts library folder (`library.json`) in the Parts screen; reload
       `settings.json` when another computer changed it; offer "keep theirs / keep mine" for a conflict copy;
       a per-root on/off switch and a custom Documents folder in Settings.
-- [ ] Publish the Google OAuth app (Testing mode refresh tokens expire after 7 days).
+- [x] Publish the Google OAuth app (in production since 2026-11-03; branding at charlesmod.github.io/easycad-site).
 - [ ] GitHub Actions with a cached OpenCascade build.
 - [ ] macOS notarization and Windows code signing; installers.
 - [ ] Quick-start guide and shortcut reference.
