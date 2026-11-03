@@ -2,19 +2,19 @@
   "id": "pt_pan",
   "name": "Thread-forming screw for plastics, pan head",
   "standard": "(no ISO standard; PT-style thread-forming screw)",
-  "source": "Head modelled with ISO 7045 pan head dimensions (dk max, k max) for the same nominal diameter. Pilot hole from the general design guideline for thread-forming screws in ABS (about 0.8 d, see holes_metric.json).",
+  "source": "EJOT PT pan head (WN 1452), as Bossard BN 13265 / BN 20097 datasheets: head diameter dk, head height k and stock lengths for PT K20, K25, K30, K40, K50 (listed here by nominal diameter M2..M5). Pilot hole from the general design guideline for thread-forming screws in ABS (about 0.8 d, see holes_metric.json).",
   "units": "mm",
   "system": "metric",
   "generator": "screw",
   "head": "pan",
   "length": "under_head",
   "tags": ["screw", "thread forming", "self tapping", "plastic", "pt", "pan head"],
-  "todo": "TODO: head dimensions and lengths of real PT-style screws vary by manufacturer (EJOT PT, Delta PT, etc.); verify against the chosen vendor's datasheet.",
+  "todo": "Heads and lengths vary by vendor (EJOT PT, Delta PT, Wuerth); these are EJOT PT.",
   "sizes": [
-    {"size": "M2",   "thread": "M2",   "d": 2.0, "dk": 4.0,  "k": 1.6,  "lengths": [4, 5, 6, 8, 10]},
-    {"size": "M2.5", "thread": "M2.5", "d": 2.5, "dk": 5.0,  "k": 1.75, "lengths": [5, 6, 8, 10, 12]},
-    {"size": "M3",   "thread": "M3",   "d": 3.0, "dk": 5.6,  "k": 2.1,  "lengths": [6, 8, 10, 12, 16]},
-    {"size": "M4",   "thread": "M4",   "d": 4.0, "dk": 8.0,  "k": 2.8,  "lengths": [8, 10, 12, 16, 20]},
-    {"size": "M5",   "thread": "M5",   "d": 5.0, "dk": 9.5,  "k": 3.5,  "lengths": [10, 12, 16, 20, 25]}
+    {"size": "M2",   "thread": "M2",   "d": 2.0, "dk": 3.6,  "k": 1.5,  "lengths": [5, 6, 8, 10], "note": "PT K20"},
+    {"size": "M2.5", "thread": "M2.5", "d": 2.5, "dk": 4.2,  "k": 1.6,  "lengths": [5, 6, 8, 10, 12, 16], "note": "PT K25"},
+    {"size": "M3",   "thread": "M3",   "d": 3.0, "dk": 5.6,  "k": 2.1,  "lengths": [6, 7, 8, 10, 12, 14, 16, 20], "note": "PT K30"},
+    {"size": "M4",   "thread": "M4",   "d": 4.0, "dk": 7.5,  "k": 2.6,  "lengths": [8, 10, 12, 14, 16, 18, 20, 25, 30], "note": "PT K40"},
+    {"size": "M5",   "thread": "M5",   "d": 5.0, "dk": 8.2,  "k": 2.9,  "lengths": [10, 12, 16, 20, 25, 30], "note": "PT K50"}
   ]
 }

@@ -2,7 +2,7 @@
   "id": "iso4762",
   "name": "Socket head cap screw",
   "standard": "ISO 4762",
-  "source": "ISO 4762:2004 Table 1: head diameter dk (max, plain head), head height k (max), hex socket s (nominal). Lengths: ISO 4762 commercial length range (preferred values).",
+  "source": "ISO 4762:2004 Table 1: head diameter dk (max, plain head), head height k (max), hex socket s (nominal). Lengths: ISO 4762 commercial length range (preferred values). Verified 2026-11 against DIN EN ISO 4762 (fasten.it) and engineersedge.com iso_socket_head_screw.",
   "units": "mm",
   "system": "metric",
   "generator": "screw",

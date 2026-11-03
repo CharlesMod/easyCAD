@@ -64,8 +64,10 @@ fn imperial_shcs_and_nut_4_40() {
     assert!((bb.size().x - 0.183 * IN).abs() < 1e-3);
     assert!((bb.size().z - (0.5 + 0.112) * IN).abs() < 1e-6, "{bb:?}");
     let clear = p.hole(HoleChoice::Clearance(Fit::Close)).unwrap();
-    assert!((clear.diameter - 0.1160 * IN).abs() < 1e-9);
-    assert!((p.hole(HoleChoice::Clearance(Fit::Normal)).unwrap().diameter - 0.1285 * IN).abs() < 1e-9);
+    // ASME B18.2.8 close / normal / loose
+    assert!((clear.diameter - 0.120 * IN).abs() < 1e-9);
+    assert!((p.hole(HoleChoice::Clearance(Fit::Normal)).unwrap().diameter - 0.128 * IN).abs() < 1e-9);
+    assert!((p.hole(HoleChoice::Clearance(Fit::Loose)).unwrap().diameter - 0.144 * IN).abs() < 1e-9);
     assert!((p.hole(HoleChoice::Tap).unwrap().diameter - 0.0890 * IN).abs() < 1e-9);
 
     let n = BuiltinSource.build("asme_hex_nut", "#4-40").unwrap();

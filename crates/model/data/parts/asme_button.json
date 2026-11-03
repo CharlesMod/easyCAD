@@ -2,7 +2,7 @@
   "id": "asme_button",
   "name": "Button head socket screw (inch)",
   "standard": "ASME B18.3",
-  "source": "ASME B18.3 button head socket cap screws: head diameter A (max), head height H (max), hex key (nominal). #2-56 omitted (TODO: add from B18.3 table).",
+  "source": "ASME B18.3 button head socket cap screws: head diameter A (max), head height H (max), hex key (nominal); per ASME B18.3-2003 Table 3 (as reproduced by fasten.it asme_b18.3_table_3 and AFT Fasteners). #2-56 lengths: the stock fractional lengths of the #2-56 socket head cap screw table.",
   "units": "in",
   "system": "imperial",
   "generator": "screw",
@@ -10,11 +10,12 @@
   "length": "under_head",
   "tags": ["screw", "button head", "bhcs", "socket", "inch"],
   "sizes": [
+    {"size": "#2-56",  "d": 0.086, "tpi": 56, "dk": 0.164, "k": 0.046, "s": 0.050,  "lengths": [0.125, 0.1875, 0.25, 0.3125, 0.375, 0.5]},
     {"size": "#4-40",  "d": 0.112, "tpi": 40, "dk": 0.213, "k": 0.059, "s": 0.0625, "lengths": [0.1875, 0.25, 0.3125, 0.375, 0.5, 0.625, 0.75]},
-    {"size": "#6-32",  "d": 0.138, "tpi": 32, "dk": 0.262, "k": 0.074, "s": 0.0781, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#6-32",  "d": 0.138, "tpi": 32, "dk": 0.262, "k": 0.073, "s": 0.0781, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
     {"size": "#8-32",  "d": 0.164, "tpi": 32, "dk": 0.312, "k": 0.087, "s": 0.0938, "lengths": [0.25, 0.3125, 0.375, 0.5, 0.625, 0.75, 1.0]},
-    {"size": "#10-24", "d": 0.190, "tpi": 24, "dk": 0.361, "k": 0.105, "s": 0.125,  "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
-    {"size": "#10-32", "d": 0.190, "tpi": 32, "dk": 0.361, "k": 0.105, "s": 0.125,  "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#10-24", "d": 0.190, "tpi": 24, "dk": 0.361, "k": 0.101, "s": 0.125,  "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
+    {"size": "#10-32", "d": 0.190, "tpi": 32, "dk": 0.361, "k": 0.101, "s": 0.125,  "lengths": [0.25, 0.375, 0.5, 0.625, 0.75, 1.0]},
     {"size": "1/4-20", "d": 0.250, "tpi": 20, "dk": 0.437, "k": 0.132, "s": 0.1562, "lengths": [0.375, 0.5, 0.625, 0.75, 1.0, 1.25]}
   ]
 }

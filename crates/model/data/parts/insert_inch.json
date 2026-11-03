@@ -2,19 +2,19 @@
   "id": "insert_in",
   "name": "Heat-set threaded insert for plastics (inch)",
   "standard": "(no ASME standard; tapered heat-set inserts)",
-  "source": "Typical dimensions of tapered heat-set inserts for thermoplastics (length l, outer diameter od, recommended hole diameter and depth).",
+  "source": "ruthex inch heat-set inserts (as listed by 3DJake, 2026-11; vendor values in mm converted to inch): outer diameter od, length l, recommended hole diameter. The vendor gives no hole depth; hole_depth = l + 1 mm (guideline).",
   "units": "in",
   "system": "imperial",
   "generator": "insert",
   "tags": ["insert", "heat set", "threaded insert", "brass", "inch"],
-  "todo": "TODO: all imperial insert values are typical, not from a standard; insert geometry and the recommended hole differ by manufacturer. Verify every row against the chosen vendor's datasheet before relying on the auto-hole.",
+  "todo": "Insert geometry and the recommended hole vary by vendor; check against the stocked insert.",
   "sizes": [
-    {"size": "#2-56",  "d": 0.086, "od": 0.140, "l": 0.115, "hole_d": 0.120, "hole_depth": 0.155, "note": "TODO: verify"},
-    {"size": "#4-40",  "d": 0.112, "od": 0.161, "l": 0.135, "hole_d": 0.141, "hole_depth": 0.175, "note": "TODO: verify"},
-    {"size": "#6-32",  "d": 0.138, "od": 0.199, "l": 0.150, "hole_d": 0.177, "hole_depth": 0.190, "note": "TODO: verify"},
-    {"size": "#8-32",  "d": 0.164, "od": 0.228, "l": 0.185, "hole_d": 0.209, "hole_depth": 0.225, "note": "TODO: verify"},
-    {"size": "#10-24", "d": 0.190, "od": 0.270, "l": 0.225, "hole_d": 0.246, "hole_depth": 0.265, "note": "TODO: verify"},
-    {"size": "#10-32", "d": 0.190, "od": 0.270, "l": 0.225, "hole_d": 0.246, "hole_depth": 0.265, "note": "TODO: verify"},
-    {"size": "1/4-20", "d": 0.250, "od": 0.358, "l": 0.300, "hole_d": 0.332, "hole_depth": 0.340, "note": "TODO: verify"}
+    {"size": "#2-56",  "d": 0.086, "od": 0.1417, "l": 0.1575, "hole_d": 0.1260, "hole_depth": 0.1969},
+    {"size": "#4-40",  "d": 0.112, "od": 0.1811, "l": 0.2244, "hole_d": 0.1575, "hole_depth": 0.2638},
+    {"size": "#6-32",  "d": 0.138, "od": 0.199, "l": 0.150, "hole_d": 0.177, "hole_depth": 0.190, "note": "TODO: unverified (typical values; ruthex has no such insert)"},
+    {"size": "#8-32",  "d": 0.164, "od": 0.2480, "l": 0.3189, "hole_d": 0.2205, "hole_depth": 0.3583},
+    {"size": "#10-24", "d": 0.190, "od": 0.2795, "l": 0.3740, "hole_d": 0.2520, "hole_depth": 0.4134},
+    {"size": "#10-32", "d": 0.190, "od": 0.270, "l": 0.225, "hole_d": 0.246, "hole_depth": 0.265, "note": "TODO: unverified (typical values; ruthex has no such insert)"},
+    {"size": "1/4-20", "d": 0.250, "od": 0.3425, "l": 0.5000, "hole_d": 0.3150, "hole_depth": 0.5394}
   ]
 }

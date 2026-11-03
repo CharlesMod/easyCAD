@@ -1067,16 +1067,39 @@ mod tests {
     fn hole_rules_4_40() {
         let r = hole_rules("#4-40").unwrap();
         assert_eq!(r.units, Units::In);
-        assert_eq!((r.close, r.normal, r.loose), (0.1160, 0.1285, None));
+        assert_eq!((r.close, r.normal, r.loose), (0.120, 0.128, Some(0.144)), "ASME B18.2.8");
         assert_eq!(r.tap_drill, 0.0890);
         let spec = r.spec(HoleChoice::Clearance(Fit::Close), None, None).unwrap();
-        assert!((spec.diameter - 2.9464).abs() < 1e-9);
+        assert!((spec.diameter - 3.048).abs() < 1e-9);
         let spec = r.spec(HoleChoice::Counterbore(Fit::Normal), Some(Head::Socket), None).unwrap();
         let (d, depth) = spec.counterbore.unwrap();
         assert!((d - 0.2188 * 25.4).abs() < 1e-9 && (depth - 0.112 * 25.4).abs() < 1e-9);
-        assert!(r.spec(HoleChoice::Clearance(Fit::Loose), None, None).is_err());
+        assert!((r.spec(HoleChoice::Clearance(Fit::Loose), None, None).unwrap().diameter - 0.144 * 25.4).abs() < 1e-9);
         let cs = r.spec(HoleChoice::Countersink(Fit::Normal), Some(Head::Flat), None).unwrap();
         assert_eq!(cs.countersink.unwrap().1, 82.0);
+    }
+
+    /// Every inch thread has all three B18.2.8 classes, and the #2-56 rows exist in
+    /// each inch screw and washer table; the TODO markers left are the unverifiable ones.
+    #[test]
+    fn inch_tables_complete() {
+        for t in ["#2-56", "#4-40", "#6-32", "#8-32", "#10-24", "#10-32", "1/4-20"] {
+            let r = hole_rules(t).unwrap();
+            assert!(r.close < r.normal && r.normal < r.loose.unwrap(), "{t}");
+        }
+        let b = BuiltinSource;
+        for (id, size) in [("asme_shcs", "#2-56x1/4"), ("asme_button", "#2-56x1/4"), ("asme_flat", "#2-56x1/4"), ("sae_washer", "#2-56")] {
+            assert!(b.sizes(id).contains(&size.to_string()), "{id} {size}");
+            b.build(id, size).unwrap();
+        }
+        let r = hole_rules("#2-56").unwrap();
+        assert!(r.countersink.iter().any(|(h, _)| *h == Head::Flat), "#2-56 flat head gives a countersink");
+        let todo: Vec<String> = catalog()
+            .tables
+            .iter()
+            .flat_map(|t| t.info().notes.into_iter().filter(|n| n.contains("TODO")).map(move |n| format!("{}: {n}", t.id)))
+            .collect();
+        assert_eq!(todo.len(), 3, "{todo:#?}");
     }
 
     #[test]

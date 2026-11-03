@@ -177,8 +177,8 @@ doc.bom(); doc.blob_refs();
   until geometry is built. `LocalStepSource::open(name, dir)` reads a folder of STEP
   files described by `library.json`. `Library::default()` contains the built-in
   source; add others with `add`.
-  `hole_rules("M3")` gives close/normal/loose clearance (ISO 273 for metric; the
-  close/free drill chart for inch), tap drill, the 0.8·d pilot for thread-forming
+  `hole_rules("M3")` gives close/normal/loose clearance (ISO 273 for metric, ASME
+  B18.2.8 for inch), tap drill, the 0.8·d pilot for thread-forming
   screws in plastic, counterbore/countersink per head, and the insert hole.
   `PartInstance::hole(HoleChoice)` returns a `HoleSpec` in mm, with `tool()` for
   cutting. `InsertPart { part: PartRef, placements: Vec<PlacementRef>, auto_hole, .. }`
@@ -753,11 +753,13 @@ verified on load.
   fillets, part copies (counted in the BOM), fits and teardrops therefore all follow.
   Whole-body operations (fillet, shell, draft, split, joint) cannot be patterned and
   give a clear error.
-- Threads are cosmetic. Several data rows carry `TODO`s (surfaced in
-  `PartInfo::notes`): imperial inserts and standoffs, PT screw heads, some ISO 7380
-  lengths, M2/M2.5 counterbores, the inch loose-fit class (ASME B18.2.8) and #2
-  button/flat heads. Counterbores for non-socket heads and all countersinks are
-  derived from head dimensions (`derived: true`).
+- Threads are cosmetic. Every table cites its source (standards checked against
+  published tables, 2026-11; vendor tables name the vendor: ruthex inserts, EJOT PT
+  screws). Values that vary by vendor (standoff across-flats and studs, insert
+  geometry, PT heads) carry a plain note in `PartInfo::notes`. `TODO` stays only on
+  what could not be verified: the shortest ISO 7380-1 lengths, the #6-32 and #10-32
+  inch inserts, and the M2/M2.5 counterbore depths. Counterbores for non-socket heads
+  and all countersinks are derived from head dimensions (`derived: true`).
 - STEP import goes through XCAF and keeps per-solid names and colours. A reference
   import is one locked body whose `Body::appearance()` lists sub-parts with their
   names and colours. Non-reference imports give one named body per solid. STEP
