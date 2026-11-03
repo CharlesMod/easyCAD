@@ -506,15 +506,20 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
   motion: Rigid = `distance` along z; Revolute = `angle` about z (+ `distance`);
   Slider = `distance` along z; Cylindrical, Planar (+ `distance` gap) and Ball keep
   the current position in their free directions.
-  `Document::{add_mate, edit_mate, solve_mates() -> MateSolve}`. The solver holds
-  grounded top-level occurrences (and the root's own bodies) fixed and propagates:
-  a mate with one placed side moves the other side's *top-level* occurrence (a
-  sub-assembly moves rigidly). Both sides already placed → `Redundant` or
-  `OverConstrained("off by 1.234 mm / 5.00° ...")`; never reached →
-  `Unsolved("neither side is connected to a grounded occurrence")` and the
-  occurrences are listed in `MateSolve.floating`. With nothing grounded the first
-  mated occurrence is held (noted in `MateSolve.notes`). The solved transforms are
-  written as one undo step "Solve mates" (nothing is written when nothing moves);
+  `Document::{add_mate, edit_mate, solve_mates() -> MateSolve}`. Connector paths may
+  be nested (`[Bracket:2, Screw:1]`). The solver propagates from what is fixed: an
+  occurrence is fixed when it is grounded or on no mate path at all (unmated
+  occurrences stay where they are, with their children); the root's own bodies are
+  fixed. A mate with one placed side moves the *first unplaced occurrence* on the
+  other side's path: an ungrounded sub-assembly mated through one of its parts moves
+  rigidly, a part mated inside a grounded (or already placed) sub-assembly moves
+  within it. A nested occurrence belongs to its parent component's definition, so
+  moving it moves it in every occurrence of that parent. Both sides already placed
+  → `Redundant` or `OverConstrained("off by 1.234 mm / 5.00° ...")`; never reached
+  → `Unsolved("neither side is connected to a grounded occurrence")`, with the
+  occurrences in `MateSolve.floating`. With nothing grounded, the first mated
+  top-level occurrence is held (noted in `MateSolve.notes`). Solved local
+  transforms are written as one undo step "Solve mates" (nothing when nothing moved);
   `assembly::solve_mates(&DocData)` is the dry run.
 - **Explode.** `Occurrence.explode` (parent frame, mm) only changes
   `Instance.display`; mates, interference, BOM and export use `transform`.
@@ -573,9 +578,8 @@ joint). See the BREAKING "Assemblies" changelog entry for what changed for the G
   they follow every edit of the master. They are placed in the root where the
   source is; the source occurrence is hidden and `in_bom = false`.
 
-Limits (all return clean errors or are documented here): mates move top-level
-occurrences only and solve by propagation (a closed loop of mates is checked, not
-solved; no joint limits); in-context features use the frame of their component's
+Limits (all return clean errors or are documented here): mates solve by
+propagation (a closed loop of mates is checked, not solved; no joint limits); in-context features use the frame of their component's
 first occurrence; drawings, `Document::export` and `Document::bom()` still see the
 root component only; linked files cannot be assemblies; STEP components are
 read-only.
@@ -634,6 +638,9 @@ verified on load.
 
 ## Changelog for GUI
 
+- **Mates on nested occurrences.** `MateConnector.occurrence` paths can be nested;
+  see "Mates" for which occurrence moves. `MateSolve.moved` / `floating` now list
+  occurrences at any depth, and `solve_mates` writes nested local transforms.
 - **Assemblies (BREAKING).** See "Assemblies" above. What moved and what did not:
   - **Nothing moved out of `DocData`.** `params`, `sketches`, `features`,
     `imports`, `drawings`, process fields stay where they were; they *are* the root

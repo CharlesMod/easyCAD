@@ -915,9 +915,9 @@ pub struct MateReport {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct MateSolve {
     pub mates: Vec<MateReport>,
-    /// Top-level occurrences whose transform was changed.
+    /// Occurrences (any depth) whose transform was changed.
     pub moved: Vec<OccurrenceId>,
-    /// Top-level occurrences with mates that are not connected to anything fixed.
+    /// Occurrences on unsolved mates that could not be placed.
     pub floating: Vec<OccurrenceId>,
     /// Notes (e.g. "nothing grounded: `Base:1` was held fixed").
     pub notes: Vec<String>,
@@ -980,7 +980,7 @@ impl Document {
         if !rep.moved.is_empty() {
             let _ = self.edit("Solve mates", |d| {
                 for (id, t) in &tf {
-                    if let Some(o) = d.occurrences.iter_mut().find(|o| o.id == *id) {
+                    if let Some(o) = d.occurrence_mut(*id) {
                         o.transform = *t;
                     }
                 }
@@ -991,117 +991,110 @@ impl Document {
     }
 }
 
-/// Solve without modifying the document: new transforms of the top-level
-/// occurrences that moved, plus the report.
+/// Solve without modifying the document: new local transforms of the occurrences
+/// that moved, plus the report.
 ///
-/// A simple propagation solver: grounded top-level occurrences (and the root's own
-/// bodies) are fixed; a mate with one placed side places the other side's top-level
-/// occurrence (a whole sub-assembly moves rigidly), keeping its current position in
-/// the mate's free degrees of freedom. A mate whose sides are both placed is checked
-/// (redundant or over-constrained). Mates that never get a placed side are unsolved.
+/// A propagation solver over occurrences at any depth:
+/// - An occurrence is *fixed* when it is grounded, or when it is on no mate
+///   connector path at all: unmated occurrences stay where they are and carry their
+///   children. The root's own bodies are fixed.
+/// - A connector is *placed* when every occurrence on its path is fixed or solved.
+/// - A mate with one placed side moves the first unplaced occurrence on the other
+///   side's path (so a mated sub-assembly moves rigidly, and a mated screw inside a
+///   placed sub-assembly moves inside it), keeping its current position in the
+///   mate's free directions. The new transform is written in that occurrence's
+///   parent frame.
+/// - A mate whose sides are both placed is checked (`Redundant` or
+///   `OverConstrained`); mates never reached are `Unsolved`.
 pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
     let mut rep = MateSolve::default();
     let vals = d.values().unwrap_or_default();
-    // current transform of each top-level occurrence; None key = root (fixed)
-    let mut cur: BTreeMap<OccurrenceId, Transform> = d.occurrences.iter().map(|o| (o.id, o.transform)).collect();
-    let mut placed: BTreeSet<Option<OccurrenceId>> = BTreeSet::new();
-    placed.insert(None);
-    for o in d.occurrences.iter().filter(|o| o.grounded) {
-        placed.insert(Some(o.id));
-    }
+    // local transform of every occurrence, and its parent path
+    let all = d.all_occurrences();
+    let mut cur: BTreeMap<OccurrenceId, Transform> = all.iter().map(|(_, o, _)| (o.id, o.transform)).collect();
     let active: Vec<&Mate> = d.mates.iter().filter(|m| !m.suppressed).collect();
-    if d.occurrences.iter().all(|o| !o.grounded) {
+    let mated: BTreeSet<OccurrenceId> = active.iter().flat_map(|m| m.a.occurrence.iter().chain(&m.b.occurrence)).copied().collect();
+    let mut placed: BTreeSet<OccurrenceId> = all.iter().filter(|(_, o, _)| o.grounded || !mated.contains(&o.id)).map(|(_, o, _)| o.id).collect();
+    if !all.iter().any(|(_, o, _)| o.grounded) {
         let first = active.iter().find_map(|m| m.a.occurrence.first().or(m.b.occurrence.first()).copied());
         if let Some(f) = first {
-            placed.insert(Some(f));
-            rep.notes.push(format!("nothing is grounded: `{}` was held fixed", d.occurrence(f).map(|o| o.name.as_str()).unwrap_or("?")));
-        }
-    }
-    // connector frame relative to its top-level occurrence: (top, rest * frame)
-    let local = |c: &MateConnector| -> Result<(Option<OccurrenceId>, Transform), String> {
-        d.component_at(&c.occurrence)?;
-        match c.occurrence.first() {
-            None => Ok((None, c.frame())),
-            Some(top) => {
-                let top_t = d.occurrences.iter().find(|o| o.id == *top).ok_or_else(|| format!("occurrence {top:?} is not at the top level"))?.transform;
-                let w = d.world_transform(&c.occurrence)?;
-                Ok((Some(*top), top_t.inverse().mul(&w).mul(&c.frame())))
+            if !placed.contains(&f) {
+                placed.insert(f);
+                rep.notes.push(format!("nothing is grounded: `{}` was held fixed", d.occurrence(f).map(|o| o.name.as_str()).unwrap_or("?")));
             }
         }
-    };
-    let world = |cur: &BTreeMap<OccurrenceId, Transform>, top: Option<OccurrenceId>, l: &Transform| match top {
-        None => *l,
-        Some(t) => cur[&t].mul(l),
-    };
+    }
+    let world_of = |cur: &BTreeMap<OccurrenceId, Transform>, path: &[OccurrenceId]| path.iter().fold(Transform::IDENTITY, |t, o| t.mul(&cur[o]));
     let mut status: BTreeMap<MateId, MateStatus> = BTreeMap::new();
     let mut prepared = Vec::new();
     for m in &active {
-        match (local(&m.a), local(&m.b)) {
-            (Ok(a), Ok(b)) => {
-                let ang = m.angle.eval(&vals);
-                let dist = m.distance.eval(&vals);
-                match (ang, dist) {
-                    (Ok(ang), Ok(dist)) => prepared.push((*m, a, b, ang, dist)),
-                    (Err(e), _) | (_, Err(e)) => {
-                        status.insert(m.id, MateStatus::Unsolved(format!("drive value: {e}")));
-                    }
-                }
-            }
+        let bad = [&m.a, &m.b].into_iter().find_map(|c| d.component_at(&c.occurrence).err());
+        if let Some(e) = bad {
+            status.insert(m.id, MateStatus::Unsolved(e));
+            continue;
+        }
+        match (m.angle.eval(&vals), m.distance.eval(&vals)) {
+            (Ok(a), Ok(dist)) => prepared.push((*m, a, dist)),
             (Err(e), _) | (_, Err(e)) => {
-                status.insert(m.id, MateStatus::Unsolved(e));
+                status.insert(m.id, MateStatus::Unsolved(format!("drive value: {e}")));
             }
         }
     }
     let mut moved = BTreeSet::new();
     loop {
         let mut progress = false;
-        for (m, (ta, la), (tb, lb), ang, dist) in &prepared {
+        for (m, ang, dist) in &prepared {
             if status.contains_key(&m.id) {
                 continue;
             }
             let flip = if m.flip { flip_x() } else { Transform::IDENTITY };
-            let (pa, pb) = (placed.contains(ta), placed.contains(tb));
-            if ta == tb || (pa && pb) {
-                let fa = world(&cur, *ta, la).mul(&flip);
-                let fb = world(&cur, *tb, lb);
-                let rel = fa.inverse().mul(&fb);
-                let want = project_motion(m.kind, &rel, *ang, *dist);
-                let (dl, da) = mismatch(&rel, &want);
-                let st = if dl < 1e-6 && da < 1e-6 {
-                    MateStatus::Redundant
-                } else {
-                    MateStatus::OverConstrained(format!("off by {dl:.3} mm / {da:.2}° (both sides are already fixed)"))
-                };
-                status.insert(m.id, st);
-                continue;
+            let first_unplaced = |p: &[OccurrenceId]| p.iter().position(|o| !placed.contains(o));
+            let (ua, ub) = (first_unplaced(&m.a.occurrence), first_unplaced(&m.b.occurrence));
+            let fa = world_of(&cur, &m.a.occurrence).mul(&m.a.frame());
+            let fb = world_of(&cur, &m.b.occurrence).mul(&m.b.frame());
+            match (ua, ub) {
+                (None, None) => {
+                    let base = fa.mul(&flip);
+                    let rel = base.inverse().mul(&fb);
+                    let want = project_motion(m.kind, &rel, *ang, *dist);
+                    let (dl, da) = mismatch(&rel, &want);
+                    let st = if dl < 1e-6 && da < 1e-6 {
+                        MateStatus::Redundant
+                    } else {
+                        MateStatus::OverConstrained(format!("off by {dl:.3} mm / {da:.2}° (both sides are already fixed)"))
+                    };
+                    status.insert(m.id, st);
+                }
+                (Some(_), Some(_)) => {}
+                (fixed_a, _) => {
+                    // move the first unplaced occurrence of the other side
+                    let b_moves = fixed_a.is_none();
+                    let (mov_conn, k) = if b_moves { (&m.b, ub.unwrap()) } else { (&m.a, ua.unwrap()) };
+                    let (fixed_w, mov_w) = if b_moves { (fa, fb) } else { (fb, fa) };
+                    let target = if b_moves {
+                        let base = fixed_w.mul(&flip);
+                        let rel = base.inverse().mul(&mov_w);
+                        base.mul(&project_motion(m.kind, &rel, *ang, *dist))
+                    } else {
+                        let rel = mov_w.mul(&flip).inverse().mul(&fixed_w);
+                        fixed_w.mul(&project_motion(m.kind, &rel, *ang, *dist).inverse()).mul(&flip.inverse())
+                    };
+                    let path = &mov_conn.occurrence;
+                    let mover = path[k];
+                    let parent_w = world_of(&cur, &path[..k]);
+                    // connector frame relative to the mover (descendants fixed relative to it)
+                    let rel = world_of(&cur, &path[k + 1..]).mul(&mov_conn.frame());
+                    let new_local = parent_w.inverse().mul(&target).mul(&rel.inverse());
+                    let (dl, da) = mismatch(&new_local, &cur[&mover]);
+                    if dl > 1e-9 || da > 1e-9 {
+                        moved.insert(mover);
+                    }
+                    cur.insert(mover, new_local);
+                    placed.insert(mover);
+                    status.insert(m.id, MateStatus::Solved);
+                    progress = true;
+                }
             }
-            if !pa && !pb {
-                continue;
-            }
-            // move the unplaced side so its connector lands on the placed one
-            let (fixed_t, fixed_l, mov_t, mov_l, a_moves) = if pa { (*ta, la, *tb, lb, false) } else { (*tb, lb, *ta, la, true) };
-            let fixed_w = world(&cur, fixed_t, fixed_l);
-            let mov_w = world(&cur, mov_t, mov_l);
-            let target = if !a_moves {
-                // B onto A: fb = fa·flip·M
-                let base = fixed_w.mul(&flip);
-                let rel = base.inverse().mul(&mov_w);
-                base.mul(&project_motion(m.kind, &rel, *ang, *dist))
-            } else {
-                // A onto B: fa = fb·M⁻¹·flip⁻¹
-                let rel = mov_w.mul(&flip).inverse().mul(&fixed_w);
-                fixed_w.mul(&project_motion(m.kind, &rel, *ang, *dist).inverse()).mul(&flip.inverse())
-            };
-            let Some(top) = mov_t else { continue };
-            let new_top = target.mul(&mov_l.inverse());
-            let (dl, da) = mismatch(&new_top, &cur[&top]);
-            if dl > 1e-9 || da > 1e-9 {
-                moved.insert(top);
-            }
-            cur.insert(top, new_top);
-            placed.insert(Some(top));
-            status.insert(m.id, MateStatus::Solved);
-            progress = true;
         }
         if !progress {
             break;
@@ -1115,9 +1108,9 @@ pub fn solve_mates(d: &DocData) -> (Vec<(OccurrenceId, Transform)>, MateSolve) {
         };
         if let MateStatus::Unsolved(_) = st {
             for c in [&m.a, &m.b] {
-                if let Some(t) = c.occurrence.first() {
-                    if !placed.contains(&Some(*t)) && !rep.floating.contains(t) {
-                        rep.floating.push(*t);
+                for o in &c.occurrence {
+                    if !placed.contains(o) && !rep.floating.contains(o) {
+                        rep.floating.push(*o);
                     }
                 }
             }

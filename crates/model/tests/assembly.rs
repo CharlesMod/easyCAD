@@ -618,3 +618,41 @@ fn linked_component_status_update_and_break() {
     back.set_component_param(k, "t", "2").unwrap();
     assert!((vol(&mut back) - 800.0).abs() < 3.0, "{}", vol(&mut back));
 }
+
+/// Mates on nested occurrences: a sub-assembly mated through one of its parts moves
+/// rigidly; a part mated inside a fixed sub-assembly moves within it.
+#[test]
+fn mates_on_nested_occurrences() {
+    let (mut doc, _bracket, _screw, [a, b]) = bracket_assembly();
+    let table = doc.add_component("Table");
+    block(&mut doc, table, "Top", ("200", "200", "10"), DVec2::ZERO);
+    let ot = doc.add_occurrence(ComponentId::ROOT, table, "Table:1", Transform::translation(DVec3::new(0.0, 0.0, -50.0))).unwrap();
+    doc.edit_occurrence(ot, "ground", |o| o.grounded = true).unwrap();
+    let screws_of = |doc: &Document, occ: OccurrenceId| doc.data.component(doc.data.occurrence(occ).unwrap().component).unwrap().children.clone();
+    let s1 = screws_of(&doc, a)[0].id;
+    // Bracket:1 (ungrounded) is mated through its screw Screw:1: the whole bracket moves
+    let target = DVec3::new(-60.0, 40.0, -40.0);
+    doc.add_mate("Screw on table", MateKind::Rigid, MateConnector::point(vec![ot], target - DVec3::new(0.0, 0.0, -50.0)), MateConnector::point(vec![a, s1], DVec3::ZERO), false);
+    let before_local = doc.data.occurrence(s1).unwrap().transform;
+    let rep = doc.solve_mates();
+    assert!(rep.ok(), "{rep:?}");
+    assert_eq!(rep.moved, vec![a]);
+    assert_eq!(doc.data.occurrence(s1).unwrap().transform, before_local, "the screw stays put inside its bracket");
+    let w = doc.data.world_transform(&[a, s1]).unwrap();
+    assert!((w.point(DVec3::ZERO) - target).length() < 1e-9);
+    // Bracket:2 is grounded: a mate on its Screw:2 moves the screw inside the bracket
+    // (which moves it in every Bracket occurrence: it is part of the definition)
+    doc.edit_occurrence(b, "ground", |o| o.grounded = true).unwrap();
+    let s2 = screws_of(&doc, b)[1].id;
+    doc.add_mate("Screw 2 in slot", MateKind::Slider, MateConnector::new(vec![b], DVec3::new(15.0, -10.0, 4.0), DVec3::X), MateConnector::new(vec![b, s2], DVec3::ZERO, DVec3::X), false);
+    let m = doc.data.mates.last().unwrap().id;
+    doc.edit_mate(m, "slide", |m| m.distance = "-5".into()).unwrap();
+    let rep = doc.solve_mates();
+    assert!(rep.ok(), "{rep:?}");
+    assert!(rep.moved.contains(&s2) && !rep.moved.contains(&b));
+    let local = doc.data.occurrence(s2).unwrap().transform;
+    assert!((local.translation - DVec3::new(10.0, -10.0, 4.0)).length() < 1e-9, "{local:?}");
+    // Screw:1 of Bracket:1 still sits on its target (bracket moved again? no: unchanged)
+    let w = doc.data.world_transform(&[a, s1]).unwrap();
+    assert!((w.point(DVec3::ZERO) - target).length() < 1e-9);
+}
