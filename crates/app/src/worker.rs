@@ -401,7 +401,7 @@ fn process(
 ) -> Output {
     // no kernel mutex: the engine's concurrency contract allows parallel threads
     let t0 = Instant::now();
-    let asm_mode = r.purpose != Purpose::Drawing && !r.data.occurrences.is_empty();
+    let asm_mode = !r.data.occurrences.is_empty();
     let mut asm_out: Option<(AssemblyResult, Option<MateSolve>, ComponentId, OccPath)> = None;
     let result = if asm_mode {
         let solve = if r.data.mates.is_empty() {
@@ -436,13 +436,24 @@ fn process(
         regen.regenerate(&r.data, &r.blobs, &r.library)
     };
     let drawing = r.drawing.as_ref().map(|d| {
-        // BOM for balloons, from the document data alone
-        let mut tmp = casework_model::document::Document::new(&r.data.name);
-        tmp.data = r.data.clone();
-        let bom = tmp.bom();
-        Arc::new(casework_model::drawing::compute(
-            &r.data, &result, &bom, d, dcache,
-        ))
+        // balloons and BOM tables from the document data (GUI_NEEDS #11)
+        let flat;
+        let ar = match &asm_out {
+            Some(a) => &a.0,
+            None => {
+                flat = AssemblyResult::flat(result.clone());
+                &flat
+            }
+        };
+        let bom = r.data.bom(ar);
+        let tree = r.data.bom_tree(ar);
+        let src = casework_model::drawing::DrawingSources {
+            regen: &result,
+            bom: &bom,
+            assembly: asm_out.as_ref().map(|a| &a.0),
+            bom_tree: Some(&tree),
+        };
+        Arc::new(casework_model::drawing::compute_with(&r.data, &src, d, dcache))
     });
     let mut prefix_bodies = HashMap::new();
     let active_comp = asm_out.as_ref().map(|a| a.2).unwrap_or(ComponentId::ROOT);
@@ -544,7 +555,9 @@ fn process(
     let (mut ctx, mut asm, mut ctx_pickable) = (Vec::new(), None, false);
     if let Some((ar, solve, comp, active)) = asm_out {
         let frame = r.data.world_transform(&active).unwrap_or(Transform::IDENTITY);
-        ctx = context_bodies(&r, &ar, &active, &frame, acache);
+        if r.purpose != Purpose::Drawing {
+            ctx = context_bodies(&r, &ar, &active, &frame, acache);
+        }
         for c in &ctx {
             if let Some(bb) = acache
                 .meshes

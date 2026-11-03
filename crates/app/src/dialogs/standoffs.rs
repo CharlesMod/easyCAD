@@ -14,7 +14,7 @@ use casework_model::process::{Fit, FitClass};
 use egui::{RichText, Ui};
 use glam::{DVec2, DVec3};
 
-use super::{default_fit, BuildCx, DialogCx, DialogKind, Field};
+use super::{BuildCx, DialogCx, Field};
 use crate::theme;
 use crate::widgets;
 use crate::worker::Output;
@@ -194,7 +194,7 @@ impl StandoffsD {
         s.board = None;
         s.load_board(d, None, import);
         s.od = Field::from_expr(od, None);
-        s.hole = Field::from_expr(hole_dia, default_fit(DialogKind::Standoffs, "hole_dia"));
+        s.hole = Field::from_expr(hole_dia, crate::dialogs::default_fit(&crate::dialogs::boss_template(), "hole_dia"));
         s.height = Field::from_expr(height, None);
         s.base_fillet = Field::from_expr(base_fillet, None);
         s.draft = Field::from_expr(draft_deg, None);
@@ -293,7 +293,7 @@ impl StandoffsD {
         let plane = Plane::XY.offset(z);
         let id = cx.id(editing, 0);
         let all_on = self.holes.iter().all(|h| h.on);
-        let fit = default_fit(DialogKind::Standoffs, "hole_dia");
+        let fit = crate::dialogs::default_fit(&crate::dialogs::boss_template(), "hole_dia");
         let kind = if all_on || self.holes.is_empty() {
             let (lo, hi) = self.range();
             let source = match board.kind {

@@ -143,11 +143,25 @@ impl Field {
     }
 }
 
-/// Engine default fit for a feature field (mirrors regen.rs; see GUI_NEEDS).
-pub fn default_fit(kind: DialogKind, field: &str) -> Option<Fit> {
-    match (kind, field) {
-        (DialogKind::Boss | DialogKind::Standoffs, "hole_dia") => Some(Fit::hole(FitClass::Snug)),
-        _ => None,
+/// The engine's default fit for a field of a feature built with `kind`
+/// (`FeatureKind::default_fit`; field values do not matter for the defaults).
+pub fn default_fit(kind: &FeatureKind, field: &str) -> Option<Fit> {
+    kind.default_fit(field)
+}
+
+/// A boss template for `default_fit` before the real feature is built.
+pub fn boss_template() -> FeatureKind {
+    FeatureKind::ScrewBoss {
+        body: None,
+        plane: Plane::XY,
+        points: Vec::new(),
+        od: Expr::new("0"),
+        hole_dia: Expr::new("0"),
+        height: Expr::new("0"),
+        hole_depth: None,
+        base_fillet: Expr::new("0"),
+        draft_deg: Expr::new("0"),
+        offset: Expr::new("0"),
     }
 }
 
@@ -622,7 +636,7 @@ impl Dialog {
                         .collect::<Vec<_>>()
                         .join("; "),
                     od: Field::from_expr(od, None),
-                    hole: Field::from_expr(hole_dia, default_fit(DialogKind::Boss, "hole_dia")),
+                    hole: Field::from_expr(hole_dia, default_fit(&f.kind, "hole_dia")),
                     height: Field::from_expr(height, None),
                     base_fillet: Field::from_expr(base_fillet, None),
                     draft: Field::from_expr(draft_deg, None),
@@ -869,7 +883,7 @@ impl Dialog {
                     plane: Plane::XY.offset(z),
                     points: pts,
                     od: b.od.expr(None),
-                    hole_dia: b.hole.expr(default_fit(DialogKind::Boss, "hole_dia")),
+                    hole_dia: b.hole.expr(default_fit(&boss_template(), "hole_dia")),
                     height: b.height.expr(None),
                     hole_depth: None,
                     base_fillet: b.base_fillet.expr(None),
