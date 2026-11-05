@@ -16,6 +16,10 @@ fn main() {
     let root = match std::env::var_os("EASYCAD_OCCT_DIR") {
         Some(d) => std::path::PathBuf::from(d),
         None => {
+            // OCCT 7.8 declares cmake_minimum_required < 3.5, which CMake 4 refuses
+            if std::env::var_os("CMAKE_POLICY_VERSION_MINIMUM").is_none() {
+                std::env::set_var("CMAKE_POLICY_VERSION_MINIMUM", "3.5");
+            }
             occt_sys::build_occt();
             occt_sys::occt_path()
         }
