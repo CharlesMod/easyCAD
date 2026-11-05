@@ -13,3 +13,10 @@ thiserror = "2"
 [build-dependencies]
 cxx-build = "1"
 occt-sys = "7.8.1"
+
+# macOS's system malloc is slow for the kernel's many small allocations: mimalloc, which on macOS
+# installs itself as the default malloc zone (so OCCT's C++ allocations use it
+# too), regenerates the wizard enclosure ~4 % faster on an M4 (docs/ENGINE.md).
+# Linux (glibc) and Windows keep their allocators.
+[target.'cfg(target_os = "macos")'.dependencies]
+libmimalloc-sys = { version = "0.1.49", features = ["override"] }
