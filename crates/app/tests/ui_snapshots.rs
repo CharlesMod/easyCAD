@@ -32,6 +32,8 @@ fn out_dir() -> PathBuf {
 }
 
 fn harness(doc: easycad_model::document::Document) -> Harness<'static, EasyCadApp> {
+    // the user's crash-recovery copies would open the Recover prompt over the viewport
+    std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join(format!("easycad-test-data-{}", std::process::id())));
     let mut h = Harness::builder()
         .with_size(egui::vec2(W, H))
         .with_pixels_per_point(1.0)

@@ -88,6 +88,13 @@ const SYMBOL_FONTS: &[&str] = &[
     "/System/Library/Fonts/Apple Symbols.ttf",
     "C:\\Windows\\Fonts\\seguisym.ttf",
 ];
+/// Further fallbacks, each added when present. Apple Symbols lacks ① Ⓛ Ⓜ ✂ ✓ ✕:
+/// Zapf Dingbats (0.2 MB) has ① ✂ ✓ ✕ and SF Compact (2 MB) Ⓛ Ⓜ, so macOS needs no
+/// 23 MB Arial Unicode. (Without them those glyphs drew as boxes on macOS.)
+const EXTRA_SYMBOL_FONTS: &[&str] = &[
+    "/System/Library/Fonts/ZapfDingbats.ttf",
+    "/System/Library/Fonts/SFCompact.ttf",
+];
 
 fn first_font(paths: &[&str]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
@@ -124,6 +131,16 @@ pub fn install_fonts(ctx: &egui::Context) {
     );
     put("symbols", sym.clone(), FontFamily::Proportional, false);
     put("symbols_m", sym, FontFamily::Monospace, false);
+    for (i, p) in EXTRA_SYMBOL_FONTS.iter().enumerate() {
+        if let Ok(d) = std::fs::read(p) {
+            let name = format!("symbols_extra{i}");
+            defs.font_data
+                .insert(name.clone(), Arc::new(egui::FontData::from_owned(d)));
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                defs.families.entry(family).or_default().push(name.clone());
+            }
+        }
+    }
     ctx.set_fonts(defs);
 }
 
