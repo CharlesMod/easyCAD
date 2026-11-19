@@ -522,10 +522,18 @@ impl Settings {
     }
 
     pub fn new(profile: &str) -> Settings {
+        // wall thickness is a property of the process, so it comes from the
+        // profile's default `wall`; clearance (PCB to wall) is specific to this
+        // design and stays the wizard's own
+        let wall = easycad_model::process::ProcessProfile::builtins()
+            .into_iter()
+            .find(|p| p.name == profile)
+            .and_then(|p| p.params.into_iter().find(|q| q.name == "wall"))
+            .map_or_else(|| "2".to_string(), |q| q.expr);
         Settings {
             name: "enclosure".into(),
             clearance: "0.5".into(),
-            wall: "2".into(),
+            wall,
             height: "30".into(),
             corner_r: "6".into(),
             standoff_h: "5".into(),
@@ -555,10 +563,7 @@ fn param(doc: &mut Document, name: &str, expr: &str, comment: &str) -> Result<()
 
 /// Build the document. Pure (no GUI), so it is tested directly.
 pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
-    let mut doc = Document::new(if s.name.trim().is_empty() { "enclosure" } else { s.name.trim() });
-    if doc.data.profile_named(&s.profile).is_some() {
-        doc.set_active_profile(&s.profile).map_err(|e| e.to_string())?;
-    }
+    let mut doc = Document::new_with_profile(if s.name.trim().is_empty() { "enclosure" } else { s.name.trim() }, &s.profile);
     let molded = doc.data.profile().kind == ProcessKind::Molded;
     let src = board.source_label();
     let step = matches!(board.kind, BoardKind::Step);
@@ -569,7 +574,7 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
         param(&mut doc, "pcb_d", &format!("{:.4}", 2.0 * radius), &format!("from {src}"))?;
     }
     param(&mut doc, "clearance", &s.clearance, "PCB to wall")?;
-    param(&mut doc, "wall", &s.wall, "")?;
+    param(&mut doc, "wall", &s.wall, "wall thickness")?;
     param(&mut doc, "height", &s.height, "outside, floor to top")?;
     param(&mut doc, "corner_r", &s.corner_r, "outline corners")?;
     let exposed: Vec<usize> = s
