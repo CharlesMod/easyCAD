@@ -140,8 +140,10 @@ pub fn sketch_mesh(sk: &Sketch) -> Mesh {
     m
 }
 
+type Cache = HashMap<(String, SketchId), (Sketch, Arc<Mesh>)>;
+
 thread_local! {
-    static CACHE: RefCell<HashMap<(String, SketchId), (Sketch, Arc<Mesh>)>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<Cache> = RefCell::new(HashMap::new());
     static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
