@@ -94,6 +94,13 @@ pub struct SketchSession {
     pub input: Option<String>,
     pub input2: Option<String>,
     pub input_second: bool,
+    /// The value box just opened: select its whole text on this frame.
+    pub input_fresh: bool,
+    /// The value box still shows the live reading of the cursor (the user has not
+    /// typed): it follows the mouse until a key is typed.
+    pub input_live: bool,
+    /// Alt is held: snapping is off while it is.
+    pub alt_held: bool,
     pub dim_target: Option<Vec<Sel>>,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
@@ -152,6 +159,9 @@ impl SketchSession {
             error: None,
             show_constraints: true,
             snap: true,
+            input_fresh: false,
+            input_live: false,
+            alt_held: false,
             slice: false,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -853,18 +863,32 @@ impl SketchSession {
     }
 
     fn snap_point(&self, rect: Rect, p: Pos2) -> (DVec2, Option<PointId>) {
-        if self.snap {
+        if self.snap && !self.alt_held {
             if let Some(Sel::Point(pid)) = self.pick(rect, p) {
                 return (self.sketch.point(pid), Some(pid));
             }
             let q = self.to_sketch(rect, p);
-            let g = grid_step(self.scale) / 2.0;
+            let g = snap_step(self.scale);
             return (
                 DVec2::new((q.x / g).round() * g, (q.y / g).round() * g),
                 None,
             );
         }
         (self.to_sketch(rect, p), None)
+    }
+}
+
+/// Minor (tenth) grid lines are drawn, and snapped to, from this on-screen spacing.
+const MINOR_MIN_PX: f32 = 6.0;
+
+/// What the cursor snaps to: the tenths of a major grid step while those are drawn
+/// (what you see is what you snap to), else the major step itself.
+pub fn snap_step(scale: f32) -> f64 {
+    let major = grid_step(scale);
+    if (major / 10.0) as f32 * scale >= MINOR_MIN_PX {
+        major / 10.0
+    } else {
+        major
     }
 }
 
@@ -1260,7 +1284,7 @@ fn right_panel(s: &mut SketchSession, ui: &mut Ui) -> bool {
     }
     theme::section_label(ui, "Options");
     ui.checkbox(&mut s.show_constraints, "Show constraints");
-    ui.checkbox(&mut s.snap, "Snap to grid and geometry");
+    ui.checkbox(&mut s.snap, "Snap to grid and geometry (hold Alt to bypass)");
     ui.checkbox(&mut s.slice, "Slice body at sketch plane")
         .on_hover_text("Show the bodies cut at this plane: the cut faces filled, the half behind the plane in outline");
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -1304,7 +1328,8 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             let after = s.to_sketch(rect, hp);
             s.center += before - after;
         }
-        s.cursor = s.to_sketch(rect, hp);
+        s.alt_held = ui.input(|i| i.modifiers.alt);
+        s.cursor = s.snap_point(rect, hp).0;
         s.hover = s.pick(rect, hp);
     }
     // keyboard
@@ -1849,6 +1874,21 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     let lo = s.to_sketch(rect, rect.left_bottom());
     let hi = s.to_sketch(rect, rect.right_top());
     let gs = Stroke::new(1.0, theme::BORDER);
+    if (step / 10.0) as f32 * s.scale >= MINOR_MIN_PX {
+        // the tenths the cursor snaps to, fainter than the major lines
+        let minor = step / 10.0;
+        let ms = Stroke::new(1.0, theme::BORDER.gamma_multiply(0.4));
+        let mut x = (lo.x / minor).floor() * minor;
+        while x <= hi.x {
+            p.vline(to(DVec2::new(x, 0.0)).x, rect.y_range(), ms);
+            x += minor;
+        }
+        let mut y = (lo.y / minor).floor() * minor;
+        while y <= hi.y {
+            p.hline(rect.x_range(), to(DVec2::new(0.0, y)).y, ms);
+            y += minor;
+        }
+    }
     let mut x = (lo.x / step).floor() * step;
     while x <= hi.x {
         let sx = to(DVec2::new(x, 0.0)).x;
@@ -2129,6 +2169,12 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         let pv = Stroke::new(1.2, theme::ACCENT);
         if snapped.is_some() {
             p.circle_stroke(to(q), 6.0, Stroke::new(1.2, theme::ORANGE));
+        } else if s.snap && !s.alt_held && s.tool != Tool::Select {
+            // snapped to the grid: a small cross on the node
+            let c = to(q);
+            let m = Stroke::new(1.2, theme::ACCENT);
+            p.line_segment([c - vec2(4.0, 0.0), c + vec2(4.0, 0.0)], m);
+            p.line_segment([c - vec2(0.0, 4.0), c + vec2(0.0, 4.0)], m);
         }
         match (s.tool, s.clicks.as_slice()) {
             (Tool::Line, [a]) => {
@@ -2216,6 +2262,31 @@ mod tests {
     fn session() -> SketchSession {
         let d = DocData::new("t", "test");
         SketchSession::new_on(Plane::XY, &d)
+    }
+
+    #[test]
+    fn cursor_snaps_to_tenths_of_the_grid() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0; // major step 1 (100 px), tenths 10 px apart
+        let at = |s: &SketchSession, x: f64, y: f64| s.to_screen(rect, DVec2::new(x, y));
+        let (q, pt) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!(pt.is_none());
+        assert!((q.x - 1.2).abs() < 1e-9 && (q.y - 0.5).abs() < 1e-9, "{q:?}");
+        // every major line is reachable too
+        let (q, _) = s.snap_point(rect, at(&s, 2.01, -3.02));
+        assert!((q.x - 2.0).abs() < 1e-9 && (q.y + 3.0).abs() < 1e-9, "{q:?}");
+        // zoomed out the tenths are not drawn (< 6 px), so only the major step snaps
+        s.scale = 20.0;
+        assert_eq!(snap_step(s.scale), 1.0);
+        let (q, _) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!((q.x - 1.0).abs() < 1e-9 && (q.y - 0.0).abs() < 1e-9, "{q:?}");
+        // Alt bypasses snapping
+        s.scale = 100.0;
+        s.alt_held = true;
+        let (q, _) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!((q.x - 1.23).abs() < 0.02, "{q:?}");
     }
 
     #[test]
