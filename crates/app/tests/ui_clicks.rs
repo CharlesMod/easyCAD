@@ -598,8 +598,47 @@ fn undo_redo_keys_in_sketch_mode() {
     chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
     chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Y);
     assert_eq!(n(&h).0, 1, "Ctrl+Y redoes the sketch edit");
-    // with the sketch history spent, Ctrl+Z falls through to the document's
+    // with the sketch history spent, Ctrl+Z does nothing: the document is not touched
     chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
     chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
-    assert_eq!(h.state().doc.redo_label(), Some("Set zz"), "falls back to the document stack");
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "the document stack stays put in sketch mode");
+    assert_eq!(h.state().doc.redo_label(), None);
+}
+
+#[test]
+fn sketch_value_box_opens_on_first_click_with_text_selected() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().open_sketch(None);
+    h.run_steps(3);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Circle;
+    }
+    click_at(&mut h, egui::pos2(700.0, 450.0), egui::PointerButton::Primary);
+    h.run_steps(3);
+    let input = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => s.input.clone(),
+        _ => panic!(),
+    };
+    let text = input(&h).expect("the value box opens on the first click");
+    let id = egui::Id::NULL.with("sk_input_text");
+    let range = egui::TextEdit::load_state(&h.ctx, id).and_then(|st| st.cursor.char_range()).expect("a selection");
+    assert_eq!((range.primary.index.0.min(range.secondary.index.0), range.primary.index.0.max(range.secondary.index.0)), (0, text.chars().count()), "all text selected");
+    // typing replaces the reading
+    h.event(egui::Event::Text("40".into()));
+    h.run_steps(3);
+    assert_eq!(input(&h).as_deref(), Some("40"));
+    // Enter commits a circle of that diameter and closes the box
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(input(&h), None);
+    if let Mode::Sketch(s) = &h.state().mode {
+        assert!(s.clicks.is_empty());
+        let r: Vec<f64> = s.sketch.entities.iter().filter_map(|e| match e.geom { easycad_model::sketch::Geom::Circle { radius, .. } => Some(radius), _ => None }).collect();
+        assert_eq!(r.len(), 1);
+        assert!((r[0] - 20.0).abs() < 1e-6, "{r:?}");
+    }
 }
