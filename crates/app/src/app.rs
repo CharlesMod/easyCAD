@@ -934,10 +934,7 @@ impl EasyCadApp {
     }
 
     pub fn create_doc(&mut self, name: &str, profile: &str) {
-        let mut d = Document::new(name);
-        if d.data.profile_named(profile).is_some() {
-            d.data.active_profile = profile.to_string();
-        }
+        let d = Document::new_with_profile(name, profile);
         let mut s = crate::settings::Settings::load();
         s.last_profile = Some(profile.to_string());
         s.save();

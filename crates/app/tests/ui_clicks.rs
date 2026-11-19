@@ -641,4 +641,21 @@ fn sketch_value_box_opens_on_first_click_with_text_selected() {
         assert_eq!(r.len(), 1);
         assert!((r[0] - 20.0).abs() < 1e-6, "{r:?}");
     }
+
+#[test]
+fn new_sketch_button_does_what_the_s_key_does() {
+    let _g = serial();
+    let doc = || easycad_model::document::Document::new("empty");
+    let mode = |h: &Harness<'static, EasyCadApp>| std::mem::discriminant(&h.state().mode);
+    let mut by_key = harness(doc());
+    let before = mode(&by_key);
+    by_key.key_press(egui::Key::S);
+    by_key.run_steps(3);
+    let after_key = mode(&by_key);
+    assert_ne!(before, after_key, "S should change the mode (sketch or plane pick)");
+    drop(by_key);
+    let mut by_button = harness(doc());
+    by_button.get_by_label("Start a new sketch (or press s)").click();
+    by_button.run_steps(3);
+    assert_eq!(mode(&by_button), after_key);
 }

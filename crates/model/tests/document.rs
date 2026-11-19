@@ -338,3 +338,58 @@ fn old_fillet_setback_flag_still_loads() {
     assert!(r.errors().is_empty(), "{:?}", r.errors());
     assert!(r.reports.iter().all(|x| matches!(x.status, FeatureStatus::Ok)), "{:?}", r.reports.iter().map(|x| &x.status).collect::<Vec<_>>());
 }
+
+#[test]
+fn new_docs_seed_params_from_their_profile() {
+    use easycad_model::process::ProcessProfile;
+    for p in ProcessProfile::builtins() {
+        let d = Document::new_with_profile("t", &p.name);
+        assert_eq!(d.data.active_profile, p.name);
+        assert!(!p.params.is_empty(), "{} has no defaults", p.name);
+        for q in &p.params {
+            assert!(easycad_model::params::valid_name(&q.name), "{}", q.name);
+            let got = d.data.params.get(&q.name).unwrap_or_else(|| panic!("{}: missing {}", p.name, q.name));
+            assert_eq!(got.expr.0, q.expr);
+        }
+        assert!(d.data.params.get("wall").is_some() && d.data.params.get("clearance").is_some());
+        d.data.params.evaluate().unwrap_or_else(|e| panic!("{}: {e:?}", p.name));
+    }
+    let fdm = Document::new_with_profile("t", "FDM 0.4 generic");
+    assert_eq!(fdm.data.params.get("wall").unwrap().expr.0, "1.6");
+    assert_eq!(fdm.data.params.get("layer").unwrap().expr.0, "0.2");
+    let sla = Document::new_with_profile("t", "SLA generic");
+    assert_eq!(sla.data.params.get("layer").unwrap().expr.0, "0.05");
+    assert!(sla.data.params.get("nozzle").is_none());
+}
+
+#[test]
+fn switching_profile_keeps_params_and_apply_adds_only_missing() {
+    let mut d = Document::new_with_profile("t", "FDM 0.4 generic");
+    d.set_param("wall", "3").unwrap();
+    d.set_active_profile("Injection molded (nominal)").unwrap();
+    assert_eq!(d.data.params.get("wall").unwrap().expr.0, "3");
+    assert!(d.data.params.get("draft").is_none());
+    let n = d.apply_profile_defaults();
+    assert!(n >= 2);
+    assert_eq!(d.data.params.get("wall").unwrap().expr.0, "3", "never overwrites");
+    assert!(d.data.params.get("draft").is_some());
+    assert_eq!(d.apply_profile_defaults(), 0);
+}
+
+#[test]
+fn profiles_without_params_field_still_load() {
+    use easycad_model::process::ProcessProfile;
+    let mut v = serde_json::to_value(ProcessProfile::fdm_generic()).unwrap();
+    v.as_object_mut().unwrap().remove("params");
+    let p: ProcessProfile = serde_json::from_value(v).unwrap();
+    assert!(p.params.is_empty());
+    // an old document: its profiles lack the field and its params stay as saved
+    let d = Document::new_with_profile("t", "FDM 0.4 generic");
+    let mut j: serde_json::Value = serde_json::from_str(&d.data.to_json().unwrap()).unwrap();
+    for pr in j["processes"].as_array_mut().unwrap() {
+        pr.as_object_mut().unwrap().remove("params");
+    }
+    let back = DocData::from_json(&j.to_string()).unwrap();
+    assert!(back.processes.iter().all(|p| p.params.is_empty()));
+    assert_eq!(back.params.get("wall").unwrap().expr.0, "1.6");
+}
