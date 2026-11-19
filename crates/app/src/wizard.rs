@@ -522,18 +522,14 @@ impl Settings {
     }
 
     pub fn new(profile: &str) -> Settings {
-        // wall thickness is a property of the process, so it comes from the
-        // profile's default `wall`; clearance (PCB to wall) is specific to this
-        // design and stays the wizard's own
-        let wall = easycad_model::process::ProcessProfile::builtins()
-            .into_iter()
-            .find(|p| p.name == profile)
-            .and_then(|p| p.params.into_iter().find(|q| q.name == "wall"))
-            .map_or_else(|| "2".to_string(), |q| q.expr);
+        // clearance and wall stay the wizard's own: the enclosure offset, standoffs
+        // and snap geometry are tuned around 0.5 + 2 mm (a profile wall of 1.6 mm
+        // makes the offset of the test board need a corner arc). The profile's
+        // other defaults (layer, nozzle, draft...) still seed the document.
         Settings {
             name: "enclosure".into(),
             clearance: "0.5".into(),
-            wall,
+            wall: "2".into(),
             height: "30".into(),
             corner_r: "6".into(),
             standoff_h: "5".into(),
