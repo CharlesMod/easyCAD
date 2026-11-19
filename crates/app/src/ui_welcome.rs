@@ -48,6 +48,7 @@ impl WizardUi {
                 if self.settings.name == "enclosure" || self.board.is_some() {
                     self.settings.name = b.name.clone();
                 }
+                self.settings.fit_board(&b);
                 self.board = Some(b);
                 self.error = None;
             }
@@ -324,11 +325,45 @@ pub fn wizard_window(app: &mut EasyCadApp, ui: &mut Ui) {
                                 });
                         });
                     });
+                    // the parts that may poke through the top: the tallest few
+                    if let Some(b) = &w.board {
+                        let mut tall: Vec<usize> = (0..b.components.len()).collect();
+                        tall.sort_by(|x, y| b.components[*y].max.z.total_cmp(&b.components[*x].max.z));
+                        tall.truncate(5);
+                        if !tall.is_empty() {
+                            ui.add_space(6.0);
+                            let mut changed = false;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Through the top").color(theme::TEXT_DIM))
+                                    .on_hover_text("Parts that poke out of the top (pogo pins, headers): each gets an opening and the height follows them");
+                                for i in tall {
+                                    let c = &b.components[i];
+                                    let on = w.settings.exposed.contains(&i);
+                                    let label = format!("{} · {:.1} mm", short(&c.name), c.max.z - b.bottom_z - b.thickness);
+                                    if widgets::pill(ui, &label, on).clicked() {
+                                        if on {
+                                            w.settings.exposed.retain(|x| *x != i);
+                                        } else {
+                                            w.settings.exposed.push(i);
+                                        }
+                                        changed = true;
+                                    }
+                                }
+                            });
+                            if changed {
+                                w.settings.fit_height(b);
+                            }
+                        }
+                    }
                     if let (Some(e), Some(_)) = (&w.error, &w.board) {
                         ui.add_space(6.0);
                         ui.label(RichText::new(e).size(12.0).color(theme::ORANGE_SOFT));
                     }
                     ui.add_space(10.0);
+                    if w.board.as_ref().is_some_and(|b| !b.components.is_empty()) {
+                        ui.checkbox(&mut w.settings.fill_top, "Lid follows the parts")
+                            .on_hover_text("The lid is solid down to the board, holding it in place, with pockets over the parts (thicker where the parts are low), instead of an even shell");
+                    }
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut w.settings.components, "Base and Lid as components")
                             .on_hover_text("An assembly: the enclosure is the design master, split into Base and Lid components that follow its edits; a STEP board becomes a locked reference component");
@@ -399,6 +434,15 @@ pub fn wizard_window(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 }
 
+/// A part name short enough for a pill.
+fn short(n: &str) -> String {
+    if n.chars().count() > 18 {
+        format!("{}…", n.chars().take(17).collect::<String>())
+    } else {
+        n.to_string()
+    }
+}
+
 /// Board outline (grey), enclosure outline (blue, approximate), holes and bosses.
 fn preview(ui: &mut Ui, r: Rect, w: &WizardUi) {
     let p = ui.painter_at(r);
@@ -431,12 +475,24 @@ fn preview(ui: &mut Ui, r: Rect, w: &WizardUi) {
     let to = |q: DVec2| pos2(c.x + ((q.x - b.center.x) * k) as f32, c.y - ((q.y - b.center.y) * k) as f32);
     // enclosure: rounded rectangle around the board's bbox
     let er = Rect::from_center_size(c, vec2((outer.x * k) as f32, (outer.y * k) as f32));
-    p.rect_stroke(
-        er,
-        (cr.max(0.0) * k) as f32,
-        Stroke::new(1.5, theme::ACCENT),
-        egui::StrokeKind::Middle,
-    );
+    if let Some([easycad_model::geom::Segment2::Circle { radius, .. }]) = b.shape_loop.as_deref() {
+        // a round board: a round enclosure
+        p.circle_stroke(c, ((radius + off) * k) as f32, Stroke::new(1.5, theme::ACCENT));
+    } else {
+        p.rect_stroke(
+            er,
+            (cr.max(0.0) * k) as f32,
+            Stroke::new(1.5, theme::ACCENT),
+            egui::StrokeKind::Middle,
+        );
+    }
+    // the parts that poke through the top
+    for i in &w.settings.exposed {
+        if let Some(part) = b.components.get(*i) {
+            let (a, z) = (to(DVec2::new(part.min.x, part.max.y)), to(DVec2::new(part.max.x, part.min.y)));
+            p.rect_stroke(Rect::from_min_max(a, z), 1.0, Stroke::new(1.2, theme::ACCENT), egui::StrokeKind::Middle);
+        }
+    }
     let pts: Vec<egui::Pos2> = b.outline.iter().map(|q| to(*q)).collect();
     if pts.len() > 2 {
         p.add(egui::Shape::closed_line(pts, Stroke::new(1.2, theme::GREEN_REF)));

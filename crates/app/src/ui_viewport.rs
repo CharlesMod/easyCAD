@@ -572,8 +572,10 @@ fn build_frame(
                 colors = Some(app.overhang.colors(m, up, crit));
             }
             if colors.is_some() {
-                // vertex colours (imported appearance, heat map); keep the reference translucency
-                color = [1.0, 1.0, 1.0, if b.body.reference { 0.6 } else { 1.0 }];
+                // vertex colours (imported appearance, heat map): solid. A reference
+                // with its own colours (a PCB) reads as the real part; only an
+                // uncoloured reference keeps the translucent reference green
+                color = [1.0, 1.0, 1.0, 1.0];
             }
             let offset = match explode {
                 Some((id, off)) if id == b.body.id => off,
@@ -582,7 +584,7 @@ fn build_frame(
             bodies.push(DrawBody {
                 mesh: m.clone(),
                 color,
-                translucent: b.body.reference,
+                translucent: b.body.reference && color[3] < 1.0,
                 colors,
                 model: glam::Mat4::from_translation(offset),
             });
@@ -626,7 +628,7 @@ fn build_frame(
             colors = Some(app.overhang.colors(m, c.place.inverse().transform_vector3(up), crit));
         }
         if colors.is_some() {
-            color = [1.0, 1.0, 1.0, if b.reference { 0.6 } else { 1.0 }];
+            color = [1.0, 1.0, 1.0, 1.0];
         }
         if let Some(t) = crate::ui_assembly::body_tint(app, c) {
             color = t;
@@ -638,7 +640,7 @@ fn build_frame(
         bodies.push(DrawBody {
             mesh: m.clone(),
             color,
-            translucent: b.reference || dim || tinted,
+            translucent: (b.reference && color[3] < 1.0) || dim || tinted,
             colors,
             model: to_mat4(crate::ui_assembly::display_xf(app, c)),
         });

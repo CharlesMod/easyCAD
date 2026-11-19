@@ -537,7 +537,7 @@ What changed for it:
     re-checks, and reports "snap at 38 %: beam shortened to 5.40 mm" (a strain
     warning follows if the shorter beam is over-strained). The position search walks
     the whole outline; a failure with no blocker is reported as infeasible ("snap
-    fits do not fit this outline (12.0 mm of straight wall needed per beam)").
+    fits do not fit this outline (12.0 mm of even wall needed per beam)").
   - **2D offset ladder** (`offset_region`, shim): cleaned face, original face, each
     loop on its own (outer by d, holes by −d, holes cut out; a hole that vanishes when
     the region grows is dropped), intersection joins, then a 0.05 mm corner-radius

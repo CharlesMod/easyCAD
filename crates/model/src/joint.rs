@@ -774,6 +774,7 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
             let mut placed_frac: Vec<f64> = Vec::new();
             let mut beams = Vec::new();
             let mut windows = Vec::new();
+            let mut curved = false;
             for s0 in req {
                 let mut found = None;
                 let mut why = String::from("no straight wall section free of features nearby");
@@ -795,6 +796,7 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                         let dims = SnapDims { t_eff: t, b, tb, l, y, z1, z2, c, mg, root };
                         match snap_geometry(&ring, &rr, env_outer, perim, s, n, nb, &dims) {
                             Ok((beam, window, keepout_lo, keepout_up, fr)) => {
+                                curved |= fr.curve.is_some();
                                 let (lo_s, up_s) = if *beam_on == Half::Lower { (&lower, &upper) } else { (&upper, &lower) };
                                 let blocked = |ko_lo: &Shape, ko_up: &Shape| interference(ko_lo, lo_s) > 1e-6 || interference(ko_up, up_s) > 1e-6;
                                 if !blocked(&keepout_lo, &keepout_up) {
@@ -858,9 +860,12 @@ fn build_once(inp: &JointInput) -> JR<(Shape, Shape, JointReport)> {
                 // the whole outline was searched: without a blocker it is the outline
                 // itself (no straight run long enough, wall too thin for the hook)
                 if why.iter().all(|w| !w.starts_with("blocked")) {
-                    return Err(format!("snap fits do not fit this outline ({:.1} mm of straight wall needed per beam): {}", 2.0 * half_span, why.join("; ")));
+                    return Err(format!("snap fits do not fit this outline ({:.1} mm of even wall needed per beam): {}", 2.0 * half_span, why.join("; ")));
                 }
                 return Err(format!("no snap-fit position could be placed: {}", why.join("; ")));
+            }
+            if curved {
+                rep.warnings.push("the snap beams curve with the wall: they bend stiffer than the flat-beam strain estimate, so keep them narrow".into());
             }
             for (bm, w) in beams.into_iter().zip(windows) {
                 add(*beam_on, bm, &mut pend)?;
@@ -959,24 +964,52 @@ fn local_box(p: DVec3, tan: DVec3, inw: DVec3, nb: DVec3, a: (f64, f64), u: (f64
 fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DVec3, nb: DVec3, d: &SnapDims) -> JR<(Shape, Shape, Shape, Shape, SnapFrame)> {
     let (p, tan) = k(env.outer_wire_point(s), "outline point")?;
     let tan = (tan - n * tan.dot(n)).normalize();
-    // straight-wall check: neighbours along the outline stay on the tangent line
+    // an even wall: the neighbours along the outline stay on the tangent line (a
+    // straight wall) or, with the point, on one circle they are tangent to (a
+    // round wall: the beam then curves with it)
     let span = d.b / 2.0 + d.c + d.mg;
-    for sg in [-1.0, 1.0] {
-        let (q, tq) = k(env.outer_wire_point(s + sg * span / perim), "outline point")?;
-        let off = (q - p) - tan * (q - p).dot(tan);
-        if off.length() > 0.05 || tq.normalize().dot(tan).abs() < 0.999 {
-            return Err("too close to a corner".into());
-        }
-    }
+    let at = |f: f64| k(env.outer_wire_point(s + f * span / perim), "outline point");
+    let ends = [at(-1.0)?, at(1.0)?];
+    let straight = ends.iter().all(|(q, tq)| {
+        let off = (*q - p) - tan * (*q - p).dot(tan);
+        off.length() <= 0.05 && tq.normalize().dot(tan).abs() >= 0.999
+    });
     let mut inw = n.cross(tan);
     let probe = p + inw * (ring.t * 0.5).max(0.2);
     if !env.region_contains(probe).unwrap_or(false) {
         inw = -inw;
     }
+    // centre, radius and turning axis (a turn about it moves along +tan)
+    let mut curve: Option<(DVec3, f64, DVec3)> = None;
+    if !straight {
+        let flat = |v: DVec3| v - n * v.dot(n);
+        let (a, b) = (flat(ends[0].0 - p), flat(ends[1].0 - p));
+        let cr = a.cross(b);
+        if cr.length_squared() < 1e-12 {
+            return Err("too close to a corner".into());
+        }
+        let cc = p + (b * a.length_squared() - a * b.length_squared()).cross(cr) / (2.0 * cr.length_squared());
+        let r = (cc - p).length();
+        let on_circle = [(p, tan), ends[0], ends[1]]
+            .iter()
+            .all(|(q, t)| flat(*q - cc).normalize().dot(flat(*t).normalize()).abs() < 0.02)
+            && [at(-0.5)?, at(0.5)?].iter().all(|(q, _)| (flat(*q - cc).length() - r).abs() < 0.05);
+        if !on_circle {
+            return Err("too close to a corner".into());
+        }
+        if (cc - p).dot(inw) < 0.0 {
+            return Err("the wall curves inward here".into());
+        }
+        if r < 2.0 * span {
+            return Err("the wall curves too tightly here".into());
+        }
+        let ax = if n.cross(-inw).dot(tan) > 0.0 { n } else { -n };
+        curve = Some((cc, r, ax));
+    }
     // local wall thickness of the (rimmed) ring along the inward direction, at the
     // centre and both ends of the beam span: a boss or rib merged into the wall
     // shows up as a locally thicker wall
-    let thickness_at = |q: DVec3| -> Option<f64> {
+    let thickness_at = |q: DVec3, inw: DVec3| -> Option<f64> {
         let step = 0.05;
         let mut uu = step / 2.0;
         let mut last = None;
@@ -990,9 +1023,13 @@ fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DV
         }
         last
     };
-    let Some(tw) = thickness_at(p) else { return Err("no wall at this position (cutout?)".into()) };
-    for sg in [-1.0, 1.0] {
-        match thickness_at(p + tan * sg * span) {
+    let Some(tw) = thickness_at(p, inw) else { return Err("no wall at this position (cutout?)".into()) };
+    for (i, sg) in [-1.0, 1.0].into_iter().enumerate() {
+        let (q, dir) = match curve {
+            None => (p + tan * sg * span, inw),
+            Some((cc, ..)) => (ends[i].0, (cc - ends[i].0 - n * (cc - ends[i].0).dot(n)).normalize()),
+        };
+        match thickness_at(q, dir) {
             Some(t2) if (t2 - tw).abs() <= 0.3 => {}
             Some(_) => return Err("a boss or rib merges with the wall here".into()),
             None => return Err("too close to a wall cutout".into()),
@@ -1007,14 +1044,32 @@ fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DV
         return Err("undercut deeper than the wall".into());
     }
     let ha = d.b / 2.0;
-    let bx = |a: (f64, f64), u: (f64, f64), z: (f64, f64)| local_box(p, tan, inw, nb, a, u, z).map_err(|e| e.0);
+    // a (u, z) section swept over the tangential range `a`: along the tangent, or
+    // around the wall's centre
+    let sweep = |poly: &[(f64, f64)], a: (f64, f64)| -> Result<Shape, occt::Error> {
+        let pts: Vec<DVec3> = poly.iter().map(|&(u, z)| p + inw * u + nb * z).collect();
+        let e: Vec<Edge> = (0..pts.len()).map(|i| Edge::Line(pts[i], pts[(i + 1) % pts.len()])).collect();
+        let f = Shape::face(&Frame { origin: pts[0], x_dir: inw, normal: tan }, &e, &[])?;
+        match curve {
+            Some((cc, r, ax)) => f.rotated(cc, ax, (a.0 / r).to_degrees())?.revolve(cc, ax, ((a.1 - a.0) / r).to_degrees()),
+            None => f.translated(tan * a.0)?.extrude(tan * (a.1 - a.0)),
+        }
+    };
+    let bx = |a: (f64, f64), u: (f64, f64), z: (f64, f64)| match curve {
+        None => local_box(p, tan, inw, nb, a, u, z).map_err(|e| e.0),
+        Some(_) => sweep(&[(u.0, z.0), (u.1, z.0), (u.1, z.1), (u.0, z.1)], a).map_err(|e| e.0),
+    };
     let root = bx((-ha, ha), (tw, ub + d.tb), (-d.root, 0.0))?;
     let beam = bx((-ha, ha), (ub, ub + d.tb), (0.0, d.l))?;
     // hook: triangle (ub, z1) → (ub − y, z2) → (ub, L), extruded along the tangent
     let hp = |uq: f64, zq: f64| p + tan * -ha + inw * uq + nb * zq;
     let tri = [hp(ub, d.z1), hp(ub - d.y, d.z2), hp(ub, d.l)];
     let e: Vec<Edge> = (0..3).map(|i| Edge::Line(tri[i], tri[(i + 1) % 3])).collect();
-    let hook = Shape::face(&Frame { origin: tri[0], x_dir: inw, normal: tan }, &e, &[]).and_then(|f| f.extrude(tan * d.b)).map_err(|e| e.0)?;
+    let hook = match curve {
+        None => Shape::face(&Frame { origin: tri[0], x_dir: inw, normal: tan }, &e, &[]).and_then(|f| f.extrude(tan * d.b)),
+        Some(_) => sweep(&[(ub, d.z1), (ub - d.y, d.z2), (ub, d.l)], (-ha, ha)),
+    }
+    .map_err(|e| e.0)?;
     let solid = Shape::fuse_all(&[&root, &beam, &hook]).map_err(|e| e.0)?;
     let solid = tidy(solid);
     // window through the other half's wall + pocket for the beam
@@ -1025,7 +1080,7 @@ fn snap_geometry(ring: &Ring, rr: &Shape, env: &Shape, perim: f64, s: f64, n: DV
     // keep-outs: space the beam needs, away from the wall it bonds to
     let ko_lo = bx((-ha - d.mg, ha + d.mg), (tw + 0.05, ub + d.tb + d.mg), (-d.root, -0.05))?;
     let ko_up = bx((-ha - d.mg, ha + d.mg), (tw + 0.05, ub + d.tb + d.mg), (0.05, d.l + d.c))?;
-    let frame = SnapFrame { p, tan, inw, u: (tw + 0.05, ub + d.tb + d.mg), a: (-ha - d.mg, ha + d.mg) };
+    let frame = SnapFrame { p, tan, inw, u: (tw + 0.05, ub + d.tb + d.mg), a: (-ha - d.mg, ha + d.mg), curve };
     Ok((solid, tool, ko_lo, ko_up, frame))
 }
 
@@ -1037,13 +1092,32 @@ struct SnapFrame {
     inw: DVec3,
     u: (f64, f64),
     a: (f64, f64),
+    /// A round wall (the beam curves with it): centre, radius, turning axis.
+    curve: Option<(DVec3, f64, DVec3)>,
+}
+
+/// `local_box` on a round wall: the (u, z) rectangle at `p` turned around the
+/// wall's centre over the arc lengths `a` (measured on the outer surface).
+#[allow(clippy::too_many_arguments)]
+fn sector_box(p: DVec3, tan: DVec3, inw: DVec3, nb: DVec3, (cc, r, ax): (DVec3, f64, DVec3), a: (f64, f64), u: (f64, f64), z: (f64, f64)) -> Result<Shape, occt::Error> {
+    let q = |uu: f64, zz: f64| p + inw * uu + nb * zz;
+    let pts = [q(u.0, z.0), q(u.1, z.0), q(u.1, z.1), q(u.0, z.1)];
+    let e: Vec<Edge> = (0..4).map(|i| Edge::Line(pts[i], pts[(i + 1) % 4])).collect();
+    Shape::face(&Frame { origin: pts[0], x_dir: inw, normal: tan }, &e, &[])?
+        .rotated(cc, ax, (a.0 / r).to_degrees())?
+        .revolve(cc, ax, ((a.1 - a.0) / r).to_degrees())
 }
 
 impl SnapFrame {
     /// Free height along `dir` above the footprint before `half` has material
     /// (up to `reach`).
     fn free(&self, half: &Shape, dir: DVec3, reach: f64) -> f64 {
-        let Ok(tall) = local_box(self.p, self.tan, self.inw, dir, self.a, self.u, (0.05, reach.max(0.1))) else { return 0.0 };
+        let z = (0.05, reach.max(0.1));
+        let tall = match self.curve {
+            None => local_box(self.p, self.tan, self.inw, dir, self.a, self.u, z),
+            Some(c) => sector_box(self.p, self.tan, self.inw, dir, c, self.a, self.u, z),
+        };
+        let Ok(tall) = tall else { return 0.0 };
         match half.common(&tall).and_then(|h| h.edges()) {
             Ok(es) => es.iter().flat_map(|e| [e.start, e.end]).map(|q| (q - self.p).dot(dir)).fold(reach, f64::min),
             Err(_) => 0.0,

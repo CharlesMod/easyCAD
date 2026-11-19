@@ -958,9 +958,31 @@ fn step_tree(blob: &str, blobs: &BlobStore, cache: &mut AssemblyCache) -> Result
         return Ok(t.clone());
     }
     let data = blobs.get(blob).ok_or_else(|| format!("blob {blob} is missing"))?;
-    let t = Arc::new(occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| e.to_string())?);
+    let mut t = occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| e.to_string())?;
+    pcb_layer_colors(&mut t);
+    let t = Arc::new(t);
     cache.step_trees.insert(blob.to_string(), t.clone());
     Ok(t)
+}
+
+/// A PCB export (EasyEDA) gives its copper layers no colour. Copper planes and
+/// traces lie under the solder mask, so they take the board's colour; small
+/// copper (pads, which the mask leaves bare) keeps the default.
+pub(crate) fn pcb_layer_colors(tree: &mut occt::StepTree) {
+    /// Copper at least this long is a plane or a trace, not a pad (mm).
+    const PLANE_MIN: f64 = 4.0;
+    let layer = |n: &occt::StepNode| n.name.split('~').next().unwrap_or("").to_string();
+    let Some(mask) = tree.nodes.iter().find(|n| layer(n) == "Board").and_then(|n| n.color) else { return };
+    for n in &mut tree.nodes {
+        if n.color.is_some() || !layer(n).ends_with("Copper") {
+            continue;
+        }
+        let Some(bb) = n.shape.as_ref().and_then(|s| s.bbox().ok()) else { continue };
+        let size = bb.max - bb.min;
+        if size.x.max(size.y) >= PLANE_MIN {
+            n.color = Some(mask);
+        }
+    }
 }
 
 /// A STEP node's own geometry as one body (no body for an assembly node).
@@ -1797,7 +1819,8 @@ impl Document {
     /// are reference bodies and the top component is purchased (its BOM line). STEP
     /// components are always locked. Returns the top component and its occurrence.
     pub fn import_step_assembly(&mut self, name: &str, data: Vec<u8>, parent: ComponentId, reference: bool) -> Result<(ComponentId, OccurrenceId), DocError> {
-        let tree = occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| DocError::Other(e.to_string()))?;
+        let mut tree = occt::StepTree::read(&String::from_utf8_lossy(&data)).map_err(|e| DocError::Other(e.to_string()))?;
+        pcb_layer_colors(&mut tree);
         let blob = self.blobs.put(data);
         self.asm.step_trees.insert(blob.clone(), Arc::new(tree.clone()));
         let (top, occ) = self.edit(&format!("Import {name}"), |d| {
@@ -2467,5 +2490,27 @@ impl DocData {
             None => return Err("the root component's own bodies are not a BOM item".into()),
         };
         flat.iter().position(|r| r.component == Some(c)).ok_or_else(|| format!("`{}` is not in the BOM (in_bom is off)", self.component_name(c)))
+    }
+}
+
+#[cfg(test)]
+mod pcb_colour_tests {
+    /// A real EasyEDA export kept outside the repo (`EASYCAD_REAL_BOARD_STEP=<file>`):
+    /// its copper planes take the board's solder-mask colour, its pads do not.
+    #[test]
+    fn copper_planes_take_the_mask_colour() {
+        let Ok(p) = std::env::var("EASYCAD_REAL_BOARD_STEP") else { return };
+        let mut t = occt::StepTree::read(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let copper = |t: &occt::StepTree| {
+            let c: Vec<_> = t.nodes.iter().filter(|n| n.name.split('~').next().unwrap().ends_with("Copper")).collect();
+            (c.len(), c.iter().filter(|n| n.color.is_some()).count())
+        };
+        let before = copper(&t);
+        super::pcb_layer_colors(&mut t);
+        let after = copper(&t);
+        let mask = t.nodes.iter().find(|n| n.name.starts_with("Board")).and_then(|n| n.color);
+        println!("copper nodes {before:?} -> {after:?}, mask {mask:?}");
+        assert!(before.0 > 0 && before.1 == 0, "{before:?}");
+        assert!(after.1 > 0 && after.1 < after.0, "planes coloured, pads left: {after:?}");
     }
 }
