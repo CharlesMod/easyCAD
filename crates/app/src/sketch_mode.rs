@@ -104,6 +104,7 @@ pub struct SketchSession {
     pub snap: bool,
     pub slice: bool,
     pub undo: Vec<(Sketch, Vec<Option<String>>)>,
+    pub redo: Vec<(Sketch, Vec<Option<String>>)>,
     pub values: Values,
     pub names: Vec<String>,
     pub drag: Option<PointId>,
@@ -153,6 +154,7 @@ impl SketchSession {
             snap: true,
             slice: false,
             undo: Vec::new(),
+            redo: Vec::new(),
             values,
             names,
             drag: None,
@@ -353,19 +355,33 @@ impl SketchSession {
     pub fn push_undo(&mut self) {
         self.undo
             .push((self.sketch.clone(), self.entity_layer.clone()));
+        self.redo.clear();
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
         self.dirty = true;
     }
 
-    pub fn undo(&mut self) {
-        if let Some((s, l)) = self.undo.pop() {
-            self.sketch = s;
-            self.entity_layer = l;
-            self.selection.clear();
-            self.resolve();
-        }
+    /// Step back one sketch edit; false when this session has nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some((s, l)) = self.undo.pop() else { return false };
+        let cur = (std::mem::replace(&mut self.sketch, s), std::mem::replace(&mut self.entity_layer, l));
+        self.redo.push(cur);
+        self.selection.clear();
+        self.dirty = true;
+        self.resolve();
+        true
+    }
+
+    /// Re-apply the last undone sketch edit; false when there is none.
+    pub fn redo(&mut self) -> bool {
+        let Some((s, l)) = self.redo.pop() else { return false };
+        let cur = (std::mem::replace(&mut self.sketch, s), std::mem::replace(&mut self.entity_layer, l));
+        self.undo.push(cur);
+        self.selection.clear();
+        self.dirty = true;
+        self.resolve();
+        true
     }
 
     /// Run the solver and refresh status.
@@ -746,6 +762,7 @@ impl SketchSession {
         self.resolve();
         if self.report.as_ref().is_some_and(|r| !r.converged) {
             self.undo();
+            self.redo.pop(); // a refused edit is not something to redo
             return Err("that dimension conflicts with existing constraints".into());
         }
         Ok(())
@@ -1303,9 +1320,8 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 }
             }
         });
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
-            s.undo();
-        }
+        // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y are dispatched once, by `EasyCadApp::shortcuts`
+        // (sketch history first, then the document's).
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if s.input.is_some() {
                 s.input = None;

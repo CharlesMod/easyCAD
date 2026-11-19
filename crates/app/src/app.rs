@@ -632,14 +632,30 @@ impl EasyCadApp {
         }
     }
 
+    /// The one undo dispatch (Ctrl+Z, the toolbar button). In sketch mode the
+    /// sketch's own history goes first; once that is empty the document's history
+    /// is stepped, as in any CAD app that keeps feature and sketch undo apart.
     pub fn undo(&mut self) {
+        if let Mode::Sketch(s) = &mut self.mode {
+            if s.undo() {
+                self.toast("Undo: sketch edit");
+                return;
+            }
+        }
         if let Some(l) = self.doc.undo() {
             self.toast(format!("Undo: {l}"));
             self.params.buffers.clear();
             self.after_edit();
         }
     }
+    /// Redo (Ctrl+Shift+Z, Ctrl+Y): the sketch's redo stack first, then the document's.
     pub fn redo(&mut self) {
+        if let Mode::Sketch(s) = &mut self.mode {
+            if s.redo() {
+                self.toast("Redo: sketch edit");
+                return;
+            }
+        }
         if let Some(l) = self.doc.redo() {
             self.toast(format!("Redo: {l}"));
             self.params.buffers.clear();

@@ -546,3 +546,60 @@ fn place_a_part_with_modeled_threads() {
     assert_eq!(*threads, Threads::Modeled);
     save(&mut h, "parts_modeled_threads");
 }
+
+// ---- sketch input: undo / redo keys -------------------------------------------------
+
+fn chord(h: &mut Harness<'static, EasyCadApp>, m: egui::Modifiers, k: egui::Key) {
+    h.key_press_modifiers(m, k);
+    h.run_steps(3);
+}
+
+#[test]
+fn undo_redo_keys_in_model_mode() {
+    let _g = serial();
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear(); // crash leftovers on this machine would hold the keyboard
+    h.state_mut().set_param("zz", "5").unwrap();
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"));
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(h.state().doc.redo_label(), Some("Set zz"), "Ctrl+Z undoes the document edit");
+    chord(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "Ctrl+Shift+Z redoes");
+    assert_eq!(h.state().doc.redo_label(), None);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Y);
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "Ctrl+Y redoes");
+}
+
+#[test]
+fn undo_redo_keys_in_sketch_mode() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear(); // crash leftovers on this machine would hold the keyboard
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().set_param("zz", "5").unwrap();
+    h.state_mut().open_sketch(None);
+    h.run_steps(3);
+    let n = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => (s.sketch.points.len(), s.undo.len(), s.redo.len()),
+        _ => panic!("not in sketch mode"),
+    };
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.push_undo();
+        s.sketch.add_point(glam::DVec2::new(1.0, 2.0));
+    }
+    assert_eq!(n(&h).0, 1);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(n(&h).0, 0, "Ctrl+Z undoes the sketch edit");
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "the document edit is untouched while the sketch has history");
+    chord(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+    assert_eq!(n(&h).0, 1, "Ctrl+Shift+Z redoes the sketch edit");
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Y);
+    assert_eq!(n(&h).0, 1, "Ctrl+Y redoes the sketch edit");
+    // with the sketch history spent, Ctrl+Z falls through to the document's
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(h.state().doc.redo_label(), Some("Set zz"), "falls back to the document stack");
+}
