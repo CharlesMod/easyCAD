@@ -780,7 +780,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         theme::prop(13.0),
         theme::TEXT_DIM,
     );
-    let sketches: Vec<(SketchId, String, bool)> = app
+    let sketches: Vec<(SketchId, String, bool, bool)> = app
         .view()
         .sketches
         .iter()
@@ -793,12 +793,28 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
                     .meta
                     .get(&format!("gui.sketch_src.{}", s.id.0))
                     .is_some_and(|v| v == "DXF"),
+                app.view().sketch_visible(s.id),
             )
         })
         .collect();
     let mut edit = None;
-    for (sid, name, dxf) in sketches {
+    let mut toggle = None;
+    for (sid, name, dxf, vis) in sketches {
         let (r, resp) = row(ui, 40.0, 28.0, false);
+        let eye = egui::Rect::from_center_size(egui::pos2(r.right() - 26.0, r.center().y), vec2(28.0, 28.0));
+        let er = ui.interact(eye, ui.scope_id().with(("sketch_eye", sid.0)), Sense::click());
+        if er.hovered() {
+            p.rect_filled(eye, 6.0, theme::HOVER);
+        }
+        widgets::paint_icon(
+            &p,
+            eye.shrink(6.0),
+            if vis { Icon::Eye } else { Icon::EyeOff },
+            if er.hovered() { theme::TEXT_STRONG } else { theme::TEXT_DIM },
+        );
+        if er.on_hover_text(if vis { format!("Hide {name}") } else { format!("Show {name}") }).clicked() {
+            toggle = Some((sid, !vis));
+        }
         p.text(
             r.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -820,12 +836,16 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
             );
         }
         let resp = resp.on_hover_text("Double-click to edit");
-        if resp.double_clicked() {
+        if resp.double_clicked() && toggle.is_none() {
             edit = Some(sid);
         }
         resp.context_menu(|ui| {
             if ui.button("Edit sketch").clicked() {
                 edit = Some(sid);
+            }
+            if ui.button(if vis { "Hide sketch" } else { "Show sketch" }).clicked() {
+                toggle = Some((sid, !vis));
+                ui.close();
             }
             if ui.button("Extrude…").clicked() {
                 app.open_dialog(DialogKind::Extrude);
@@ -838,6 +858,9 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
                 }
             }
         });
+    }
+    if let Some((sid, v)) = toggle {
+        crate::sketch_view::set_visible(app, sid, v);
     }
     if let Some(s) = edit {
         app.open_sketch(Some(s));

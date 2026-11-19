@@ -14,6 +14,7 @@ pub mod sample;
 pub mod scope;
 pub mod settings;
 pub mod sketch_mode;
+pub mod sketch_view;
 pub mod smoke;
 pub mod theme;
 pub mod ui_assembly;

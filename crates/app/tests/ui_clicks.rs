@@ -33,6 +33,7 @@ fn harness(doc: easycad_model::document::Document) -> Harness<'static, EasyCadAp
         .with_pixels_per_point(1.0)
         .with_accessibility_check(false)
         .with_step_dt(1.0 / 30.0)
+        .allow_missing_glyphs()
         .wgpu()
         .build_eframe(move |cc| EasyCadApp::new(cc, Some(doc)));
     settle(&mut h);
@@ -545,4 +546,67 @@ fn place_a_part_with_modeled_threads() {
     let FeatureKind::InsertPart { threads, .. } = &last.kind else { panic!("placed {:?}", last.kind) };
     assert_eq!(*threads, Threads::Modeled);
     save(&mut h, "parts_modeled_threads");
+}
+
+fn has(app: &EasyCadApp, sid: easycad_model::feature::SketchId) -> bool {
+    easycad_app::sketch_view::draw_list(app).iter().any(|(i, _)| *i == sid)
+}
+
+#[test]
+fn finished_sketch_is_drawn_in_3d_until_an_extrude_consumes_it() {
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::geom::Plane;
+    use easycad_model::sketch::Sketch;
+    let _serial = serial();
+    let mut doc = easycad_app::sample::sensor_node();
+    let mut s = Sketch::new("S", Plane::XY);
+    s.rect(glam::DVec2::ZERO, glam::DVec2::new(40.0, 20.0));
+    let sid = doc.add_sketch(s);
+    let mut h = harness(doc);
+    let list = easycad_app::sketch_view::draw_list(h.state());
+    let mine = h.state().view().sketches.iter().position(|e| e.id == sid).unwrap();
+    let list: Vec<_> = list.into_iter().filter(|(i, _)| *i == sid).collect();
+    let _ = mine;
+    assert_eq!(list.len(), 1, "the finished sketch is in the draw list");
+    assert_eq!(list[0].1.edges.len(), 4, "four lines");
+    assert!(!list[0].1.indices.is_empty(), "closed profile filled");
+    assert!(list[0].1.edges.iter().flat_map(|e| &e.points).all(|p| p[2] == 0.0), "on the XY plane");
+    // cached: frames do not rebuild it
+    let builds = easycad_app::sketch_view::builds();
+    h.run_steps(5);
+    let again: Vec<_> = easycad_app::sketch_view::draw_list(h.state()).into_iter().filter(|(i, _)| *i == sid).collect();
+    assert!(std::sync::Arc::ptr_eq(&list[0].1, &again[0].1));
+    assert_eq!(easycad_app::sketch_view::builds(), builds);
+    save(&mut h, "sketch_visible_in_3d");
+    // an extrude consumes it: hidden by default
+    h.state_mut().doc.add_feature(
+        "Block",
+        FeatureKind::Extrude { sketch: sid, profiles: ProfileSel::All, distance: 5.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    );
+    h.run_steps(3);
+    assert!(!has(h.state(), sid), "consumed sketch hidden");
+    // the toggle brings it back and sticks
+    easycad_app::sketch_view::set_visible(h.state_mut(), sid, true);
+    assert!(has(h.state(), sid));
+    settle(&mut h);
+    assert!(has(h.state(), sid), "regeneration keeps the choice");
+}
+
+#[test]
+fn lone_sketch_shows_on_its_plane_in_an_empty_model() {
+    use easycad_model::geom::Plane;
+    use easycad_model::sketch::Sketch;
+    let _serial = serial();
+    let mut doc = easycad_model::document::Document::new("blank");
+    let mut s = Sketch::new("S", Plane::XY);
+    s.rect(glam::DVec2::new(-20.0, -10.0), glam::DVec2::new(20.0, 10.0));
+    doc.add_sketch(s);
+    let mut h = harness(doc);
+    let img = save(&mut h, "sketch_visible_alone");
+    let vp = h.state().viewport_rect.shrink(20.0);
+    let green = img
+        .enumerate_pixels()
+        .filter(|(x, y, p)| vp.contains(egui::pos2(*x as f32, *y as f32)) && p.0[1] as i32 > p.0[0] as i32 + 60 && p.0[1] > 150)
+        .count();
+    assert!(green > 100, "the sketch outline is drawn in the sketch colour ({green} px)");
 }

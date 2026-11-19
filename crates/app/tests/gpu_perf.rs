@@ -77,6 +77,7 @@ fn orbit_frames_reuse_uploaded_mesh() {
                 model: glam::Mat4::IDENTITY,
             }],
             highlights: Vec::new(),
+            sketches: vec![],
             grid: None,
         };
         let t0 = Instant::now();
@@ -147,6 +148,7 @@ fn unchanged_frames_reuse_the_image() {
                 model: glam::Mat4::IDENTITY,
             }],
             highlights: Vec::new(),
+            sketches: vec![],
             grid: None,
         })
     };
@@ -194,6 +196,7 @@ fn bodies_outside_the_view_are_skipped() {
             edge_color: [0.1, 0.1, 0.1, 1.0],
             bodies: vec![DrawBody { mesh: mesh.clone(), color: [0.7, 0.7, 0.7, 1.0], translucent: false, colors: None, model }],
             highlights: Vec::new(),
+            sketches: vec![],
             grid: None,
         };
         let mut enc = device.create_command_encoder(&Default::default());

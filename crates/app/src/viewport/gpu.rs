@@ -76,6 +76,8 @@ pub struct Frame3D {
     pub edge_color: [f32; 4],
     pub bodies: Vec<DrawBody>,
     pub highlights: Vec<FaceHighlight>,
+    /// Finished sketches: edges in `color`, closed profiles as a faint fill.
+    pub sketches: Vec<DrawBody>,
     pub grid: Option<Grid>,
 }
 
@@ -758,6 +760,9 @@ impl ViewportGpu {
         for b in &f.bodies {
             self.upload(device, &b.mesh, b.colors.as_ref());
         }
+        for b in &f.sketches {
+            self.upload(device, &b.mesh, None);
+        }
         for h in &f.highlights {
             // highlights draw face ranges: any upload of the mesh will do
             match self.any_key(&h.mesh) {
@@ -859,6 +864,15 @@ impl ViewportGpu {
                 c[3] = 0.06;
                 list.push((P::Blend, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, c, 0.0)));
             }
+        }
+        for b in &f.sketches {
+            let k = key(&b.mesh, None);
+            if !b.mesh.indices.is_empty() {
+                let mut c = b.color;
+                c[3] = crate::sketch_view::FILL_ALPHA;
+                list.push((P::Blend, k, What::All, ub(b, c, 0.0)));
+            }
+            list.push((P::Lines, k, What::Edges, ub(b, b.color, 0.0)));
         }
         for h in &f.highlights {
             if let Some((hk, g)) = self.any_key(&h.mesh).and_then(|k| Some((k, self.meshes.get(&k)?))) {
@@ -1083,6 +1097,8 @@ fn same_image(a: &Frame3D, b: &Frame3D) -> bool {
         && a.grid == b.grid
         && a.bodies.len() == b.bodies.len()
         && a.bodies.iter().zip(&b.bodies).all(|(x, y)| body(x, y))
+        && a.sketches.len() == b.sketches.len()
+        && a.sketches.iter().zip(&b.sketches).all(|(x, y)| body(x, y))
         && a.highlights.len() == b.highlights.len()
         && a.highlights.iter().zip(&b.highlights).all(|(x, y)| hl(x, y))
 }

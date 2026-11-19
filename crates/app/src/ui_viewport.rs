@@ -730,6 +730,16 @@ fn build_frame(
         edge_color: srgba(theme::EDGE_DARK),
         bodies,
         highlights,
+        sketches: crate::sketch_view::draw_list(app)
+            .into_iter()
+            .map(|(_, mesh)| DrawBody {
+                mesh,
+                color: crate::sketch_view::LINE,
+                translucent: false,
+                colors: None,
+                model: glam::Mat4::IDENTITY,
+            })
+            .collect(),
         grid,
     }
 }
