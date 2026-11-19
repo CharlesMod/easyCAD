@@ -18,6 +18,8 @@ if [[ -z "${EASYCAD_OCCT_DIR:-}" && -d "$HOME/easyCAD/target/OCCT" ]]; then
   export EASYCAD_OCCT_DIR="$HOME/easyCAD/target/OCCT"
 fi
 
+# a fresh stamp re-runs crates/app/build.rs so the embedded git sha is current
+export EASYCAD_BUILD_STAMP="$(date +%s%N)"
 cargo build --release -p easycad
 
 mkdir -p "$(dirname "$DEST")"
