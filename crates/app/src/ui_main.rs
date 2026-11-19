@@ -1448,6 +1448,9 @@ fn history_chip(
 // ---------------------------------------------------------------- status
 
 pub fn status_text(app: &EasyCadApp) -> String {
+    if app.plane_pick.is_some() {
+        return crate::plane_pick::HINT.to_string();
+    }
     if let Some(n) = app.rollback() {
         if let Some(f) = app.view().features.get(n.saturating_sub(1)) {
             let l = app

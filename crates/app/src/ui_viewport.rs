@@ -198,6 +198,8 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         }
     }
     let hover = resp.hover_pos();
+    let picking = app.plane_pick.is_some();
+    crate::plane_pick::interact(app, ui, &resp, rect);
     if let Some(p) = hover {
         let (scroll, raw) = ui.input(|i| {
             let raw = i.events.iter().fold(egui::Vec2::ZERO, |a, e| match e {
@@ -273,8 +275,14 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         }
     }
 
+    if picking {
+        // the plane pick owns hover and click: no pick-stack highlights
+        app.stack.clear();
+    }
     let mut popover_click = None;
-    resp.context_menu(|ui| context_menu(app, ui));
+    if !picking {
+        resp.context_menu(|ui| context_menu(app, ui));
+    }
 
     // ------------------------------------------------ GPU frame
     let shown: Option<Arc<Output>> = if app.dialog.is_some() {
@@ -319,10 +327,12 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     let gizmo_owns = crate::ui_gizmo::gizmo(app, ui, rect, &resp);
 
     // ------------------------------------------------ click selection
-    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns {
+    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {
         let cur = app.stack.current().map(|c| c.key);
         select(app, cur, mods.command || mods.shift);
     }
+
+    crate::plane_pick::paint_labels(app, &painter, rect);
 
     // edge highlights (thick lines over the image)
     if let Some(m) = &model {
@@ -392,7 +402,9 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     crate::ui_mates::free_motion(app, ui, rect);
     crate::ui_mates::mate_card(app, ui, rect);
     crate::ui_interference::card(app, ui, rect);
-    crate::ui_welcome::welcome(app, ui, rect);
+    if !picking {
+        crate::ui_welcome::welcome(app, ui, rect);
+    }
     if let Some(mut ex) = app.export.take() {
         let r = Rect::from_center_size(rect.center(), vec2(370.0, if ex.assembly.is_some() { 360.0 } else { 240.0 }));
         let mut keep = true;
@@ -681,6 +693,17 @@ fn build_frame(
                 }
             }
         }
+        if let Some((b, f)) = crate::plane_pick::hovered_face(app) {
+            if let Some(mesh) = mesh_of(m, b) {
+                highlights.push(FaceHighlight {
+                    mesh: mesh.clone(),
+                    face: f,
+                    color: [0.18, 0.82, 0.62, 0.55],
+                    xray: false,
+                    model: body_model(app, m, b),
+                });
+            }
+        }
         if let Some(c) = app.stack.current() {
             let hidden = app.stack.current_is_hidden();
             if let Some(mesh) = mesh_of(m, c.key.body) {
@@ -739,6 +762,14 @@ fn build_frame(
                 colors: None,
                 model: glam::Mat4::IDENTITY,
             })
+            // origin-plane squares of the plane pick; `translucent` = hovered (stronger fill)
+            .chain(crate::plane_pick::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
+                mesh,
+                color: crate::sketch_view::LINE,
+                translucent: hot,
+                colors: None,
+                model: glam::Mat4::IDENTITY,
+            }))
             .collect(),
         grid,
     }
@@ -1362,7 +1393,7 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
     }
     if faces {
         if ui.button("Sketch on face   S").clicked() {
-            app.open_sketch(None);
+            app.open_sketch_on_selection();
             ui.close();
         }
         if ui.button("Shell (remove faces)…").clicked() {

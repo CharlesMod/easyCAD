@@ -14,6 +14,7 @@ pub mod reload;
 pub mod sample;
 pub mod scope;
 pub mod settings;
+pub mod plane_pick;
 pub mod sketch_mode;
 pub mod sketch_view;
 pub mod smoke;

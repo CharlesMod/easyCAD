@@ -119,6 +119,8 @@ pub struct EasyCadApp {
     pub typing: bool,
     /// The body whose face a new sketch was placed on, and once committed the
     /// sketch's id: the default target of an Extrude / Revolve on that sketch.
+    /// Waiting for the click that names the plane of a new sketch.
+    pub plane_pick: Option<crate::plane_pick::PlanePick>,
     pub sketch_body: Option<(Option<easycad_model::feature::SketchId>, BodyId)>,
     /// In-app path prompt (no system file dialog) and what to do with the path.
     pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
@@ -233,6 +235,7 @@ impl EasyCadApp {
             state_dump: crate::e2e_state::StateDump::from_env(),
             pending_cycle: 0,
             typing: false,
+            plane_pick: None,
             sketch_body: None,
             path_prompt: None,
             wizard: None,
@@ -832,22 +835,43 @@ impl EasyCadApp {
                 .sketch(id)
                 .cloned()
                 .map(|s| SketchSession::edit(id, s, self.view())),
+            // a new sketch first asks which plane or flat face it goes on
             None => {
-                self.sketch_body = self
-                    .selection
-                    .iter()
-                    .find(|k| matches!(k.kind, crate::pickstack::PickKind::Face(_)))
-                    .map(|k| (None, k.body));
-                Some(SketchSession::new_on(
-                    self.sketch_plane_from_selection(),
-                    self.view(),
-                ))
+                self.dialog = None;
+                self.plane_pick = Some(crate::plane_pick::PlanePick::default());
+                None
             }
         };
         if let Some(s) = s {
             self.dialog = None;
             self.mode = Mode::Sketch(Box::new(s));
         }
+    }
+
+    /// Open a new sketch on `plane` (on a face of `body`, if any).
+    pub fn start_sketch_on(&mut self, plane: easycad_model::geom::Plane, body: Option<BodyId>) {
+        self.plane_pick = None;
+        self.sketch_body = body.map(|b| (None, b));
+        let s = SketchSession::new_on(plane, self.view());
+        self.dialog = None;
+        self.mode = Mode::Sketch(Box::new(s));
+    }
+
+    pub fn start_sketch_on_target(&mut self, t: &crate::plane_pick::Target) {
+        if let Some((pl, b)) = crate::plane_pick::resolve(self, t) {
+            self.start_sketch_on(pl, b);
+        }
+    }
+
+    /// Sketch on the selected planar face (else XY) without asking.
+    pub fn open_sketch_on_selection(&mut self) {
+        self.sketch_body = self
+            .selection
+            .iter()
+            .find(|k| matches!(k.kind, crate::pickstack::PickKind::Face(_)))
+            .map(|k| (None, k.body));
+        let plane = self.sketch_plane_from_selection();
+        self.start_sketch_on(plane, self.sketch_body.map(|(_, b)| b));
     }
 
     /// A planar face in the selection becomes the sketch plane (else XY).
@@ -1263,6 +1287,10 @@ impl EasyCadApp {
                 return;
             }
             Mode::Model => {}
+        }
+        if self.plane_pick.is_some() && pressed(Key::Escape) {
+            self.plane_pick = None;
+            return;
         }
         if self.asm.mate.is_some() {
             if pressed(Key::Escape) {

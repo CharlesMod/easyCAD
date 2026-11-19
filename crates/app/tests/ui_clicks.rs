@@ -643,7 +643,7 @@ fn undo_redo_keys_in_sketch_mode() {
     h.state_mut().recovery_offer.clear(); // crash leftovers on this machine would hold the keyboard
     h.state_mut().recovery_offer.clear();
     h.state_mut().set_param("zz", "5").unwrap();
-    h.state_mut().open_sketch(None);
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
     h.run_steps(3);
     let n = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
         Mode::Sketch(s) => (s.sketch.points.len(), s.undo.len(), s.redo.len()),
@@ -676,7 +676,7 @@ fn sketch_value_box_opens_on_first_click_with_text_selected() {
     use easycad_app::sketch_mode::Tool;
     let mut h = harness(easycad_app::sample::sensor_node());
     h.state_mut().recovery_offer.clear();
-    h.state_mut().open_sketch(None);
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
     h.run_steps(3);
     if let Mode::Sketch(s) = &mut h.state_mut().mode {
         s.tool = Tool::Circle;
@@ -711,16 +711,109 @@ fn sketch_value_box_opens_on_first_click_with_text_selected() {
 fn new_sketch_button_does_what_the_s_key_does() {
     let _g = serial();
     let doc = || easycad_model::document::Document::new("empty");
-    let mode = |h: &Harness<'static, EasyCadApp>| std::mem::discriminant(&h.state().mode);
     let mut by_key = harness(doc());
-    let before = mode(&by_key);
+    assert!(by_key.state().plane_pick.is_none());
     by_key.key_press(egui::Key::S);
     by_key.run_steps(3);
-    let after_key = mode(&by_key);
-    assert_ne!(before, after_key, "S should change the mode (sketch or plane pick)");
+    assert!(by_key.state().plane_pick.is_some(), "S asks for a plane first");
+    assert!(easycad_app::app::Mode::is_model(&by_key.state().mode), "and does not drop into a sketch");
     drop(by_key);
     let mut by_button = harness(doc());
     by_button.get_by_label("Start a new sketch (or press s)").click();
     by_button.run_steps(3);
-    assert_eq!(mode(&by_button), after_key);
+    assert!(by_button.state().plane_pick.is_some());
+}
+
+/// Screen position of a world point in the viewport.
+fn screen_of(h: &Harness<'static, EasyCadApp>, w: glam::Vec3) -> egui::Pos2 {
+    let app = h.state();
+    let r = app.viewport_rect;
+    let s = app.camera.project(w, glam::Vec2::new(r.width(), r.height())).expect("on screen");
+    egui::pos2(r.left() + s.x, r.top() + s.y)
+}
+
+fn hover_click(h: &mut Harness<'static, EasyCadApp>, p: egui::Pos2) {
+    h.hover_at(p);
+    h.run_steps(3);
+    click_at(h, p, egui::PointerButton::Primary);
+    h.run_steps(3);
+}
+
+fn top_view(h: &mut Harness<'static, EasyCadApp>) {
+    h.state_mut().camera.rot = easycad_app::camera::look_rot(glam::Vec3::Z, glam::Vec3::Y);
+    h.run_steps(3);
+}
+
+
+#[test]
+fn plane_pick_xy_region_opens_a_sketch_on_xy() {
+    use easycad_app::app::Mode;
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_some());
+    assert_eq!(easycad_app::ui_main::status_text(h.state()), easycad_app::plane_pick::HINT);
+    let p = screen_of(&h, glam::Vec3::new(15.0, 12.0, 0.0));
+    h.hover_at(p);
+    h.step();
+    h.step();
+    assert_eq!(h.state().plane_pick.as_ref().unwrap().hover, Some(easycad_app::plane_pick::Target::Origin(0)), "hover highlights the XY plane");
+    save(&mut h, "plane_pick_hover_xy");
+    hover_click(&mut h, p);
+    match &h.state().mode {
+        Mode::Sketch(s) => assert_eq!(s.sketch.plane, easycad_model::geom::Plane::XY),
+        _ => panic!("expected sketch mode"),
+    }
+    assert!(h.state().plane_pick.is_none());
+}
+
+#[test]
+fn plane_pick_on_a_box_top_face_sketches_on_that_face() {
+    use easycad_app::app::Mode;
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::sketch::Sketch;
+    let _g = serial();
+    let mut doc = easycad_model::document::Document::new("box");
+    let mut s = Sketch::new("S", easycad_model::geom::Plane::XY);
+    s.rect(glam::DVec2::new(-30.0, -20.0), glam::DVec2::new(30.0, 20.0));
+    let sid = doc.add_sketch(s);
+    doc.add_feature(
+        "Block",
+        FeatureKind::Extrude { sketch: sid, profiles: ProfileSel::All, distance: 20.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    );
+    let mut h = harness(doc);
+    top_view(&mut h);
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    let p = screen_of(&h, glam::Vec3::new(5.0, 3.0, 20.0));
+    hover_click(&mut h, p);
+    match &h.state().mode {
+        Mode::Sketch(s) => {
+            assert!((s.sketch.plane.origin.z - 20.0).abs() < 1e-6, "{:?}", s.sketch.plane);
+            assert!(s.sketch.plane.normal.z > 0.99);
+        }
+        _ => panic!("expected sketch mode on the face"),
+    }
+    assert!(h.state().sketch_body.is_some());
+}
+
+#[test]
+fn plane_pick_cancels_on_escape_and_right_click() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_none(), "Esc cancels");
+    assert!(easycad_app::app::Mode::is_model(&h.state().mode));
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    let c = h.state().viewport_rect.center();
+    click_at(&mut h, c, egui::PointerButton::Secondary);
+    assert!(h.state().plane_pick.is_none(), "right-click cancels");
+    assert!(easycad_app::app::Mode::is_model(&h.state().mode));
 }

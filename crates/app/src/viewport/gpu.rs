@@ -869,7 +869,8 @@ impl ViewportGpu {
             let k = key(&b.mesh, None);
             if !b.mesh.indices.is_empty() {
                 let mut c = b.color;
-                c[3] = crate::sketch_view::FILL_ALPHA;
+                // `translucent` marks the hovered plane of the plane pick
+                c[3] = if b.translucent { 0.40 } else { crate::sketch_view::FILL_ALPHA };
                 list.push((P::Blend, k, What::All, ub(b, c, 0.0)));
             }
             list.push((P::Lines, k, What::Edges, ub(b, b.color, 0.0)));
