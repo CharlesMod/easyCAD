@@ -27,6 +27,13 @@ pub struct Settings {
     /// Minutes between recovery copies; 0 = off.
     #[serde(default = "two")]
     pub autosave_min: u32,
+    /// Restart into a newly installed build, keeping the session (see reload.rs).
+    #[serde(default = "yes")]
+    pub auto_reload: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn two() -> u32 {

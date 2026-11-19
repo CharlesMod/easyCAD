@@ -150,6 +150,8 @@ pub struct EasyCadApp {
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
     pub show_perf: bool,
     pub bench_start: Option<f64>,
+    /// Live reload into a newly installed build (reload.rs).
+    pub reload: crate::reload::State,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -249,6 +251,7 @@ impl EasyCadApp {
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             bench_start: None,
+            reload: Default::default(),
         }
     }
 
@@ -1107,6 +1110,7 @@ impl EasyCadApp {
             ui.ctx().request_repaint();
         }
         self.shortcuts(ui.ctx());
+        self.reload_tick(ui.ctx());
         if self.model_dirty {
             self.submit_model();
         }

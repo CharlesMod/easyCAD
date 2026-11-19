@@ -4,6 +4,7 @@ description = "easyCAD desktop GUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lib]
 name = "easycad_app"

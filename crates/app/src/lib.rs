@@ -10,6 +10,7 @@ pub mod files;
 pub mod pickstack;
 pub mod profiler;
 pub mod recovery;
+pub mod reload;
 pub mod sample;
 pub mod scope;
 pub mod settings;
