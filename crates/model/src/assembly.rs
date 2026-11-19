@@ -539,7 +539,7 @@ impl Document {
             return Ok(self.add_sketch(sketch));
         }
         let id = SketchId(self.data.next_id);
-        self.edit_component(comp, &format!("Add sketch {}", sketch.name), |c| c.sketches.push(SketchEntry { id, sketch }))?;
+        self.edit_component(comp, &format!("Add sketch {}", sketch.name), |c| c.sketches.push(SketchEntry { id, sketch, visible: None }))?;
         self.data.next_id += 1;
         Ok(id)
     }

@@ -495,3 +495,15 @@ impl FeatureKind {
         }
     }
 }
+
+impl FeatureKind {
+    /// The sketch this feature builds from, if any.
+    pub fn sketch(&self) -> Option<SketchId> {
+        match self {
+            FeatureKind::Extrude { sketch, .. }
+            | FeatureKind::Revolve { sketch, .. }
+            | FeatureKind::Rib { sketch, .. } => Some(*sketch),
+            _ => None,
+        }
+    }
+}

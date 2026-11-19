@@ -64,6 +64,10 @@ pub struct Import {
 pub struct SketchEntry {
     pub id: SketchId,
     pub sketch: Sketch,
+    /// User override of the sketch's visibility in the 3D view. `None` = the
+    /// default: shown until a feature consumes the sketch, then hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -190,6 +194,27 @@ impl DocData {
     pub fn sketch_mut(&mut self, id: SketchId) -> Option<&mut Sketch> {
         self.sketches.iter_mut().find(|s| s.id == id).map(|s| &mut s.sketch)
     }
+    /// True when some feature builds from this sketch.
+    pub fn sketch_consumed(&self, id: SketchId) -> bool {
+        self.features.iter().any(|f| f.kind.sketch() == Some(id))
+    }
+
+    /// Whether the sketch is drawn in the 3D view: the user's choice if any,
+    /// else visible until a feature consumes it.
+    pub fn sketch_visible(&self, id: SketchId) -> bool {
+        match self.sketches.iter().find(|s| s.id == id) {
+            Some(e) => e.visible.unwrap_or_else(|| !self.sketch_consumed(id)),
+            None => false,
+        }
+    }
+
+    /// Set (or with `None` reset) the visibility override.
+    pub fn set_sketch_visible(&mut self, id: SketchId, v: Option<bool>) {
+        if let Some(e) = self.sketches.iter_mut().find(|s| s.id == id) {
+            e.visible = v;
+        }
+    }
+
     pub fn import(&self, id: ImportId) -> Option<&Import> {
         self.imports.iter().find(|s| s.id == id).map(|s| &s.import)
     }
@@ -202,7 +227,7 @@ impl DocData {
 
     pub fn add_sketch(&mut self, sketch: Sketch) -> SketchId {
         let id = SketchId(self.alloc());
-        self.sketches.push(SketchEntry { id, sketch });
+        self.sketches.push(SketchEntry { id, sketch, visible: None });
         id
     }
 
