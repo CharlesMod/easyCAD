@@ -100,7 +100,7 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
             ui.add_space(6.0);
             theme::section_label(ui, "Updates");
             ui.checkbox(&mut s.auto_reload, "Auto-reload on new build");
-            ui.add(egui::Label::new(widgets::muted(&format!(
+            ui.add(egui::Label::new(widgets::muted(format!(
                 "Running build {}. When a newer build is installed, easyCAD restarts into it and restores your session.",
                 crate::reload::build_label()
             ))).wrap());

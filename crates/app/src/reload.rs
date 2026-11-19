@@ -4,11 +4,12 @@
 //! window). See docs/DEV-RELOAD.md.
 //!
 //! Three pieces, each testable without a window:
-//!   * [`Watcher`]: notices a replaced, completely written executable.
-//!   * [`idle`]: the gate that keeps a reload from interrupting an interaction.
-//!   * [`Snapshot`]: the session as JSON plus a copy of the document.
-//! The `EasyCadApp` glue (taking and applying a snapshot, the per-frame tick)
-//! is at the bottom.
+//! * [`Watcher`]: notices a replaced, completely written executable.
+//! * [`idle`]: the gate that keeps a reload from interrupting an interaction.
+//! * [`Snapshot`]: the session as JSON plus a copy of the document.
+//!
+//! The `EasyCadApp` glue (taking and applying a snapshot, the per-frame tick) is
+//! at the bottom.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
