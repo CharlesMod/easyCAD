@@ -610,3 +610,117 @@ fn lone_sketch_shows_on_its_plane_in_an_empty_model() {
         .count();
     assert!(green > 100, "the sketch outline is drawn in the sketch colour ({green} px)");
 }
+
+// ---- sketch input: undo / redo keys -------------------------------------------------
+
+fn chord(h: &mut Harness<'static, EasyCadApp>, m: egui::Modifiers, k: egui::Key) {
+    h.key_press_modifiers(m, k);
+    h.run_steps(3);
+}
+
+#[test]
+fn undo_redo_keys_in_model_mode() {
+    let _g = serial();
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear(); // crash leftovers on this machine would hold the keyboard
+    h.state_mut().set_param("zz", "5").unwrap();
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"));
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(h.state().doc.redo_label(), Some("Set zz"), "Ctrl+Z undoes the document edit");
+    chord(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "Ctrl+Shift+Z redoes");
+    assert_eq!(h.state().doc.redo_label(), None);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Y);
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "Ctrl+Y redoes");
+}
+
+#[test]
+fn undo_redo_keys_in_sketch_mode() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear(); // crash leftovers on this machine would hold the keyboard
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().set_param("zz", "5").unwrap();
+    h.state_mut().open_sketch(None);
+    h.run_steps(3);
+    let n = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => (s.sketch.points.len(), s.undo.len(), s.redo.len()),
+        _ => panic!("not in sketch mode"),
+    };
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.push_undo();
+        s.sketch.add_point(glam::DVec2::new(1.0, 2.0));
+    }
+    assert_eq!(n(&h).0, 1);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(n(&h).0, 0, "Ctrl+Z undoes the sketch edit");
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "the document edit is untouched while the sketch has history");
+    chord(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+    assert_eq!(n(&h).0, 1, "Ctrl+Shift+Z redoes the sketch edit");
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Y);
+    assert_eq!(n(&h).0, 1, "Ctrl+Y redoes the sketch edit");
+    // with the sketch history spent, Ctrl+Z does nothing: the document is not touched
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(h.state().doc.undo_label(), Some("Set zz"), "the document stack stays put in sketch mode");
+    assert_eq!(h.state().doc.redo_label(), None);
+}
+
+#[test]
+fn sketch_value_box_opens_on_first_click_with_text_selected() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().open_sketch(None);
+    h.run_steps(3);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Circle;
+    }
+    click_at(&mut h, egui::pos2(700.0, 450.0), egui::PointerButton::Primary);
+    h.run_steps(3);
+    let input = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => s.input.clone(),
+        _ => panic!(),
+    };
+    let text = input(&h).expect("the value box opens on the first click");
+    let id = egui::Id::NULL.with("sk_input_text");
+    let range = egui::TextEdit::load_state(&h.ctx, id).and_then(|st| st.cursor.char_range()).expect("a selection");
+    assert_eq!((range.primary.index.0.min(range.secondary.index.0), range.primary.index.0.max(range.secondary.index.0)), (0, text.chars().count()), "all text selected");
+    // typing replaces the reading
+    h.event(egui::Event::Text("40".into()));
+    h.run_steps(3);
+    assert_eq!(input(&h).as_deref(), Some("40"));
+    // Enter commits a circle of that diameter and closes the box
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(input(&h), None);
+    if let Mode::Sketch(s) = &h.state().mode {
+        assert!(s.clicks.is_empty());
+        let r: Vec<f64> = s.sketch.entities.iter().filter_map(|e| match e.geom { easycad_model::sketch::Geom::Circle { radius, .. } => Some(radius), _ => None }).collect();
+        assert_eq!(r.len(), 1);
+        assert!((r[0] - 20.0).abs() < 1e-6, "{r:?}");
+    }
+}
+
+#[test]
+fn new_sketch_button_does_what_the_s_key_does() {
+    let _g = serial();
+    let doc = || easycad_model::document::Document::new("empty");
+    let mode = |h: &Harness<'static, EasyCadApp>| std::mem::discriminant(&h.state().mode);
+    let mut by_key = harness(doc());
+    let before = mode(&by_key);
+    by_key.key_press(egui::Key::S);
+    by_key.run_steps(3);
+    let after_key = mode(&by_key);
+    assert_ne!(before, after_key, "S should change the mode (sketch or plane pick)");
+    drop(by_key);
+    let mut by_button = harness(doc());
+    by_button.get_by_label("Start a new sketch (or press s)").click();
+    by_button.run_steps(3);
+    assert_eq!(mode(&by_button), after_key);
+}

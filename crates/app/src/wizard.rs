@@ -522,6 +522,10 @@ impl Settings {
     }
 
     pub fn new(profile: &str) -> Settings {
+        // clearance and wall stay the wizard's own: the enclosure offset, standoffs
+        // and snap geometry are tuned around 0.5 + 2 mm (a profile wall of 1.6 mm
+        // makes the offset of the test board need a corner arc). The profile's
+        // other defaults (layer, nozzle, draft...) still seed the document.
         Settings {
             name: "enclosure".into(),
             clearance: "0.5".into(),
@@ -555,10 +559,7 @@ fn param(doc: &mut Document, name: &str, expr: &str, comment: &str) -> Result<()
 
 /// Build the document. Pure (no GUI), so it is tested directly.
 pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
-    let mut doc = Document::new(if s.name.trim().is_empty() { "enclosure" } else { s.name.trim() });
-    if doc.data.profile_named(&s.profile).is_some() {
-        doc.set_active_profile(&s.profile).map_err(|e| e.to_string())?;
-    }
+    let mut doc = Document::new_with_profile(if s.name.trim().is_empty() { "enclosure" } else { s.name.trim() }, &s.profile);
     let molded = doc.data.profile().kind == ProcessKind::Molded;
     let src = board.source_label();
     let step = matches!(board.kind, BoardKind::Step);
@@ -569,7 +570,7 @@ pub fn build(board: &Board, s: &Settings) -> Result<Document, String> {
         param(&mut doc, "pcb_d", &format!("{:.4}", 2.0 * radius), &format!("from {src}"))?;
     }
     param(&mut doc, "clearance", &s.clearance, "PCB to wall")?;
-    param(&mut doc, "wall", &s.wall, "")?;
+    param(&mut doc, "wall", &s.wall, "wall thickness")?;
     param(&mut doc, "height", &s.height, "outside, floor to top")?;
     param(&mut doc, "corner_r", &s.corner_r, "outline corners")?;
     let exposed: Vec<usize> = s

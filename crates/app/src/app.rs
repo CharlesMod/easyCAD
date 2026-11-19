@@ -150,6 +150,8 @@ pub struct EasyCadApp {
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
     pub show_perf: bool,
     pub bench_start: Option<f64>,
+    /// Live reload into a newly installed build (reload.rs).
+    pub reload: crate::reload::State,
 }
 
 /// Section view settings: a plane across the model along one axis.
@@ -249,6 +251,7 @@ impl EasyCadApp {
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             bench_start: None,
+            reload: Default::default(),
         }
     }
 
@@ -632,14 +635,30 @@ impl EasyCadApp {
         }
     }
 
+    /// The one undo dispatch (Ctrl+Z, the toolbar button). In sketch mode the
+    /// sketch's own history is stepped and the document's (extrudes, parameters)
+    /// is never touched while the sketch is open.
     pub fn undo(&mut self) {
+        if let Mode::Sketch(s) = &mut self.mode {
+            if s.undo() {
+                self.toast("Undo: sketch edit");
+            }
+            return; // never the document's history while a sketch is open
+        }
         if let Some(l) = self.doc.undo() {
             self.toast(format!("Undo: {l}"));
             self.params.buffers.clear();
             self.after_edit();
         }
     }
+    /// Redo (Ctrl+Shift+Z, Ctrl+Y): the sketch's redo stack in sketch mode, else the document's.
     pub fn redo(&mut self) {
+        if let Mode::Sketch(s) = &mut self.mode {
+            if s.redo() {
+                self.toast("Redo: sketch edit");
+            }
+            return;
+        }
         if let Some(l) = self.doc.redo() {
             self.toast(format!("Redo: {l}"));
             self.params.buffers.clear();
@@ -915,10 +934,7 @@ impl EasyCadApp {
     }
 
     pub fn create_doc(&mut self, name: &str, profile: &str) {
-        let mut d = Document::new(name);
-        if d.data.profile_named(profile).is_some() {
-            d.data.active_profile = profile.to_string();
-        }
+        let d = Document::new_with_profile(name, profile);
         let mut s = crate::settings::Settings::load();
         s.last_profile = Some(profile.to_string());
         s.save();
@@ -1107,6 +1123,7 @@ impl EasyCadApp {
             ui.ctx().request_repaint();
         }
         self.shortcuts(ui.ctx());
+        self.reload_tick(ui.ctx());
         if self.model_dirty {
             self.submit_model();
         }

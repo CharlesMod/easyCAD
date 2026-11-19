@@ -126,8 +126,15 @@ pub fn welcome(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                             theme::prop(11.0),
                             if primary { theme::TEXT_DIM } else { theme::TEXT_MUTED },
                         );
+                        let l = label.to_string();
+                        resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, l.clone()));
                         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
                     };
+                    // same path as the S key
+                    if big(ui, "Start a new sketch (or press s)", "on the XY plane", false).clicked() {
+                        app.open_sketch(None);
+                    }
+                    ui.add_space(6.0);
                     if big(
                         ui,
                         "New enclosure from PCB…",
@@ -148,9 +155,7 @@ pub fn welcome(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                         }
                     });
                     ui.add_space(4.0);
-                    ui.label(widgets::muted(
-                        "Or start from scratch: S sketches on the XY plane. ? shows every shortcut.",
-                    ));
+                    ui.label(widgets::muted("? shows every shortcut."));
                     if !recent.is_empty() {
                         ui.add_space(12.0);
                         theme::section_label(ui, "Recent");

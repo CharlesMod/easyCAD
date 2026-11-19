@@ -166,6 +166,25 @@ impl DocData {
     pub fn profile(&self) -> ProcessProfile {
         self.profile_named(&self.active_profile).unwrap_or_else(ProcessProfile::molded_nominal)
     }
+    /// Add the active profile's default parameters that the document does not
+    /// already have (never overwrites). Returns how many were added.
+    pub fn seed_profile_params(&mut self) -> usize {
+        let defaults = self.profile().params;
+        let mut n = 0;
+        for d in defaults {
+            if self.params.get(&d.name).is_some() || !crate::params::valid_name(&d.name) {
+                continue;
+            }
+            if self.params.set(&d.name, d.expr.as_str()).is_ok() {
+                if let Some(p) = self.params.list.iter_mut().find(|p| p.name == d.name) {
+                    p.comment = d.comment;
+                }
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn profile_named(&self, name: &str) -> Option<ProcessProfile> {
         self.processes.iter().find(|p| p.name == name).cloned()
     }
@@ -393,7 +412,32 @@ pub struct Document {
 
 impl Document {
     pub fn new(name: &str) -> Self {
-        Self::with_data(DocData::new(name, &default_device()), BlobStore::default())
+        let mut data = DocData::new(name, &default_device());
+        data.seed_profile_params();
+        Self::with_data(data, BlobStore::default())
+    }
+
+    /// A new document under `profile` (falls back to the default if unknown),
+    /// starting with that profile's default parameters.
+    pub fn new_with_profile(name: &str, profile: &str) -> Self {
+        let mut d = Self::new(name);
+        if d.data.profile_named(profile).is_some() && d.data.active_profile != profile {
+            d.data.active_profile = profile.to_string();
+            d.data.params = Params::default();
+            d.data.seed_profile_params();
+        }
+        d
+    }
+
+    /// Add the active profile's default parameters this document lacks (undoable;
+    /// never overwrites). Returns how many were added.
+    pub fn apply_profile_defaults(&mut self) -> usize {
+        let mut n = 0;
+        let _ = self.edit("Apply profile defaults", |d| {
+            n = d.seed_profile_params();
+            Ok::<_, DocError>(())
+        });
+        n
     }
 
     fn with_data(data: DocData, blobs: BlobStore) -> Self {

@@ -139,6 +139,25 @@ pub struct ProcessProfile {
     pub teardrop: TeardropSettings,
     #[serde(default)]
     pub notes: String,
+    /// Parameters a new project starts with under this profile (see
+    /// [`ProcessProfile::default_params`] for the built-in choices). Old files and
+    /// presets without the field load as empty.
+    #[serde(default)]
+    pub params: Vec<ProfileParam>,
+}
+
+/// A parameter a profile pre-populates in new documents. `expr` may carry a
+/// unit (`"1 deg"`); bare numbers are millimetres.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProfileParam {
+    pub name: String,
+    pub expr: String,
+    #[serde(default)]
+    pub comment: String,
+}
+
+fn pp(name: &str, expr: &str, comment: &str) -> ProfileParam {
+    ProfileParam { name: name.into(), expr: expr.into(), comment: comment.into() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -254,6 +273,16 @@ impl ProcessProfile {
             first_layer_chamfer: Some(0.4),
             teardrop: TeardropSettings { enabled: true, ..Default::default() },
             notes: "Starting point for a 0.4 mm nozzle, 0.2 mm layers (PLA/PETG). Calibrate with the fit coupon.".into(),
+            params: vec![
+                // 4 perimeters of a 0.4 mm line: a wall made only of full perimeters
+                pp("wall", "1.6", "4 perimeters x 0.4 mm nozzle"),
+                // general part-to-part gap: the slide fit allowance above
+                pp("clearance", "0.15", "gap between mating parts (slide fit)"),
+                pp("layer", "0.2", "layer height"),
+                pp("nozzle", "0.4", "nozzle diameter"),
+                // below ~1 nozzle width a feature will not print as drawn
+                pp("min_feature", "0.8", "smallest feature that prints (2 x nozzle)"),
+            ],
         }
     }
     pub fn sla_generic() -> Self {
@@ -267,6 +296,12 @@ impl ProcessProfile {
             first_layer_chamfer: None,
             teardrop: TeardropSettings::default(),
             notes: "Starting point for desktop MSLA resin printers. Calibrate with the fit coupon.".into(),
+            params: vec![
+                pp("wall", "1.5", "thin enough to cure cleanly, stiff enough to handle"),
+                pp("clearance", "0.08", "gap between mating parts (slide fit)"),
+                pp("layer", "0.05", "layer height"),
+                pp("min_feature", "0.3", "smallest feature that prints"),
+            ],
         }
     }
     pub fn molded_nominal() -> Self {
@@ -280,10 +315,57 @@ impl ProcessProfile {
             first_layer_chamfer: None,
             teardrop: TeardropSettings::default(),
             notes: "Nominal geometry: no process compensation.".into(),
+            params: vec![
+                // uniform wall thickness avoids sink and warp; 2 mm suits ABS/PC/PP parts
+                pp("wall", "2.0", "uniform wall (sink marks grow with thickness)"),
+                // fits are nominal here, so the gap is a design choice, not a slide allowance
+                pp("clearance", "0.1", "gap between mating parts"),
+                pp("draft", "1 deg", "draft on faces along the pull direction"),
+                pp("rib_ratio", "0.6", "rib thickness / wall (avoids sink opposite the rib)"),
+            ],
+        }
+    }
+    pub fn sls_generic() -> Self {
+        ProcessProfile {
+            name: "SLS nylon generic".into(),
+            kind: ProcessKind::Sls,
+            fits: FitAllowances { press: -0.05, snug: 0.05, slide: 0.15, loose: 0.3 },
+            hole_comp: HoleComp { base: 0.1, per_mm: 0.0 },
+            xy_comp: 0.05,
+            first_layer_comp: 0.0,
+            first_layer_chamfer: None,
+            teardrop: TeardropSettings::default(),
+            notes: "Starting point for powder-bed nylon (PA12). Self-supporting; no teardrops. Calibrate with the fit coupon.".into(),
+            params: vec![
+                pp("wall", "1.2", "minimum reliable wall for PA12"),
+                pp("clearance", "0.15", "gap between mating parts (slide fit)"),
+                pp("layer", "0.1", "layer height"),
+                pp("min_feature", "0.8", "smallest feature that survives depowdering"),
+            ],
+        }
+    }
+    pub fn cnc_nominal() -> Self {
+        ProcessProfile {
+            name: "CNC machined (nominal)".into(),
+            kind: ProcessKind::Cnc,
+            fits: FitAllowances { press: 0.0, snug: 0.0, slide: 0.0, loose: 0.0 },
+            hole_comp: HoleComp::default(),
+            xy_comp: 0.0,
+            first_layer_comp: 0.0,
+            first_layer_chamfer: None,
+            teardrop: TeardropSettings::default(),
+            notes: "Nominal geometry: machining tolerances are handled by the shop.".into(),
+            params: vec![
+                pp("wall", "1.5", "thinnest wall that machines without chatter (aluminium)"),
+                pp("clearance", "0.05", "gap between mating parts"),
+                pp("tool_d", "3.175", "end mill diameter (1/8 in)"),
+                // an internal corner cannot be sharper than the cutter
+                pp("min_radius", "tool_d / 2", "smallest internal corner radius"),
+            ],
         }
     }
     pub fn builtins() -> Vec<ProcessProfile> {
-        vec![Self::fdm_generic(), Self::sla_generic(), Self::molded_nominal()]
+        vec![Self::fdm_generic(), Self::sla_generic(), Self::sls_generic(), Self::molded_nominal(), Self::cnc_nominal()]
     }
 
     pub fn allowance(&self, c: FitClass) -> f64 {
@@ -350,6 +432,7 @@ impl ProcessProfile {
             first_layer_chamfer: r.first_layer_measured.filter(|v| *v > 0.0).map(|v| (2.0 * v).max(0.2)),
             teardrop: TeardropSettings { enabled: r.kind == ProcessKind::Fdm, ..Default::default() },
             notes: format!("Calibrated from a {:.2} mm coupon.", r.nominal),
+            params: Self::builtins().into_iter().find(|b| b.kind == r.kind).map(|b| b.params).unwrap_or_default(),
         }
     }
 }

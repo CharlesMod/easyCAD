@@ -94,6 +94,13 @@ pub struct SketchSession {
     pub input: Option<String>,
     pub input2: Option<String>,
     pub input_second: bool,
+    /// The value box just opened: select its whole text on this frame.
+    pub input_fresh: bool,
+    /// The value box still shows the live reading of the cursor (the user has not
+    /// typed): it follows the mouse until a key is typed.
+    pub input_live: bool,
+    /// Alt is held: snapping is off while it is.
+    pub alt_held: bool,
     pub dim_target: Option<Vec<Sel>>,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
@@ -104,6 +111,7 @@ pub struct SketchSession {
     pub snap: bool,
     pub slice: bool,
     pub undo: Vec<(Sketch, Vec<Option<String>>)>,
+    pub redo: Vec<(Sketch, Vec<Option<String>>)>,
     pub values: Values,
     pub names: Vec<String>,
     pub drag: Option<PointId>,
@@ -151,8 +159,12 @@ impl SketchSession {
             error: None,
             show_constraints: true,
             snap: true,
+            input_fresh: false,
+            input_live: false,
+            alt_held: false,
             slice: false,
             undo: Vec::new(),
+            redo: Vec::new(),
             values,
             names,
             drag: None,
@@ -345,6 +357,80 @@ impl SketchSession {
         self.resolve();
     }
 
+    /// Open the value box. `live`: it shows the cursor's reading and follows the
+    /// mouse until the user types; either way its text starts fully selected.
+    pub fn open_input(&mut self, text: String, live: bool) {
+        self.input = Some(text);
+        self.input_fresh = true;
+        self.input_live = live;
+    }
+
+    /// Close the value box without applying it. Placing a shape is cancelled with
+    /// it; an Offset in progress drops its picked shapes.
+    pub fn cancel_input(&mut self) {
+        self.input = None;
+        self.input2 = None;
+        self.input_second = false;
+        self.input_live = false;
+        self.input_fresh = false;
+        self.dim_target = None;
+        match self.tool {
+            Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc => {
+                self.clicks.clear();
+                self.chain_start = None;
+            }
+            Tool::Offset => self.selection.clear(),
+            _ => {}
+        }
+    }
+
+    /// The default Offset distance: the `wall` parameter (kept as an expression so
+    /// the offset stays linked to it), else 2.
+    pub fn default_offset(&self) -> String {
+        if self.names.iter().any(|n| n == "wall") {
+            "wall".into()
+        } else {
+            "2".into()
+        }
+    }
+
+    /// Offset every picked shape by one distance, as one undo step.
+    pub fn offset_selected(&mut self, ents: &[EntityId], dist: &str) -> Result<(), String> {
+        let dist = crate::units::normalize_input(dist.trim());
+        let mut sk = self.sketch.clone();
+        offset_set(&mut sk, ents, &dist, &self.values)?;
+        self.push_undo();
+        self.sketch = sk;
+        self.entity_layer.resize(self.sketch.entities.len(), None);
+        self.resolve();
+        Ok(())
+    }
+
+    /// The offset result for the picked shapes as polylines (the live preview).
+    fn offset_preview(&self) -> Option<Vec<Vec<DVec2>>> {
+        if self.tool != Tool::Offset {
+            return None;
+        }
+        let ents = self.selected_entities();
+        let text = self.input.as_ref()?;
+        if ents.is_empty() {
+            return None;
+        }
+        let dist = crate::units::normalize_input(text.trim().trim_start_matches('=').trim());
+        crate::widgets::eval(&dist, &self.values).ok()?;
+        let mut sk = self.sketch.clone();
+        let n = sk.entities.len();
+        offset_set(&mut sk, &ents, &dist, &self.values).ok()?;
+        Some((n..sk.entities.len()).map(|i| entity_polyline(&sk, EntityId(i as u32))).collect())
+    }
+
+    pub fn selected_entities(&self) -> Vec<EntityId> {
+        self.selection
+            .iter()
+            .filter_map(|x| if let Sel::Entity(e) = x { Some(*e) } else { None })
+            .collect()
+    }
+
     /// Drop the snapshot of an edit that did not happen.
     fn pop_undo(&mut self) {
         self.undo.pop();
@@ -353,19 +439,33 @@ impl SketchSession {
     pub fn push_undo(&mut self) {
         self.undo
             .push((self.sketch.clone(), self.entity_layer.clone()));
+        self.redo.clear();
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
         self.dirty = true;
     }
 
-    pub fn undo(&mut self) {
-        if let Some((s, l)) = self.undo.pop() {
-            self.sketch = s;
-            self.entity_layer = l;
-            self.selection.clear();
-            self.resolve();
-        }
+    /// Step back one sketch edit; false when this session has nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some((s, l)) = self.undo.pop() else { return false };
+        let cur = (std::mem::replace(&mut self.sketch, s), std::mem::replace(&mut self.entity_layer, l));
+        self.redo.push(cur);
+        self.selection.clear();
+        self.dirty = true;
+        self.resolve();
+        true
+    }
+
+    /// Re-apply the last undone sketch edit; false when there is none.
+    pub fn redo(&mut self) -> bool {
+        let Some((s, l)) = self.redo.pop() else { return false };
+        let cur = (std::mem::replace(&mut self.sketch, s), std::mem::replace(&mut self.entity_layer, l));
+        self.undo.push(cur);
+        self.selection.clear();
+        self.dirty = true;
+        self.resolve();
+        true
     }
 
     /// Run the solver and refresh status.
@@ -746,6 +846,7 @@ impl SketchSession {
         self.resolve();
         if self.report.as_ref().is_some_and(|r| !r.converged) {
             self.undo();
+            self.redo.pop(); // a refused edit is not something to redo
             return Err("that dimension conflicts with existing constraints".into());
         }
         Ok(())
@@ -836,18 +937,32 @@ impl SketchSession {
     }
 
     fn snap_point(&self, rect: Rect, p: Pos2) -> (DVec2, Option<PointId>) {
-        if self.snap {
+        if self.snap && !self.alt_held {
             if let Some(Sel::Point(pid)) = self.pick(rect, p) {
                 return (self.sketch.point(pid), Some(pid));
             }
             let q = self.to_sketch(rect, p);
-            let g = grid_step(self.scale) / 2.0;
+            let g = snap_step(self.scale);
             return (
                 DVec2::new((q.x / g).round() * g, (q.y / g).round() * g),
                 None,
             );
         }
         (self.to_sketch(rect, p), None)
+    }
+}
+
+/// Minor (tenth) grid lines are drawn, and snapped to, from this on-screen spacing.
+const MINOR_MIN_PX: f32 = 6.0;
+
+/// What the cursor snaps to: the tenths of a major grid step while those are drawn
+/// (what you see is what you snap to), else the major step itself.
+pub fn snap_step(scale: f32) -> f64 {
+    let major = grid_step(scale);
+    if (major / 10.0) as f32 * scale >= MINOR_MIN_PX {
+        major / 10.0
+    } else {
+        major
     }
 }
 
@@ -1243,7 +1358,7 @@ fn right_panel(s: &mut SketchSession, ui: &mut Ui) -> bool {
     }
     theme::section_label(ui, "Options");
     ui.checkbox(&mut s.show_constraints, "Show constraints");
-    ui.checkbox(&mut s.snap, "Snap to grid and geometry");
+    ui.checkbox(&mut s.snap, "Snap to grid and geometry (hold Alt to bypass)");
     ui.checkbox(&mut s.slice, "Slice body at sketch plane")
         .on_hover_text("Show the bodies cut at this plane: the cut faces filled, the half behind the plane in outline");
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -1287,7 +1402,8 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             let after = s.to_sketch(rect, hp);
             s.center += before - after;
         }
-        s.cursor = s.to_sketch(rect, hp);
+        s.alt_held = ui.input(|i| i.modifiers.alt);
+        s.cursor = s.snap_point(rect, hp).0;
         s.hover = s.pick(rect, hp);
     }
     // keyboard
@@ -1303,12 +1419,11 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 }
             }
         });
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
-            s.undo();
-        }
+        // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y are dispatched once, by `EasyCadApp::shortcuts`
+        // (sketch history first, then the document's).
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if s.input.is_some() {
-                s.input = None;
+                s.cancel_input();
             } else if !s.clicks.is_empty() {
                 s.clicks.clear();
             } else if s.tool != Tool::Select {
@@ -1405,7 +1520,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
     }
     if resp.clicked_by(egui::PointerButton::Secondary) {
         s.clicks.clear();
-        s.input = None;
+        s.cancel_input();
     }
 
     draw(s, ui, rect, &p);
@@ -1449,6 +1564,29 @@ fn is_fixed(s: &Sketch, p: PointId) -> bool {
 }
 
 fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
+    let placing = matches!(s.tool, Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc);
+    if placing {
+        // a click commits with the mouse value: the value box is done
+        s.input = None;
+        s.input2 = None;
+        s.input_second = false;
+        s.input_live = false;
+        s.input_fresh = false;
+    }
+    click_tool(s, rect, hp, additive);
+    // the first placement click opens the value box at once, showing the live
+    // reading (length / width / diameter / radius) with its text selected
+    let started = match s.tool {
+        Tool::Line => !s.clicks.is_empty(),
+        Tool::Rect | Tool::Circle | Tool::Arc => s.clicks.len() == 1,
+        _ => false,
+    };
+    if placing && started {
+        s.open_input(String::new(), true);
+    }
+}
+
+fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
     let snapped = s.snap_point(rect, hp);
     match s.tool {
         Tool::Select => {
@@ -1554,26 +1692,30 @@ fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 }
             }
         }
-        Tool::Offset => {
-            if let Some(Sel::Entity(e)) = s.pick(rect, hp) {
-                let default = if s.names.iter().any(|n| n == "clearance")
-                    && s.names.iter().any(|n| n == "wall")
-                {
-                    "clearance + wall".to_string()
+        Tool::Offset => match s.pick(rect, hp) {
+            Some(Sel::Entity(e)) => {
+                let x = Sel::Entity(e);
+                if additive {
+                    if let Some(i) = s.selection.iter().position(|y| *y == x) {
+                        s.selection.remove(i);
+                    } else {
+                        s.selection.push(x);
+                    }
                 } else {
-                    "1".into()
-                };
-                let d = s
-                    .input
-                    .take()
-                    .or_else(|| s.input2.clone())
-                    .map(|t| t.trim_start_matches('=').to_string())
-                    .unwrap_or(default);
-                if let Err(err) = s.offset_loop(e, &d) {
-                    s.error = Some(err);
+                    s.selection = vec![x];
+                }
+                s.error = None;
+                if s.selection.is_empty() {
+                    s.cancel_input();
+                } else if s.input.is_none() {
+                    // the distance box opens at once, `wall` (or what was typed
+                    // before picking) selected for overwriting
+                    let t = s.input2.take().unwrap_or_else(|| s.default_offset());
+                    s.open_input(t, false);
                 }
             }
-        }
+            _ => s.cancel_input(), // empty space cancels
+        },
         Tool::Project => {
             let q = s.to_sketch(rect, hp);
             let tol = 6.0 / s.scale as f64;
@@ -1627,7 +1769,7 @@ fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 };
                 if complete && s.dimension_for(&t).is_some() {
                     let (v, _) = s.dimension_for(&t).unwrap();
-                    s.input = Some(fmt(v.abs()));
+                    s.open_input(fmt(v.abs()), false);
                     s.dim_target = Some(t);
                 } else {
                     s.dim_target = Some(t);
@@ -1637,11 +1779,28 @@ fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
     }
 }
 
-/// Inline value box (typed numbers / expressions while drawing).
+/// The cursor's reading for the value box while a shape is being placed.
+fn live_value(s: &SketchSession) -> Option<f64> {
+    let a = s.clicks.first()?.0;
+    match s.tool {
+        Tool::Line | Tool::Arc => Some(a.distance(s.cursor)),
+        Tool::Circle => Some(2.0 * a.distance(s.cursor)),
+        Tool::Rect => Some(if s.input_second { (s.cursor.y - a.y).abs() } else { (s.cursor.x - a.x).abs() }),
+        _ => None,
+    }
+}
+
+/// Inline value box: opens at once on the first placement click (and on picking an
+/// Offset shape or a Dimension), text selected, so typing replaces it.
 fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
     let Some(text) = s.input.clone() else { return };
     let anchor = s.to_screen(rect, s.cursor) + vec2(18.0, -34.0);
     let mut text = text;
+    if s.input_live {
+        if let Some(v) = live_value(s) {
+            text = fmt(v);
+        }
+    }
     let mut done = false;
     let mut cancel = false;
     let label = match s.tool {
@@ -1653,13 +1812,25 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                 "W"
             }
         }
-        Tool::Circle => "⌀",
+        Tool::Circle => "\u{2300}",
+        Tool::Arc => "radius",
         Tool::Fillet => "radius",
         Tool::Offset => "offset",
         Tool::Dimension => "value",
         _ => "value",
     };
-    egui::Area::new(egui::Id::unique("sk_input"))
+    let te_id = egui::Id::NULL.with("sk_input_text");
+    if s.input_fresh || s.input_live {
+        let mut st = egui::TextEdit::load_state(ui.ctx(), te_id).unwrap_or_default();
+        let n = text.chars().count();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(n),
+        )));
+        st.store(ui.ctx(), te_id);
+    }
+    let mut typed = false;
+    egui::Area::new(egui::Id::NULL.with("sk_input"))
         .order(egui::Order::Foreground)
         .fixed_pos(anchor)
         .show(ui.ctx(), |ui| {
@@ -1673,10 +1844,12 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                         ui.label(RichText::new(label).size(11.0).color(theme::TEXT_MUTED));
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut text)
+                                .id(te_id)
                                 .font(theme::mono(13.0))
                                 .desired_width(110.0)
                                 .frame(egui::Frame::NONE),
                         );
+                        typed = r.changed();
                         r.request_focus();
                         let v =
                             crate::widgets::eval(text.trim().trim_start_matches('='), &s.values);
@@ -1696,6 +1869,9 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                         if ui.input(|i| i.key_pressed(egui::Key::Tab)) && s.tool == Tool::Rect {
                             s.input2 = Some(text.clone());
                             s.input_second = true;
+                            s.input_live = true;
+                            s.input_fresh = true;
+                            typed = false;
                             text.clear();
                         }
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1705,17 +1881,26 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                 });
         });
     if cancel {
-        s.input = None;
-        s.input2 = None;
-        s.input_second = false;
-        s.dim_target = None;
+        s.cancel_input();
         return;
     }
+    if typed {
+        s.input_live = false;
+    }
+    s.input_fresh = false;
     if !done {
         s.input = Some(text);
         return;
     }
+    // Enter on an untouched live reading is the same as clicking there
+    let placing = matches!(s.tool, Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc);
+    if placing && s.input_live && !(s.tool == Tool::Rect && s.input_second) {
+        let hp = s.to_screen(rect, s.cursor);
+        click(s, rect, hp, false);
+        return;
+    }
     s.input = None;
+    s.input_live = false;
     let expr = crate::units::normalize_input(text.trim().trim_start_matches('=').trim());
     let val = match crate::widgets::eval(&expr, &s.values) {
         Ok(v) => v,
@@ -1735,6 +1920,7 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                 let (_, b) = s.line_points(e).unwrap();
                 s.resolve();
                 s.clicks = vec![(s.sketch.point(b), Some(b))];
+                s.open_input(String::new(), true);
             }
         }
         Tool::Rect => {
@@ -1789,7 +1975,26 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                 s.resolve();
             }
         }
-        Tool::Fillet | Tool::Offset => {
+        Tool::Arc => {
+            // the radius fixes the start point along the cursor's direction
+            if let Some(c) = s.clicks.first().cloned() {
+                let dir = (s.cursor - c.0).normalize_or(DVec2::X);
+                s.clicks.push((c.0 + dir * val, None));
+            }
+        }
+        Tool::Offset => {
+            let ents = s.selected_entities();
+            s.error = None;
+            if ents.is_empty() {
+                s.input2 = Some(expr); // remembered for the next pick
+            } else {
+                if let Err(e) = s.offset_selected(&ents, &expr) {
+                    s.error = Some(e);
+                }
+                s.selection.clear();
+            }
+        }
+        Tool::Fillet => {
             // remembered for the next pick
             s.input = None;
             s.error = None;
@@ -1805,6 +2010,66 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
         }
         _ => {}
     }
+}
+
+/// Sample points along an entity (lines: the ends; arcs and circles: the curve).
+fn entity_polyline(s: &Sketch, e: EntityId) -> Vec<DVec2> {
+    match s.entities[e.0 as usize].geom {
+        Geom::Line { a, b } => vec![s.point(a), s.point(b)],
+        Geom::Arc { center, start, end } => arc_points(s.point(center), s.point(start), s.point(end)),
+        Geom::Circle { center, radius } => {
+            let c = s.point(center);
+            (0..=64)
+                .map(|i| c + DVec2::from_angle(std::f64::consts::TAU * i as f64 / 64.0) * radius)
+                .collect()
+        }
+    }
+}
+
+/// Offset the chains through `starts` by one distance expression, all in one
+/// direction convention. A closed loop (or a circle) grows outward for a positive
+/// distance and shrinks for a negative one. An open chain goes to the side away
+/// from the centroid of all the picked geometry for a positive distance (toward it
+/// for a negative one), so a set of shapes moves consistently outward together; a
+/// chain through that centroid keeps `offset_chain`'s own side (left of travel).
+pub fn offset_set(sk: &mut Sketch, starts: &[EntityId], dist: &str, vals: &Values) -> Result<Vec<EntityId>, String> {
+    let d = Expr::new(dist).eval(vals).map_err(|e| e.to_string())?;
+    let mut covered: HashSet<EntityId> = HashSet::new();
+    let mut chains: Vec<(EntityId, bool, Vec<EntityId>)> = Vec::new();
+    for &st in starts {
+        if covered.contains(&st) || st.0 as usize >= sk.entities.len() {
+            continue;
+        }
+        let (ch, closed) = sk.chain_from(st);
+        if ch.is_empty() {
+            continue;
+        }
+        covered.extend(ch.iter().map(|c| c.0));
+        chains.push((st, closed, ch.iter().map(|c| c.0).collect()));
+    }
+    let pts = |sk: &Sketch, es: &[EntityId]| -> Vec<DVec2> { es.iter().flat_map(|e| entity_polyline(sk, *e)).collect() };
+    let all: Vec<DVec2> = chains.iter().flat_map(|c| pts(sk, &c.2)).collect();
+    if all.is_empty() {
+        return Err("pick a shape to offset".into());
+    }
+    let centroid = all.iter().copied().sum::<DVec2>() / all.len() as f64;
+    let mean_dist = |v: &[DVec2]| v.iter().map(|p| p.distance(centroid)).sum::<f64>() / v.len().max(1) as f64;
+    let mut out = Vec::new();
+    for (st, closed, es) in chains {
+        let circle = es.len() == 1 && matches!(sk.entities[es[0].0 as usize].geom, Geom::Circle { .. });
+        let mut expr = dist.to_string();
+        if !closed && !circle {
+            let mut probe = sk.clone();
+            if let Ok(t) = probe.offset_chain(st, Expr::new(dist), vals) {
+                let (src, tgt) = (mean_dist(&pts(sk, &es)), mean_dist(&pts(&probe, &t)));
+                if (tgt - src).abs() > 1e-9 && (tgt < src) != (d < 0.0) {
+                    expr = format!("-({dist})");
+                }
+            }
+        }
+        out.extend(sk.offset_chain(st, Expr::new(expr), vals)?);
+    }
+    Ok(out)
 }
 
 fn dashed(p: &egui::Painter, pts: &[Pos2], st: Stroke) {
@@ -1833,6 +2098,21 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     let lo = s.to_sketch(rect, rect.left_bottom());
     let hi = s.to_sketch(rect, rect.right_top());
     let gs = Stroke::new(1.0, theme::BORDER);
+    if (step / 10.0) as f32 * s.scale >= MINOR_MIN_PX {
+        // the tenths the cursor snaps to, fainter than the major lines
+        let minor = step / 10.0;
+        let ms = Stroke::new(1.0, theme::BORDER.gamma_multiply(0.4));
+        let mut x = (lo.x / minor).floor() * minor;
+        while x <= hi.x {
+            p.vline(to(DVec2::new(x, 0.0)).x, rect.y_range(), ms);
+            x += minor;
+        }
+        let mut y = (lo.y / minor).floor() * minor;
+        while y <= hi.y {
+            p.hline(rect.x_range(), to(DVec2::new(0.0, y)).y, ms);
+            y += minor;
+        }
+    }
     let mut x = (lo.x / step).floor() * step;
     while x <= hi.x {
         let sx = to(DVec2::new(x, 0.0)).x;
@@ -2107,12 +2387,26 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
             }
         }
     }
+    // live offset preview: the result for every picked shape, dashed
+    if let Some(prev) = s.offset_preview() {
+        let st = Stroke::new(1.4, theme::ORANGE);
+        for pl in prev {
+            let v: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
+            dashed(p, &v, st);
+        }
+    }
     // tool previews
     if let Some(cur) = ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)) {
         let (q, snapped) = s.snap_point(rect, cur);
         let pv = Stroke::new(1.2, theme::ACCENT);
         if snapped.is_some() {
             p.circle_stroke(to(q), 6.0, Stroke::new(1.2, theme::ORANGE));
+        } else if s.snap && !s.alt_held && s.tool != Tool::Select {
+            // snapped to the grid: a small cross on the node
+            let c = to(q);
+            let m = Stroke::new(1.2, theme::ACCENT);
+            p.line_segment([c - vec2(4.0, 0.0), c + vec2(4.0, 0.0)], m);
+            p.line_segment([c - vec2(0.0, 4.0), c + vec2(0.0, 4.0)], m);
         }
         match (s.tool, s.clicks.as_slice()) {
             (Tool::Line, [a]) => {
@@ -2200,6 +2494,80 @@ mod tests {
     fn session() -> SketchSession {
         let d = DocData::new("t", "test");
         SketchSession::new_on(Plane::XY, &d)
+    }
+
+    #[test]
+    fn cursor_snaps_to_tenths_of_the_grid() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0; // major step 1 (100 px), tenths 10 px apart
+        let at = |s: &SketchSession, x: f64, y: f64| s.to_screen(rect, DVec2::new(x, y));
+        let (q, pt) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!(pt.is_none());
+        assert!((q.x - 1.2).abs() < 1e-9 && (q.y - 0.5).abs() < 1e-9, "{q:?}");
+        // every major line is reachable too
+        let (q, _) = s.snap_point(rect, at(&s, 2.01, -3.02));
+        assert!((q.x - 2.0).abs() < 1e-9 && (q.y + 3.0).abs() < 1e-9, "{q:?}");
+        // zoomed out the tenths are not drawn (< 6 px), so only the major step snaps
+        s.scale = 20.0;
+        assert_eq!(snap_step(s.scale), 1.0);
+        let (q, _) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!((q.x - 1.0).abs() < 1e-9 && (q.y - 0.0).abs() < 1e-9, "{q:?}");
+        // Alt bypasses snapping
+        s.scale = 100.0;
+        s.alt_held = true;
+        let (q, _) = s.snap_point(rect, at(&s, 1.23, 0.47));
+        assert!((q.x - 1.23).abs() < 0.02, "{q:?}");
+    }
+
+    fn fixed_line(s: &mut SketchSession, a: (f64, f64), b: (f64, f64)) -> EntityId {
+        let e = s.add_line((DVec2::new(a.0, a.1), None), (DVec2::new(b.0, b.1), None));
+        let (pa, pb) = s.line_points(e).unwrap();
+        for p in [pa, pb] {
+            let v = s.sketch.point(p);
+            s.sketch.constrain(Constraint::Fix(p, v));
+        }
+        e
+    }
+
+    #[test]
+    fn offset_of_several_open_lines_goes_outward_together() {
+        let mut s = session();
+        // two parallel lines drawn in opposite directions: travel-relative sides differ
+        let l1 = fixed_line(&mut s, (0.0, 0.0), (10.0, 0.0));
+        let l2 = fixed_line(&mut s, (10.0, 4.0), (0.0, 4.0));
+        let n = s.sketch.entities.len();
+        s.offset_selected(&[l1, l2], "1").unwrap();
+        assert_eq!(s.sketch.entities.len(), n + 2);
+        let ys: Vec<f64> = (n..n + 2)
+            .map(|i| {
+                let (a, _) = s.line_points(EntityId(i as u32)).unwrap();
+                s.sketch.point(a).y
+            })
+            .collect();
+        assert!((ys[0] + 1.0).abs() < 1e-6 && (ys[1] - 5.0).abs() < 1e-6, "away from the middle: {ys:?}");
+        // one undo step for the whole set
+        assert!(s.undo());
+        assert_eq!(s.sketch.entities.len(), n);
+        // negative flips both toward the middle
+        s.offset_selected(&[l1, l2], "-1").unwrap();
+        let ys: Vec<f64> = (n..n + 2)
+            .map(|i| {
+                let (a, _) = s.line_points(EntityId(i as u32)).unwrap();
+                s.sketch.point(a).y
+            })
+            .collect();
+        assert!((ys[0] - 1.0).abs() < 1e-6 && (ys[1] - 3.0).abs() < 1e-6, "{ys:?}");
+    }
+
+    #[test]
+    fn offset_defaults_to_the_wall_parameter() {
+        let mut d = DocData::new("t", "test");
+        d.params.set("wall", "2").unwrap();
+        let s = SketchSession::new_on(Plane::XY, &d);
+        assert_eq!(s.default_offset(), "wall");
+        assert_eq!(session().default_offset(), "2");
     }
 
     #[test]

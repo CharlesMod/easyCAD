@@ -85,6 +85,8 @@ const MONO_FONTS: &[&str] = &[
 const SYMBOL_FONTS: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/gdouros-symbola/Symbola.ttf",
     "/System/Library/Fonts/Apple Symbols.ttf",
     "C:\\Windows\\Fonts\\seguisym.ttf",
 ];

@@ -84,23 +84,54 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    let (doc, path) = match arg.as_deref() {
-        Some("--sample") => (Some(easycad_app::sample::sensor_node()), None),
-        Some(p) => match Document::load_from_dir(std::path::Path::new(p)) {
-            Ok(d) => (Some(d), Some(std::path::PathBuf::from(p))),
-            Err(e) => {
-                eprintln!("easycad: cannot open {p}: {e}");
-                (None, None)
+    // `--resume <file>`: this process replaced an older build (live reload)
+    let mut resume = None;
+    if arg.as_deref() == Some("--resume") {
+        if let Some(json) = easycad_app::reload::resume_arg() {
+            match easycad_app::reload::read_session(&json) {
+                Ok((snap, doc)) => resume = Some((json, snap, doc)),
+                Err(e) => {
+                    // the session files stay on disk; unsaved work is in the recovery offer
+                    eprintln!("easycad: reload restore failed ({e}); falling back to recovery");
+                    easycad_app::reload::orphan_own_recovery_copies();
+                }
             }
+        }
+    }
+    let mut snap = None;
+    let mut opts = native_options();
+    let (doc, path) = match resume {
+        Some((json, s, d)) => {
+            if let Some(w) = &s.window {
+                easycad_app::reload::apply_window(&mut opts, w);
+            }
+            snap = Some((json, s));
+            (Some(d), None)
+        }
+        None => match arg.as_deref() {
+            Some("--resume") => (None, None),
+            Some("--sample") => (Some(easycad_app::sample::sensor_node()), None),
+            Some(p) => match Document::load_from_dir(std::path::Path::new(p)) {
+                Ok(d) => (Some(d), Some(std::path::PathBuf::from(p))),
+                Err(e) => {
+                    eprintln!("easycad: cannot open {p}: {e}");
+                    (None, None)
+                }
+            },
+            None => (None, None),
         },
-        None => (None, None),
     };
     eframe::run_native(
         "easyCAD",
-        native_options(),
+        opts,
         Box::new(move |cc| {
             let mut app = EasyCadApp::new(cc, doc);
             app.path = path;
+            if let Some((json, s)) = &snap {
+                app.apply_snapshot(s);
+                easycad_app::reload::clear_session(json);
+            }
+            app.start_reload_watch(&cc.egui_ctx);
             app.cloud = easycad_app::cloud::Cloud::start(&cc.egui_ctx, easycad_app::settings::dir());
             Ok(Box::new(app))
         }),
