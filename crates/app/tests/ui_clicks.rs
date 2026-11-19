@@ -641,6 +641,7 @@ fn sketch_value_box_opens_on_first_click_with_text_selected() {
         assert_eq!(r.len(), 1);
         assert!((r[0] - 20.0).abs() < 1e-6, "{r:?}");
     }
+}
 
 #[test]
 fn new_sketch_button_does_what_the_s_key_does() {
