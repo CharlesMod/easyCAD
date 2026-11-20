@@ -157,6 +157,13 @@ pub struct SketchSession {
     pub sel_dim: Option<usize>,
     /// Label boxes of the last frame, for clicking dimensions.
     pub dim_rects: std::cell::RefCell<Vec<(Rect, usize)>>,
+    /// Dimension line / extension line / arrow segments of the last frame (with the
+    /// constraint index), so a dimension can be hit on its line as well as its label.
+    pub dim_segs: std::cell::RefCell<Vec<([Pos2; 2], usize)>>,
+    /// Where the inline field of a new dimension goes (its label spot, last frame).
+    pub dim_label_pos: std::cell::Cell<Option<Pos2>>,
+    /// Why the inline dimension field's text was refused (shown under it).
+    pub input_err: Option<String>,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
     pub entity_layer: Vec<Option<String>>,
@@ -216,6 +223,9 @@ impl SketchSession {
             edit_dim: None,
             sel_dim: None,
             dim_rects: Default::default(),
+            dim_segs: Default::default(),
+            dim_label_pos: Default::default(),
+            input_err: None,
             dxf: None,
             entity_layer: vec![None; n],
             report: None,
@@ -441,6 +451,7 @@ impl SketchSession {
         self.dim_target = None;
         self.dim_pending = false;
         self.edit_dim = None;
+        self.input_err = None;
         match self.tool {
             Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc => {
                 self.clicks.clear();
@@ -2049,19 +2060,25 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
     if resp.drag_stopped() && s.drag.is_some() {
         s.drag_end();
     }
-    let label_at = |s: &SketchSession, hp: Pos2| {
-        s.dim_rects.borrow().iter().rev().find(|(r, _)| r.contains(hp)).map(|(_, i)| *i)
-    };
-    if resp.double_clicked_by(egui::PointerButton::Primary) && s.input.is_none() && s.drag.is_none() {
+    let label_at = |s: &SketchSession, hp: Pos2| dim_at(s, hp);
+    let mut dbl = false;
+    if resp.double_clicked_by(egui::PointerButton::Primary) && s.drag.is_none() {
         if let Some(i) = resp.interact_pointer_pos().and_then(|hp| label_at(s, hp)) {
             if let Some(e) = s.sketch.constraints[i].dim_expr().map(|e| e.0.clone()) {
+                // an open box (another dimension) is dropped; this one is edited inline
+                s.cancel_input();
+                s.dim_target = None;
                 s.edit_dim = Some(i);
                 s.sel_dim = Some(i);
+                s.selection.clear();
                 s.open_input(e, false);
+                dbl = true;
             }
         }
     }
-    let on_label = if resp.clicked_by(egui::PointerButton::Primary) && s.input.is_none() && !moving {
+    let on_label = if dbl {
+        None
+    } else if resp.clicked_by(egui::PointerButton::Primary) && s.input.is_none() && !moving {
         resp.interact_pointer_pos().and_then(|hp| label_at(s, hp))
     } else {
         None
@@ -2069,7 +2086,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
     if let Some(i) = on_label {
         s.sel_dim = Some(i);
         s.selection.clear();
-    } else if resp.clicked_by(egui::PointerButton::Primary) && !moving {
+    } else if resp.clicked_by(egui::PointerButton::Primary) && !moving && !dbl {
         s.sel_dim = None;
         if let Some(hp) = resp.interact_pointer_pos() {
             click(
@@ -2150,6 +2167,13 @@ fn is_fixed(s: &Sketch, p: PointId) -> bool {
 }
 
 fn click(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
+    if s.tool != Tool::Dimension && s.edit_dim.is_some() && dim_input_open(s) {
+        // a click elsewhere commits the inline edit; a refused value keeps it open
+        if let Err(e) = commit_dim_input(s) {
+            s.input_err = Some(e);
+            return;
+        }
+    }
     let placing = matches!(s.tool, Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc);
     if placing {
         // a click commits with the mouse value: the value box is done
@@ -2360,7 +2384,13 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 }
                 s.dim_pending = false;
             }
-            if s.input.is_some() {
+            if dim_input_open(s) {
+                // a click elsewhere commits the inline field; a refused value keeps it open
+                if let Err(e) = commit_dim_input(s) {
+                    s.input_err = Some(e);
+                    return;
+                }
+            } else if s.input.is_some() {
                 s.cancel_input();
             }
             if let Some(x) = s.pick_dim(rect, hp) {
@@ -2401,6 +2431,52 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
     }
 }
 
+/// The dimension under a screen point: its label box, else (within 6 px) its
+/// dimension line, extension lines or arrows.
+fn dim_at(s: &SketchSession, hp: Pos2) -> Option<usize> {
+    if let Some((_, i)) = s.dim_rects.borrow().iter().rev().find(|(r, _)| r.contains(hp)) {
+        return Some(*i);
+    }
+    let d2 = |seg: &[Pos2; 2]| {
+        let (a, b) = (seg[0], seg[1]);
+        let ab = b - a;
+        let t = if ab.length_sq() < 1e-9 { 0.0 } else { ((hp - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) };
+        (a + ab * t).distance(hp)
+    };
+    s.dim_segs
+        .borrow()
+        .iter()
+        .rev()
+        .find(|(seg, _)| d2(seg) <= 6.0)
+        .map(|(_, i)| *i)
+}
+
+/// Is the value box the inline field of a dimension (new or edited)?
+fn dim_input_open(s: &SketchSession) -> bool {
+    s.input.is_some() && (s.edit_dim.is_some() || (s.tool == Tool::Dimension && s.dim_target.is_some()))
+}
+
+/// Apply the inline dimension field's text. On an error nothing changes and the
+/// field stays open (the error is kept in `input_err`).
+fn commit_dim_input(s: &mut SketchSession) -> Result<(), String> {
+    let Some(text) = s.input.clone() else { return Ok(()) };
+    let expr = crate::units::normalize_input(text.trim().trim_start_matches('=').trim());
+    crate::widgets::eval(&expr, &s.values)?;
+    if let Some(i) = s.edit_dim {
+        s.set_dimension(i, &expr)?;
+    } else if let Some(t) = s.dim_target.clone() {
+        s.apply_dimension(&t, &expr)?;
+    }
+    s.input = None;
+    s.input_live = false;
+    s.input_err = None;
+    s.edit_dim = None;
+    s.dim_target = None;
+    s.dim_pending = false;
+    s.error = None;
+    Ok(())
+}
+
 /// The cursor's reading for the value box while a shape is being placed.
 fn live_value(s: &SketchSession) -> Option<f64> {
     let a = s.clicks.first()?.0;
@@ -2416,7 +2492,17 @@ fn live_value(s: &SketchSession) -> Option<f64> {
 /// Offset shape or a Dimension), text selected, so typing replaces it.
 fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
     let Some(text) = s.input.clone() else { return };
-    let anchor = s.to_screen(rect, s.cursor) + vec2(18.0, -34.0);
+    let dim_mode = dim_input_open(s);
+    let mut anchor = s.to_screen(rect, s.cursor) + vec2(18.0, -34.0);
+    if dim_mode {
+        let at = match s.edit_dim {
+            Some(i) => s.dim_rects.borrow().iter().find(|(_, c)| *c == i).map(|(r, _)| r.center()),
+            None => s.dim_label_pos.get(),
+        };
+        if let Some(at) = at {
+            anchor = at;
+        }
+    }
     let mut text = text;
     if s.input_live {
         if let Some(v) = live_value(s) {
@@ -2442,6 +2528,7 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
         _ => "value",
     };
     let te_id = egui::Id::NULL.with("sk_input_text");
+    let had_focus = ui.ctx().memory(|m| m.has_focus(te_id));
     if s.input_fresh || s.input_live {
         let mut st = egui::TextEdit::load_state(ui.ctx(), te_id).unwrap_or_default();
         let n = text.chars().count();
@@ -2452,25 +2539,39 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
         st.store(ui.ctx(), te_id);
     }
     let mut typed = false;
-    egui::Area::new(egui::Id::NULL.with("sk_input"))
+    let bad = dim_mode && s.input_err.is_some();
+    let mut area = egui::Area::new(egui::Id::NULL.with("sk_input"))
         .order(egui::Order::Foreground)
-        .fixed_pos(anchor)
-        .show(ui.ctx(), |ui| {
+        .fixed_pos(anchor);
+    if dim_mode {
+        // centred on the label spot without a pivot (a pivot makes egui hide the
+        // area for a sizing frame, which would eat the freshly typed text)
+        let w = (text.chars().count().max(3) as f32 * 8.0 + 6.0).min(220.0) + 10.0;
+        area = area.fixed_pos(anchor - vec2(w / 2.0, 11.0));
+    }
+    area.show(ui.ctx(), |ui| {
             Frame::new()
                 .fill(theme::CARD)
-                .stroke(Stroke::new(1.0, theme::ACCENT))
+                .stroke(Stroke::new(
+                    if dim_mode { 1.5 } else { 1.0 },
+                    if bad { theme::RED } else { theme::ACCENT },
+                ))
                 .corner_radius(4.0)
-                .inner_margin(Margin::symmetric(6, 3))
+                .inner_margin(if dim_mode { Margin::symmetric(4, 1) } else { Margin::symmetric(6, 3) })
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(label).size(11.0).color(theme::TEXT_MUTED));
+                        if !dim_mode {
+                            ui.label(RichText::new(label).size(11.0).color(theme::TEXT_MUTED));
+                        }
                         let lone = s.tool == Tool::Dimension
                             && s.edit_dim.is_none()
                             && matches!(s.dim_target.as_deref(), Some([Sel::Entity(e)])
                                 if !matches!(s.sketch.entities[e.0 as usize].geom, Geom::Line { .. }));
-                        if lone && ui.small_button(if s.dim_toggle { "R \u{2192} \u{2300}" } else { "\u{2300} \u{2192} R" })
-                            .on_hover_text("Swap radius and diameter")
-                            .clicked()
+                        let tab = lone && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                        if (lone && ui.small_button(if s.dim_toggle { "R \u{2192} \u{2300}" } else { "\u{2300} \u{2192} R" })
+                            .on_hover_text("Swap radius and diameter (Tab)")
+                            .clicked())
+                            || tab
                         {
                             s.dim_toggle = !s.dim_toggle;
                             if let Some((v, _)) = s.dim_target.as_ref().and_then(|t| s.dimension_for(t)) {
@@ -2478,11 +2579,16 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                                 s.input_fresh = true;
                             }
                         }
+                        let field_w = if dim_mode {
+                            (text.chars().count().max(3) as f32 * 8.0 + 6.0).min(220.0)
+                        } else {
+                            110.0
+                        };
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut text)
                                 .id(te_id)
                                 .font(theme::mono(13.0))
-                                .desired_width(110.0)
+                                .desired_width(field_w)
                                 .frame(egui::Frame::NONE),
                         );
                         typed = r.changed();
@@ -2515,17 +2621,40 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                         }
                     });
                 });
+            if dim_mode {
+                if let Some(e) = &s.input_err {
+                    Frame::new()
+                        .fill(theme::CARD)
+                        .stroke(Stroke::new(1.0, theme::RED))
+                        .corner_radius(3.0)
+                        .inner_margin(Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(e).size(11.0).color(theme::RED));
+                        });
+                }
+            }
         });
     if cancel {
         s.cancel_input();
+        s.input_err = None;
         return;
     }
     if typed {
         s.input_live = false;
+        s.input_err = None;
     }
-    s.input_fresh = false;
+    // the inline dimension field keeps re-selecting its text until it holds focus
+    s.input_fresh = dim_mode && !had_focus && !typed && !cancel;
     if !done {
         s.input = Some(text);
+        return;
+    }
+    if dim_mode {
+        // Enter: apply; a bad or conflicting value keeps the field open, red
+        s.input = Some(text);
+        if let Err(e) = commit_dim_input(s) {
+            s.input_err = Some(e);
+        }
         return;
     }
     // Enter on an untouched live reading is the same as clicking there
@@ -2947,6 +3076,17 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     p.add(egui::Shape::line(pl, Stroke::new(2.6, theme::ACCENT)));
                 }
             }
+            // the inline field of a new dimension sits on its label spot
+            if s.input.is_some() && !s.dim_pending && s.edit_dim.is_none() {
+                let spot = match s.dim_anchor_points(t) {
+                    Some((a, b)) => Some(draw_dim_line(p, to(a), to(b), s.dim_orient, 28.0)),
+                    None => match t.first() {
+                        Some(Sel::Entity(e)) => entity_mid(&s.sketch, *e).map(|m| to(m) + vec2(0.0, 18.0)),
+                        _ => None,
+                    },
+                };
+                s.dim_label_pos.set(spot);
+            }
             // placing: the cursor's side picks horizontal / vertical / aligned
             if s.dim_pending {
                 if let (Some((a, b)), Some(cur)) = (
@@ -2971,6 +3111,8 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
             }
         }
     }
+    s.dim_rects.borrow_mut().clear();
+    s.dim_segs.borrow_mut().clear();
     // constraint glyphs + dimension labels
     if s.show_constraints {
         let mut stacks: HashMap<u32, f32> = HashMap::new();
@@ -3014,7 +3156,6 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                 theme::TEXT_DIM,
             );
         }
-        s.dim_rects.borrow_mut().clear();
         for (ci, c) in s.sketch.constraints.iter().enumerate() {
             let mut at_override: Option<Pos2> = None;
             let (expr, anchor, prefix) = match c {
@@ -3026,6 +3167,9 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     let (pa, pb, pq) = (s.sketch.point(a), s.sketch.point(b), s.sketch.point(*q));
                     let foot = pa + (pb - pa) * ((pq - pa).dot(pb - pa) / (pb - pa).length_squared().max(1e-18));
                     at_override = Some(draw_dim_line(p, to(pq), to(foot), DimOrient::Aligned, 0.0));
+                    s.dim_segs.borrow_mut().extend(
+                        dim_hit_segs(to(pq), to(foot), DimOrient::Aligned, 0.0).into_iter().map(|g| (g, ci)),
+                    );
                     (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "")
                 }
                 Constraint::LineDistance(e1, e2, x) => {
@@ -3038,6 +3182,9 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     let pq = (s.sketch.point(c2) + s.sketch.point(d2)) / 2.0;
                     let foot = pa + (pb - pa) * ((pq - pa).dot(pb - pa) / (pb - pa).length_squared().max(1e-18));
                     at_override = Some(draw_dim_line(p, to(pq), to(foot), DimOrient::Aligned, 0.0));
+                    s.dim_segs.borrow_mut().extend(
+                        dim_hit_segs(to(pq), to(foot), DimOrient::Aligned, 0.0).into_iter().map(|g| (g, ci)),
+                    );
                     (x, entity_mid(&s.sketch, *e2).map(|m| (m, *e2)), "")
                 }
                 Constraint::Distance(a, b, x)
@@ -3055,6 +3202,11 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                         o,
                         28.0,
                     ));
+                    s.dim_segs.borrow_mut().extend(
+                        dim_hit_segs(to(s.sketch.point(*a)), to(s.sketch.point(*b)), o, 28.0)
+                            .into_iter()
+                            .map(|g| (g, ci)),
+                    );
                     (
                         x,
                         Some((
@@ -3091,6 +3243,9 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                 + if is_expr { 30.0 } else { 14.0 };
             let r = Rect::from_center_size(at, vec2(w, 22.0));
             s.dim_rects.borrow_mut().push((r, ci));
+            if s.edit_dim == Some(ci) {
+                continue; // the inline field is drawn in its place
+            }
             p.rect(
                 r,
                 4.0,
@@ -3233,6 +3388,37 @@ fn entity_mid(s: &Sketch, e: EntityId) -> Option<DVec2> {
             pts.get(pts.len() / 2).copied()
         }
     }
+}
+
+/// Clickable segments of a dimension line: the line itself and the extension
+/// lines (their first 10 px, next to the measured points, are left out so those
+/// points stay pickable). Arrows lie within the click tolerance of the line ends.
+fn dim_hit_segs(a: Pos2, b: Pos2, o: DimOrient, off: f32) -> Vec<[Pos2; 2]> {
+    let (da, db) = match o {
+        DimOrient::Aligned => {
+            let d = (b - a).normalized();
+            let n = if d.x.is_nan() { vec2(0.0, -1.0) } else { vec2(d.y, -d.x) };
+            (a + n * off, b + n * off)
+        }
+        DimOrient::Horizontal => {
+            let y = a.y.max(b.y) + off;
+            (pos2(a.x, y), pos2(b.x, y))
+        }
+        DimOrient::Vertical => {
+            let x = a.x.max(b.x) + off;
+            (pos2(x, a.y), pos2(x, b.y))
+        }
+    };
+    let mut v = vec![[da, db]];
+    if off != 0.0 {
+        for (from, to) in [(a, da), (b, db)] {
+            let d = (to - from).normalized();
+            if !d.x.is_nan() && (to - from).length() > 12.0 {
+                v.push([from + d * 10.0, to]);
+            }
+        }
+    }
+    v
 }
 
 /// A dimension line between two screen points with extension lines, arrows and
