@@ -1165,6 +1165,22 @@ mod tests {
     }
 
     #[test]
+    fn line_distance_holds_parallel_and_serde_round_trips() {
+        let mut s = Sketch::new("ld", Plane::XY);
+        let l1 = s.line(v(0.0, 0.0), v(10.0, 0.0));
+        let l2 = s.line(v(0.0, 3.0), v(10.0, 4.0));
+        s.constrain(Constraint::Fix(PointId(0), v(0.0, 0.0)));
+        s.constrain(Constraint::Fix(PointId(1), v(10.0, 0.0)));
+        s.constrain(Constraint::LineDistance(l1, l2, "6".into()));
+        let rep = s.solve(&Values::new()).unwrap();
+        assert!(rep.converged, "{rep:?}");
+        assert!((s.point(PointId(2)).y.abs() - 6.0).abs() < 1e-7);
+        assert!((s.point(PointId(3)).y.abs() - 6.0).abs() < 1e-7);
+        let back: Sketch = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
     fn profile_nesting_and_open_chains() {
         let mut s = Sketch::new("n", Plane::XY);
         s.rect(v(0.0, 0.0), v(100.0, 100.0));

@@ -53,6 +53,21 @@ impl Geom {
 }
 
 impl Constraint {
+    /// The value expression of a dimensional constraint.
+    pub fn dim_expr(&self) -> Option<&Expr> {
+        use Constraint::*;
+        match self {
+            Distance(.., d) | DistanceX(.., d) | DistanceY(.., d) | PointLineDistance(.., d) | LineDistance(.., d) | Length(_, d) | Radius(_, d) | Diameter(_, d) | Angle(.., d) => Some(d),
+            _ => None,
+        }
+    }
+    pub fn dim_expr_mut(&mut self) -> Option<&mut Expr> {
+        use Constraint::*;
+        match self {
+            Distance(.., d) | DistanceX(.., d) | DistanceY(.., d) | PointLineDistance(.., d) | LineDistance(.., d) | Length(_, d) | Radius(_, d) | Diameter(_, d) | Angle(.., d) => Some(d),
+            _ => None,
+        }
+    }
     /// Points the constraint refers to.
     pub fn points(&self) -> Vec<PointId> {
         use Constraint::*;

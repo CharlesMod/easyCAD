@@ -1399,3 +1399,50 @@ mod hist {
         assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
     }
 }
+
+#[test]
+fn dimension_tool_centre_to_centre_orientation_follows_placement() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::{DimOrient, Tool};
+    use easycad_model::sketch::Constraint;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    let (a, b) = (egui::pos2(600.0, 450.0), egui::pos2(800.0, 400.0));
+    for c in [a, b] {
+        if let Mode::Sketch(s) = &mut h.state_mut().mode {
+            s.tool = Tool::Circle;
+        }
+        click_at(&mut h, c, egui::PointerButton::Primary);
+        h.run_steps(3);
+        h.event(egui::Event::Text("20".into()));
+        h.run_steps(3);
+        press_enter(&mut h);
+    }
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Dimension;
+    }
+    h.run_steps(2);
+    // pick both centres (no edge there: the circles' centres are anchors)
+    hover_click(&mut h, a);
+    hover_click(&mut h, b);
+    let sk = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => (s.dim_pending, s.input.clone(), s.dim_orient, s.sketch.constraints.clone()),
+        _ => panic!(),
+    };
+    let (pending, input, _, _) = sk(&h);
+    assert!(pending && input.is_none(), "two anchors wait for a placement click");
+    // above the pair, between them: horizontal
+    hover_click(&mut h, egui::pos2(700.0, 250.0));
+    let (pending, input, orient, _) = sk(&h);
+    assert!(!pending && input.is_some());
+    assert_eq!(orient, DimOrient::Horizontal);
+    h.event(egui::Event::Text("100".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (_, input, _, cs) = sk(&h);
+    assert!(input.is_none());
+    assert!(cs.iter().any(|c| matches!(c, Constraint::DistanceX(..))), "{cs:?}");
+}

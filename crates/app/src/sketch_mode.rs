@@ -61,7 +61,7 @@ impl Tool {
             Tool::Offset => "Offset · pick a loop · type distance (=clearance + wall)",
             Tool::Project => "Project · pick body edges (grey) to bring them in",
             Tool::Trim => "Trim · hover a segment to preview, click to cut",
-            Tool::Dimension => "Dimension · pick one or two entities, then type",
+            Tool::Dimension => "Dimension · pick points / centres / midpoints / lines / circles (two, or one), place, then type",
         }
     }
 }
@@ -70,9 +70,10 @@ impl Tool {
 pub enum Sel {
     Point(PointId),
     Entity(EntityId),
+    /// The midpoint of a line: an anchor for the Dimension tool only.
+    Mid(EntityId),
 }
 
-/// Builds the dimension constraint from the typed expression.
 /// A live Select-tool drag of a point, or of every point of a line/arc/circle.
 #[derive(Clone)]
 pub struct Drag {
@@ -84,7 +85,33 @@ pub struct Drag {
     pub before: Sketch,
 }
 
+/// Builds the dimension constraint from the typed expression.
 pub type DimMaker = Box<dyn Fn(Expr) -> Constraint>;
+
+/// How a point-to-point dimension reads: along the pair, or along an axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DimOrient {
+    #[default]
+    Aligned,
+    Horizontal,
+    Vertical,
+}
+
+/// Fusion-style: the dimension reads horizontally when the cursor sits above or
+/// below the pair (within its x span), vertically when it sits beside it, and
+/// aligned otherwise.
+pub fn dim_orient(a: DVec2, b: DVec2, c: DVec2) -> DimOrient {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let in_x = c.x >= lo.x && c.x <= hi.x;
+    let in_y = c.y >= lo.y && c.y <= hi.y;
+    if in_x && !in_y {
+        DimOrient::Horizontal
+    } else if in_y && !in_x {
+        DimOrient::Vertical
+    } else {
+        DimOrient::Aligned
+    }
+}
 
 pub struct DxfState {
     pub import: ImportId,
@@ -118,6 +145,16 @@ pub struct SketchSession {
     /// and arcs are made as construction geometry.
     pub construction_mode: bool,
     pub dim_target: Option<Vec<Sel>>,
+    /// Two points are picked: the cursor's side picks the orientation, a click places.
+    pub dim_pending: bool,
+    pub dim_orient: DimOrient,
+    /// Swap radius and diameter for a lone circle or arc.
+    pub dim_toggle: bool,
+    /// An existing dimension (constraint index) being edited / selected.
+    pub edit_dim: Option<usize>,
+    pub sel_dim: Option<usize>,
+    /// Label boxes of the last frame, for clicking dimensions.
+    pub dim_rects: std::cell::RefCell<Vec<(Rect, usize)>>,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
     pub entity_layer: Vec<Option<String>>,
@@ -169,6 +206,12 @@ impl SketchSession {
             input2: None,
             input_second: false,
             dim_target: None,
+            dim_pending: false,
+            dim_orient: DimOrient::Aligned,
+            dim_toggle: false,
+            edit_dim: None,
+            sel_dim: None,
+            dim_rects: Default::default(),
             dxf: None,
             entity_layer: vec![None; n],
             report: None,
@@ -391,6 +434,8 @@ impl SketchSession {
         self.input_live = false;
         self.input_fresh = false;
         self.dim_target = None;
+        self.dim_pending = false;
+        self.edit_dim = None;
         match self.tool {
             Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc => {
                 self.clicks.clear();
@@ -459,6 +504,7 @@ impl SketchSession {
         let ids: Vec<PointId> = match x {
             Sel::Point(p) => vec![p],
             Sel::Entity(e) => geom_points(&self.sketch.entities[e.0 as usize].geom),
+            Sel::Mid(_) => Vec::new(),
         };
         let ids: Vec<PointId> = ids
             .into_iter()
@@ -892,65 +938,187 @@ impl SketchSession {
         Ok(())
     }
 
+    /// Swap each `Sel::Mid` for a helper point held at that line's midpoint (an
+    /// existing helper is reused). Helper points belong to no entity, so they are
+    /// neither drawn nor pickable.
+    fn resolve_mids(sk: &mut Sketch, sel: &[Sel]) -> Vec<Sel> {
+        sel.iter()
+            .map(|x| match *x {
+                Sel::Mid(e) => {
+                    let used = |p: PointId| sk.entities.iter().any(|en| geom_points(&en.geom).contains(&p));
+                    let have = sk.constraints.iter().find_map(|c| match c {
+                        Constraint::Midpoint(p, l) if *l == e && !used(*p) => Some(*p),
+                        _ => None,
+                    });
+                    let p = have.unwrap_or_else(|| {
+                        let Geom::Line { a, b } = sk.entities[e.0 as usize].geom else {
+                            return PointId(0);
+                        };
+                        let m = (sk.point(a) + sk.point(b)) / 2.0;
+                        let p = sk.add_point(m);
+                        sk.constrain(Constraint::Midpoint(p, e));
+                        p
+                    });
+                    Sel::Point(p)
+                }
+                o => o,
+            })
+            .collect()
+    }
+
     /// The dimension a pick set would create, with its current measured value.
+    /// Two points (centres and midpoints included) read per `dim_orient`; a lone
+    /// circle/arc reads as diameter/radius, swapped by `dim_toggle`.
     pub fn dimension_for(&self, sel: &[Sel]) -> Option<(f64, DimMaker)> {
-        let s = &self.sketch;
-        match sel {
+        let mut tmp;
+        let mut sel = sel.to_vec();
+        let s: &Sketch = if sel.iter().any(|x| matches!(x, Sel::Mid(_))) {
+            tmp = self.sketch.clone();
+            sel = Self::resolve_mids(&mut tmp, &sel);
+            &tmp
+        } else {
+            &self.sketch
+        };
+        // circles and arcs stand for their centre next to anything else
+        let anchor = |x: &Sel| -> Option<Sel> {
+            match *x {
+                Sel::Entity(e) => match s.entities[e.0 as usize].geom {
+                    Geom::Line { .. } => Some(*x),
+                    Geom::Circle { center, .. } | Geom::Arc { center, .. } => Some(Sel::Point(center)),
+                },
+                o => Some(o),
+            }
+        };
+        match sel.as_slice() {
             [Sel::Entity(e)] => {
                 let e = *e;
+                let toggle = self.dim_toggle;
                 match s.entities[e.0 as usize].geom {
                     Geom::Line { a, b } => Some((
                         s.point(a).distance(s.point(b)),
                         Box::new(move |x| Constraint::Length(e, x)),
                     )),
+                    Geom::Circle { radius, .. } if toggle => {
+                        Some((radius, Box::new(move |x| Constraint::Radius(e, x))))
+                    }
                     Geom::Circle { radius, .. } => {
                         Some((radius * 2.0, Box::new(move |x| Constraint::Diameter(e, x))))
                     }
-                    Geom::Arc { center, start, .. } => Some((
-                        s.point(center).distance(s.point(start)),
-                        Box::new(move |x| Constraint::Radius(e, x)),
-                    )),
+                    Geom::Arc { center, start, .. } => {
+                        let r = s.point(center).distance(s.point(start));
+                        if toggle {
+                            Some((r * 2.0, Box::new(move |x| Constraint::Diameter(e, x))))
+                        } else {
+                            Some((r, Box::new(move |x| Constraint::Radius(e, x))))
+                        }
+                    }
                 }
             }
-            [Sel::Point(a), Sel::Point(b)] => {
-                let (a, b) = (*a, *b);
-                Some((
-                    s.point(a).distance(s.point(b)),
-                    Box::new(move |x| Constraint::Distance(a, b, x)),
-                ))
-            }
-            [Sel::Point(p), Sel::Entity(e)] | [Sel::Entity(e), Sel::Point(p)] => {
-                let (p, e) = (*p, *e);
-                let Geom::Line { a, b } = s.entities[e.0 as usize].geom else {
-                    return None;
-                };
-                let (pa, pb, q) = (s.point(a), s.point(b), s.point(p));
-                let d = ((pb - pa).perp_dot(q - pa) / (pb - pa).length().max(1e-12)).abs();
-                Some((d, Box::new(move |x| Constraint::PointLineDistance(p, e, x))))
-            }
-            [Sel::Entity(e1), Sel::Entity(e2)] => {
-                let (e1, e2) = (*e1, *e2);
-                let (Geom::Line { a, b }, Geom::Line { a: c, b: d }) = (
-                    s.entities[e1.0 as usize].geom,
-                    s.entities[e2.0 as usize].geom,
-                ) else {
-                    return None;
-                };
-                let (u, w) = (s.point(b) - s.point(a), s.point(d) - s.point(c));
-                let ang = u.perp_dot(w).atan2(u.dot(w)).to_degrees();
-                Some((ang, Box::new(move |x| Constraint::Angle(e1, e2, x))))
+            [x, y] => {
+                let (x, y) = (anchor(x)?, anchor(y)?);
+                match (x, y) {
+                    (Sel::Point(a), Sel::Point(b)) => {
+                        if a == b {
+                            return None;
+                        }
+                        let (pa, pb) = (s.point(a), s.point(b));
+                        Some(match self.dim_orient {
+                            DimOrient::Aligned => (
+                                pa.distance(pb),
+                                Box::new(move |v| Constraint::Distance(a, b, v)) as DimMaker,
+                            ),
+                            DimOrient::Horizontal => {
+                                let (a, b) = if pa.x <= pb.x { (a, b) } else { (b, a) };
+                                ((pa.x - pb.x).abs(), Box::new(move |v| Constraint::DistanceX(a, b, v)))
+                            }
+                            DimOrient::Vertical => {
+                                let (a, b) = if pa.y <= pb.y { (a, b) } else { (b, a) };
+                                ((pa.y - pb.y).abs(), Box::new(move |v| Constraint::DistanceY(a, b, v)))
+                            }
+                        })
+                    }
+                    (Sel::Point(p), Sel::Entity(e)) | (Sel::Entity(e), Sel::Point(p)) => {
+                        let Geom::Line { a, b } = s.entities[e.0 as usize].geom else {
+                            return None;
+                        };
+                        if a == p || b == p {
+                            return None;
+                        }
+                        let (pa, pb, q) = (s.point(a), s.point(b), s.point(p));
+                        let d = ((pb - pa).perp_dot(q - pa) / (pb - pa).length().max(1e-12)).abs();
+                        Some((d, Box::new(move |x| Constraint::PointLineDistance(p, e, x))))
+                    }
+                    (Sel::Entity(e1), Sel::Entity(e2)) => {
+                        if e1 == e2 {
+                            return None;
+                        }
+                        let (Geom::Line { a, b }, Geom::Line { a: c, b: d }) = (
+                            s.entities[e1.0 as usize].geom,
+                            s.entities[e2.0 as usize].geom,
+                        ) else {
+                            return None;
+                        };
+                        let (u, w) = (s.point(b) - s.point(a), s.point(d) - s.point(c));
+                        let parallel = u.perp_dot(w).abs() <= 1e-4 * u.length() * w.length()
+                            || s.constraints.iter().any(|k| {
+                                matches!(k, Constraint::Parallel(p, q) if (*p, *q) == (e1, e2) || (*p, *q) == (e2, e1))
+                            });
+                        if parallel {
+                            let dist = (u.perp_dot(s.point(c) - s.point(a)) / u.length().max(1e-12)).abs();
+                            Some((dist, Box::new(move |x| Constraint::LineDistance(e1, e2, x))))
+                        } else {
+                            let ang = u.perp_dot(w).atan2(u.dot(w)).to_degrees();
+                            Some((ang, Box::new(move |x| Constraint::Angle(e1, e2, x))))
+                        }
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }
     }
 
+    /// Where the two anchors of a point pair sit (circles and arcs by centre).
+    pub fn dim_anchor_points(&self, sel: &[Sel]) -> Option<(DVec2, DVec2)> {
+        let s = &self.sketch;
+        let at = |x: &Sel| -> Option<DVec2> {
+            Some(match *x {
+                Sel::Point(p) => s.point(p),
+                Sel::Mid(e) => match s.entities[e.0 as usize].geom {
+                    Geom::Line { a, b } => (s.point(a) + s.point(b)) / 2.0,
+                    _ => return None,
+                },
+                Sel::Entity(e) => match s.entities[e.0 as usize].geom {
+                    Geom::Circle { center, .. } | Geom::Arc { center, .. } => s.point(center),
+                    _ => return None,
+                },
+            })
+        };
+        match sel {
+            [x, y] => Some((at(x)?, at(y)?)),
+            _ => None,
+        }
+    }
+
+    /// True when the pick set is a pair of points (centres, ends, midpoints): the
+    /// dimension then waits for a placement click that picks its orientation.
+    pub fn dim_needs_placement(&self, sel: &[Sel]) -> bool {
+        let pt = |x: &Sel| match *x {
+            Sel::Point(_) | Sel::Mid(_) => true,
+            Sel::Entity(e) => !matches!(self.sketch.entities[e.0 as usize].geom, Geom::Line { .. }),
+        };
+        matches!(sel, [x, y] if pt(x) && pt(y))
+    }
+
     pub fn apply_dimension(&mut self, sel: &[Sel], text: &str) -> Result<(), String> {
         let t = text.trim().trim_start_matches('=').trim();
         crate::widgets::eval(t, &self.values)?;
-        let (_, mk) = self
-            .dimension_for(sel)
-            .ok_or("can't dimension that selection")?;
+        if self.dimension_for(sel).is_none() {
+            return Err("can't dimension that selection".into());
+        }
         self.push_undo();
+        let sel = Self::resolve_mids(&mut self.sketch, sel);
+        let (_, mk) = self.dimension_for(&sel).ok_or("can't dimension that selection")?;
         self.sketch.constrain(mk(Expr::new(t)));
         self.resolve();
         if self.report.as_ref().is_some_and(|r| !r.converged) {
@@ -959,6 +1127,34 @@ impl SketchSession {
             return Err("that dimension conflicts with existing constraints".into());
         }
         Ok(())
+    }
+
+    /// Change an existing dimension's value (double-click edit).
+    pub fn set_dimension(&mut self, idx: usize, text: &str) -> Result<(), String> {
+        let t = text.trim().trim_start_matches('=').trim();
+        crate::widgets::eval(t, &self.values)?;
+        if self.sketch.constraints.get_mut(idx).and_then(|c| c.dim_expr_mut()).is_none() {
+            return Err("not a dimension".into());
+        }
+        self.push_undo();
+        *self.sketch.constraints[idx].dim_expr_mut().unwrap() = Expr::new(t);
+        self.resolve();
+        if self.report.as_ref().is_some_and(|r| !r.converged) {
+            self.undo();
+            self.redo.pop();
+            return Err("that dimension conflicts with existing constraints".into());
+        }
+        Ok(())
+    }
+
+    /// Delete one dimension (by constraint index).
+    pub fn delete_dimension(&mut self, idx: usize) {
+        if self.sketch.constraints.get(idx).is_some_and(|c| c.dim_expr().is_some()) {
+            self.push_undo();
+            self.sketch.constraints.remove(idx);
+            self.sel_dim = None;
+            self.resolve();
+        }
     }
 
     // ------------------------------------------------------------ view
@@ -1003,6 +1199,26 @@ impl SketchSession {
         self.scale = ((rect.width() as f64 - 260.0) / size.x)
             .min((rect.height() as f64 - 200.0) / size.y)
             .max(0.05) as f32;
+    }
+
+    /// Pick for the Dimension tool: points (centres too), then line midpoints,
+    /// then whole entities.
+    fn pick_dim(&self, rect: Rect, p: Pos2) -> Option<Sel> {
+        let r = self.pick(rect, p);
+        if matches!(r, Some(Sel::Point(_))) {
+            return r;
+        }
+        let s = &self.sketch;
+        let mut best: Option<(f32, Sel)> = None;
+        for (i, e) in s.entities.iter().enumerate() {
+            if let Geom::Line { a, b } = e.geom {
+                let d = self.to_screen(rect, (s.point(a) + s.point(b)) / 2.0).distance(p);
+                if d < 7.0 && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, Sel::Mid(EntityId(i as u32))));
+                }
+            }
+        }
+        best.map(|b| b.1).or(r)
     }
 
     fn pick(&self, rect: Rect, p: Pos2) -> Option<Sel> {
@@ -1524,7 +1740,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         }
         s.alt_held = ui.input(|i| i.modifiers.alt);
         s.cursor = s.snap_point(rect, hp).0;
-        s.hover = s.pick(rect, hp);
+        s.hover = if s.tool == Tool::Dimension { s.pick_dim(rect, hp) } else { s.pick(rect, hp) };
     }
     // keyboard
     let typing = ui.ctx().text_edit_focused();
@@ -1536,6 +1752,8 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 if i.consume_key(egui::Modifiers::NONE, key) && s.input.is_none() {
                     s.tool = t;
                     s.clicks.clear();
+                    s.dim_target = None;
+                    s.dim_pending = false;
                 }
             }
         });
@@ -1549,6 +1767,9 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 s.cancel_input();
             } else if !s.clicks.is_empty() {
                 s.clicks.clear();
+            } else if s.dim_target.is_some() || s.dim_pending {
+                s.dim_target = None;
+                s.dim_pending = false;
             } else if s.tool != Tool::Select {
                 s.tool = Tool::Select;
             } else if s.selection.is_empty() {
@@ -1561,6 +1782,9 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                 || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
         }) {
+            if let Some(i) = s.sel_dim.take() {
+                s.delete_dimension(i);
+            }
             let rm: HashSet<EntityId> = s
                 .selection
                 .iter()
@@ -1630,7 +1854,28 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
     if resp.drag_stopped() && s.drag.is_some() {
         s.drag_end();
     }
-    if resp.clicked_by(egui::PointerButton::Primary) {
+    let label_at = |s: &SketchSession, hp: Pos2| {
+        s.dim_rects.borrow().iter().rev().find(|(r, _)| r.contains(hp)).map(|(_, i)| *i)
+    };
+    if resp.double_clicked_by(egui::PointerButton::Primary) && s.input.is_none() && s.drag.is_none() {
+        if let Some(i) = resp.interact_pointer_pos().and_then(|hp| label_at(s, hp)) {
+            if let Some(e) = s.sketch.constraints[i].dim_expr().map(|e| e.0.clone()) {
+                s.edit_dim = Some(i);
+                s.sel_dim = Some(i);
+                s.open_input(e, false);
+            }
+        }
+    }
+    let on_label = if resp.clicked_by(egui::PointerButton::Primary) && s.input.is_none() {
+        resp.interact_pointer_pos().and_then(|hp| label_at(s, hp))
+    } else {
+        None
+    };
+    if let Some(i) = on_label {
+        s.sel_dim = Some(i);
+        s.selection.clear();
+    } else if resp.clicked_by(egui::PointerButton::Primary) {
+        s.sel_dim = None;
         if let Some(hp) = resp.interact_pointer_pos() {
             click(
                 s,
@@ -1897,23 +2142,58 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
             }
         }
         Tool::Dimension => {
-            if let Some(x) = s.pick(rect, hp) {
+            if s.dim_pending {
+                // the placement click: the cursor's side picks the orientation
+                if let Some(t) = s.dim_target.clone() {
+                    let q = s.to_sketch(rect, hp);
+                    let pts = s.dim_anchor_points(&t);
+                    if let Some((a, b)) = pts {
+                        s.dim_orient = dim_orient(a, b, q);
+                        s.dim_pending = false;
+                        if let Some((v, _)) = s.dimension_for(&t) {
+                            s.open_input(fmt(v.abs()), false);
+                        }
+                        return;
+                    }
+                }
+                s.dim_pending = false;
+            }
+            if s.input.is_some() {
+                s.cancel_input();
+            }
+            if let Some(x) = s.pick_dim(rect, hp) {
                 let mut t = s.dim_target.take().unwrap_or_default();
+                if t.len() >= 2 {
+                    t.clear();
+                }
+                if t.is_empty() {
+                    s.dim_toggle = false;
+                    s.dim_orient = DimOrient::Aligned;
+                }
                 t.push(x);
                 let complete = match t.as_slice() {
-                    [Sel::Entity(e)] => {
-                        !matches!(s.sketch.entities[e.0 as usize].geom, Geom::Line { .. })
-                            || !additive
-                    }
-                    _ => t.len() >= 2,
+                    [Sel::Entity(_)] => !additive,
+                    [_] => false,
+                    _ => true,
                 };
                 if complete && s.dimension_for(&t).is_some() {
-                    let (v, _) = s.dimension_for(&t).unwrap();
-                    s.open_input(fmt(v.abs()), false);
+                    if s.dim_needs_placement(&t) {
+                        s.dim_pending = true;
+                    } else {
+                        let (v, _) = s.dimension_for(&t).unwrap();
+                        // an angle keeps its sign: the box shows what is measured
+                        let sgn = if matches!(t.as_slice(), [Sel::Entity(_), Sel::Entity(_)]) { v } else { v.abs() };
+                        s.open_input(fmt(sgn), false);
+                    }
                     s.dim_target = Some(t);
+                } else if complete {
+                    s.error = Some("can't dimension that selection".into());
+                    s.dim_target = None;
                 } else {
                     s.dim_target = Some(t);
                 }
+            } else {
+                s.dim_target = None;
             }
         }
     }
@@ -1982,6 +2262,20 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(label).size(11.0).color(theme::TEXT_MUTED));
+                        let lone = s.tool == Tool::Dimension
+                            && s.edit_dim.is_none()
+                            && matches!(s.dim_target.as_deref(), Some([Sel::Entity(e)])
+                                if !matches!(s.sketch.entities[e.0 as usize].geom, Geom::Line { .. }));
+                        if lone && ui.small_button(if s.dim_toggle { "R \u{2192} \u{2300}" } else { "\u{2300} \u{2192} R" })
+                            .on_hover_text("Swap radius and diameter")
+                            .clicked()
+                        {
+                            s.dim_toggle = !s.dim_toggle;
+                            if let Some((v, _)) = s.dim_target.as_ref().and_then(|t| s.dimension_for(t)) {
+                                text = fmt(v);
+                                s.input_fresh = true;
+                            }
+                        }
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut text)
                                 .id(te_id)
@@ -2049,6 +2343,12 @@ fn value_input(s: &mut SketchSession, ui: &mut Ui, rect: Rect) {
             return;
         }
     };
+    if let Some(i) = s.edit_dim.take() {
+        if let Err(e) = s.set_dimension(i, &expr) {
+            s.error = Some(e);
+        }
+        return;
+    }
     match s.tool {
         Tool::Line => {
             if let Some(start) = s.clicks.first().cloned() {
@@ -2399,6 +2699,73 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         };
         p.circle_filled(to(*q), if s.hover == Some(id) { 3.5 } else { 2.2 }, c);
     }
+    // dimension anchors: a + on centres and a diamond on midpoints when hovered or picked
+    {
+        let mark = |x: &Sel, col: Color32| {
+            let (pt, kind) = match *x {
+                Sel::Point(q) => {
+                    let ctr = s.sketch.entities.iter().any(|e| {
+                        matches!(e.geom, Geom::Circle { center, .. } | Geom::Arc { center, .. } if center == q)
+                    });
+                    (s.sketch.point(q), if ctr { 1 } else { 0 })
+                }
+                Sel::Mid(e) => match s.sketch.entities[e.0 as usize].geom {
+                    Geom::Line { a, b } => ((s.sketch.point(a) + s.sketch.point(b)) / 2.0, 2),
+                    _ => return,
+                },
+                Sel::Entity(_) => return,
+            };
+            let c = to(pt);
+            let st = Stroke::new(1.6, col);
+            match kind {
+                1 => {
+                    p.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], st);
+                    p.line_segment([c - vec2(0.0, 6.0), c + vec2(0.0, 6.0)], st);
+                }
+                2 => {
+                    p.add(egui::Shape::closed_line(
+                        vec![c + vec2(0.0, -5.0), c + vec2(5.0, 0.0), c + vec2(0.0, 5.0), c + vec2(-5.0, 0.0)],
+                        st,
+                    ));
+                }
+                _ => {}
+            }
+        };
+        if let Some(h) = &s.hover {
+            mark(h, theme::ORANGE);
+        }
+        if let Some(t) = &s.dim_target {
+            for x in t {
+                mark(x, theme::ACCENT);
+                if let Sel::Entity(e) = x {
+                    let pl: Vec<Pos2> = entity_polyline(&s.sketch, *e).into_iter().map(to).collect();
+                    p.add(egui::Shape::line(pl, Stroke::new(2.6, theme::ACCENT)));
+                }
+            }
+            // placing: the cursor's side picks horizontal / vertical / aligned
+            if s.dim_pending {
+                if let (Some((a, b)), Some(cur)) = (
+                    s.dim_anchor_points(t),
+                    ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)),
+                ) {
+                    let o = dim_orient(a, b, s.to_sketch(rect, cur));
+                    let (v, name) = match o {
+                        DimOrient::Aligned => (a.distance(b), "aligned"),
+                        DimOrient::Horizontal => ((a.x - b.x).abs(), "horizontal"),
+                        DimOrient::Vertical => ((a.y - b.y).abs(), "vertical"),
+                    };
+                    let at = draw_dim_line(p, to(a), to(b), o, 28.0);
+                    p.text(
+                        at + vec2(0.0, -12.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{} {name}", crate::units::len(v)),
+                        theme::mono(11.0),
+                        theme::TEXT_MUTED,
+                    );
+                }
+            }
+        }
+    }
     // constraint glyphs + dimension labels
     if s.show_constraints {
         let mut stacks: HashMap<u32, f32> = HashMap::new();
@@ -2442,24 +2809,56 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                 theme::TEXT_DIM,
             );
         }
-        for c in &s.sketch.constraints {
+        s.dim_rects.borrow_mut().clear();
+        for (ci, c) in s.sketch.constraints.iter().enumerate() {
+            let mut at_override: Option<Pos2> = None;
             let (expr, anchor, prefix) = match c {
                 Constraint::Length(e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), ""),
                 Constraint::Diameter(e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "⌀"),
                 Constraint::Radius(e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "R"),
-                Constraint::PointLineDistance(_, e, x) => {
-                    (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "offset ")
+                Constraint::PointLineDistance(q, e, x) => {
+                    let Geom::Line { a, b } = s.sketch.entities[e.0 as usize].geom else { continue };
+                    let (pa, pb, pq) = (s.sketch.point(a), s.sketch.point(b), s.sketch.point(*q));
+                    let foot = pa + (pb - pa) * ((pq - pa).dot(pb - pa) / (pb - pa).length_squared().max(1e-18));
+                    at_override = Some(draw_dim_line(p, to(pq), to(foot), DimOrient::Aligned, 0.0));
+                    (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "")
+                }
+                Constraint::LineDistance(e1, e2, x) => {
+                    let (Geom::Line { a, b }, Geom::Line { a: c2, b: d2 }) =
+                        (s.sketch.entities[e1.0 as usize].geom, s.sketch.entities[e2.0 as usize].geom)
+                    else {
+                        continue;
+                    };
+                    let (pa, pb) = (s.sketch.point(a), s.sketch.point(b));
+                    let pq = (s.sketch.point(c2) + s.sketch.point(d2)) / 2.0;
+                    let foot = pa + (pb - pa) * ((pq - pa).dot(pb - pa) / (pb - pa).length_squared().max(1e-18));
+                    at_override = Some(draw_dim_line(p, to(pq), to(foot), DimOrient::Aligned, 0.0));
+                    (x, entity_mid(&s.sketch, *e2).map(|m| (m, *e2)), "")
                 }
                 Constraint::Distance(a, b, x)
                 | Constraint::DistanceX(a, b, x)
-                | Constraint::DistanceY(a, b, x) => (
-                    x,
-                    Some((
-                        (s.sketch.point(*a) + s.sketch.point(*b)) / 2.0,
-                        EntityId(u32::MAX),
-                    )),
-                    "",
-                ),
+                | Constraint::DistanceY(a, b, x) => {
+                    let o = match c {
+                        Constraint::DistanceX(..) => DimOrient::Horizontal,
+                        Constraint::DistanceY(..) => DimOrient::Vertical,
+                        _ => DimOrient::Aligned,
+                    };
+                    at_override = Some(draw_dim_line(
+                        p,
+                        to(s.sketch.point(*a)),
+                        to(s.sketch.point(*b)),
+                        o,
+                        28.0,
+                    ));
+                    (
+                        x,
+                        Some((
+                            (s.sketch.point(*a) + s.sketch.point(*b)) / 2.0,
+                            EntityId(u32::MAX),
+                        )),
+                        "",
+                    )
+                }
                 Constraint::Angle(_, e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "∠"),
                 _ => continue,
             };
@@ -2478,7 +2877,7 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
             } else {
                 format!("{prefix}{}", crate::units::len(v))
             };
-            let at = to(m) + vec2(0.0, 18.0);
+            let at = at_override.unwrap_or_else(|| to(m) + vec2(0.0, 18.0));
             let font = theme::mono(12.0);
             let w = p
                 .layout_no_wrap(txt.clone(), font.clone(), theme::TEXT)
@@ -2486,13 +2885,16 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                 .x
                 + if is_expr { 30.0 } else { 14.0 };
             let r = Rect::from_center_size(at, vec2(w, 22.0));
+            s.dim_rects.borrow_mut().push((r, ci));
             p.rect(
                 r,
                 4.0,
                 theme::CARD,
                 Stroke::new(
-                    1.0,
-                    if is_expr {
+                    if s.sel_dim == Some(ci) { 2.0 } else { 1.0 },
+                    if s.sel_dim == Some(ci) {
+                        theme::ORANGE
+                    } else if is_expr {
                         theme::ACCENT
                     } else {
                         theme::BORDER_CARD
@@ -2627,6 +3029,46 @@ fn entity_mid(s: &Sketch, e: EntityId) -> Option<DVec2> {
     }
 }
 
+/// A dimension line between two screen points with extension lines, arrows and
+/// the measured side offset `off` px (0: a plain measuring line). Returns where
+/// the label goes.
+fn draw_dim_line(p: &egui::Painter, a: Pos2, b: Pos2, o: DimOrient, off: f32) -> Pos2 {
+    let st = Stroke::new(1.0, theme::TEXT_DIM);
+    let (da, db) = match o {
+        DimOrient::Aligned => {
+            let d = (b - a).normalized();
+            let n = if d.x.is_nan() { vec2(0.0, -1.0) } else { vec2(d.y, -d.x) };
+            (a + n * off, b + n * off)
+        }
+        DimOrient::Horizontal => {
+            let y = a.y.max(b.y) + off;
+            (pos2(a.x, y), pos2(b.x, y))
+        }
+        DimOrient::Vertical => {
+            let x = a.x.max(b.x) + off;
+            (pos2(x, a.y), pos2(x, b.y))
+        }
+    };
+    if off != 0.0 {
+        for (from, to) in [(a, da), (b, db)] {
+            let d = (to - from).normalized();
+            if !d.x.is_nan() {
+                p.line_segment([from + d * 3.0, to + d * 4.0], st);
+            }
+        }
+    }
+    p.line_segment([da, db], st);
+    let d = (db - da).normalized();
+    if !d.x.is_nan() && (db - da).length() > 14.0 {
+        for (tip, dir) in [(da, d), (db, -d)] {
+            let n = vec2(dir.y, -dir.x);
+            p.line_segment([tip, tip + dir * 7.0 + n * 2.5], st);
+            p.line_segment([tip, tip + dir * 7.0 - n * 2.5], st);
+        }
+    }
+    da + (db - da) * 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2733,6 +3175,149 @@ mod tests {
         s.drag_to(t);
         s.drag_end();
         assert!(s.sketch.point(pc).distance(DVec2::new(3.0, 3.0)) < 1e-9);
+    }
+
+    fn dist(s: &SketchSession, a: PointId, b: PointId) -> f64 {
+        s.sketch.point(a).distance(s.sketch.point(b))
+    }
+
+    #[test]
+    fn centre_to_point_distance_moves_the_circle() {
+        let mut s = session();
+        let l = fixed_line(&mut s, (0.0, 0.0), (10.0, 0.0));
+        let (pa, _) = s.line_points(l).unwrap();
+        let (pc, c) = circle_at(&mut s, (3.0, 5.0), 1.0);
+        let sel = [Sel::Point(pc), Sel::Point(pa)];
+        let (v, _) = s.dimension_for(&sel).unwrap();
+        assert!((v - 34f64.sqrt()).abs() < 1e-9);
+        s.apply_dimension(&sel, "8").unwrap();
+        assert!((dist(&s, pc, pa) - 8.0).abs() < 1e-6);
+        // an expression/value change moves it again
+        s.apply_dimension(&[Sel::Entity(c)], "4").unwrap();
+        let Geom::Circle { radius, .. } = s.sketch.entities[c.0 as usize].geom else { panic!() };
+        assert!((radius - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn centre_to_centre_and_arc_centre() {
+        let mut s = session();
+        let (p1, c1) = circle_at(&mut s, (0.0, 0.0), 1.0);
+        s.sketch.constrain(Constraint::Fix(p1, DVec2::ZERO));
+        let (p2, c2) = circle_at(&mut s, (4.0, 0.0), 1.0);
+        s.apply_dimension(&[Sel::Entity(c1), Sel::Entity(c2)], "9").unwrap();
+        assert!((dist(&s, p1, p2) - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn centre_to_line_and_point_to_line_are_perpendicular_distances() {
+        let mut s = session();
+        let l = fixed_line(&mut s, (0.0, 0.0), (10.0, 0.0));
+        let (pc, _) = circle_at(&mut s, (4.0, 3.0), 1.0);
+        let (v, _) = s.dimension_for(&[Sel::Point(pc), Sel::Entity(l)]).unwrap();
+        assert!((v - 3.0).abs() < 1e-9);
+        s.apply_dimension(&[Sel::Entity(l), Sel::Point(pc)], "6").unwrap();
+        assert!((s.sketch.point(pc).y - 6.0).abs() < 1e-6);
+        // a whole circle against a line reads from its centre too
+        let (_, c2) = circle_at(&mut s, (4.0, -2.0), 1.0);
+        let (v, _) = s.dimension_for(&[Sel::Entity(c2), Sel::Entity(l)]).unwrap();
+        assert!((v - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn horizontal_vs_vertical_by_placement() {
+        let (a, b) = (DVec2::new(0.0, 0.0), DVec2::new(6.0, 4.0));
+        assert_eq!(dim_orient(a, b, DVec2::new(3.0, -5.0)), DimOrient::Horizontal);
+        assert_eq!(dim_orient(a, b, DVec2::new(3.0, 9.0)), DimOrient::Horizontal);
+        assert_eq!(dim_orient(a, b, DVec2::new(-5.0, 2.0)), DimOrient::Vertical);
+        assert_eq!(dim_orient(a, b, DVec2::new(9.0, 2.0)), DimOrient::Vertical);
+        assert_eq!(dim_orient(a, b, DVec2::new(3.0, 2.0)), DimOrient::Aligned);
+        assert_eq!(dim_orient(a, b, DVec2::new(9.0, 9.0)), DimOrient::Aligned);
+        let mut s = session();
+        let (pa, _) = circle_at(&mut s, (0.0, 0.0), 1.0);
+        s.sketch.constrain(Constraint::Fix(pa, DVec2::ZERO));
+        let (pb, _) = circle_at(&mut s, (6.0, 4.0), 1.0);
+        let sel = [Sel::Point(pa), Sel::Point(pb)];
+        s.dim_orient = DimOrient::Horizontal;
+        let (v, _) = s.dimension_for(&sel).unwrap();
+        assert!((v - 6.0).abs() < 1e-9);
+        s.apply_dimension(&sel, "10").unwrap();
+        let (q, w) = (s.sketch.point(pb), s.sketch.point(pa));
+        assert!((q.x - w.x - 10.0).abs() < 1e-6 && (q.y - 4.0).abs() < 1e-3, "{q:?}");
+        s.dim_orient = DimOrient::Vertical;
+        let (v, _) = s.dimension_for(&sel).unwrap();
+        assert!((v - 4.0).abs() < 1e-3);
+        assert!(s.sketch.constraints.iter().any(|c| matches!(c, Constraint::DistanceX(..))));
+    }
+
+    #[test]
+    fn line_line_parallel_is_a_distance_and_otherwise_an_angle() {
+        let mut s = session();
+        let l1 = fixed_line(&mut s, (0.0, 0.0), (10.0, 0.0));
+        let l2 = s.add_line((DVec2::new(0.0, 3.0), None), (DVec2::new(10.0, 3.0), None));
+        s.sketch.constraints.clear();
+        let (a, b1) = s.line_points(l1).unwrap();
+        s.sketch.constrain(Constraint::Fix(a, DVec2::ZERO));
+        s.sketch.constrain(Constraint::Fix(b1, DVec2::new(10.0, 0.0)));
+        let (v, mk) = s.dimension_for(&[Sel::Entity(l1), Sel::Entity(l2)]).unwrap();
+        assert!((v - 3.0).abs() < 1e-9);
+        assert!(matches!(mk("3".into()), Constraint::LineDistance(..)));
+        s.apply_dimension(&[Sel::Entity(l1), Sel::Entity(l2)], "5").unwrap();
+        let (c, d) = s.line_points(l2).unwrap();
+        assert!((s.sketch.point(c).y.abs() - 5.0).abs() < 1e-6 && (s.sketch.point(d).y.abs() - 5.0).abs() < 1e-6);
+        // non-parallel lines: an angle
+        let l3 = s.add_line((DVec2::new(0.0, 20.0), None), (DVec2::new(5.0, 28.0), None));
+        let (v, mk) = s.dimension_for(&[Sel::Entity(l1), Sel::Entity(l3)]).unwrap();
+        assert!((v - 8f64.atan2(5.0).to_degrees()).abs() < 1e-6);
+        assert!(matches!(mk("30".into()), Constraint::Angle(..)));
+        s.apply_dimension(&[Sel::Entity(l1), Sel::Entity(l3)], "30").unwrap();
+        let (e, f) = s.line_points(l3).unwrap();
+        let dv = s.sketch.point(f) - s.sketch.point(e);
+        assert!((dv.y.atan2(dv.x).to_degrees() - 30.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn radius_vs_diameter_toggle_and_midpoint_anchor() {
+        let mut s = session();
+        let (_, c) = circle_at(&mut s, (0.0, 0.0), 2.0);
+        let (v, mk) = s.dimension_for(&[Sel::Entity(c)]).unwrap();
+        assert_eq!(v, 4.0);
+        assert!(matches!(mk("4".into()), Constraint::Diameter(..)));
+        s.dim_toggle = true;
+        let (v, mk) = s.dimension_for(&[Sel::Entity(c)]).unwrap();
+        assert_eq!(v, 2.0);
+        assert!(matches!(mk("2".into()), Constraint::Radius(..)));
+        // a line midpoint to a circle centre
+        s.dim_toggle = false;
+        let l = fixed_line(&mut s, (10.0, 0.0), (20.0, 0.0));
+        let pc = match s.sketch.entities[c.0 as usize].geom { Geom::Circle { center, .. } => center, _ => panic!() };
+        let sel = [Sel::Mid(l), Sel::Point(pc)];
+        let (v, _) = s.dimension_for(&sel).unwrap();
+        assert!((v - 15.0).abs() < 1e-9);
+        let pts = s.sketch.points.len();
+        s.apply_dimension(&sel, "12").unwrap();
+        assert_eq!(s.sketch.points.len(), pts + 1, "one helper point");
+        assert!((s.sketch.point(pc).distance(DVec2::new(15.0, 0.0)) - 12.0).abs() < 1e-6);
+        // the helper is reused by the next dimension to that midpoint
+        s.dim_orient = DimOrient::Horizontal;
+        s.apply_dimension(&sel, "13").unwrap_err(); // over-constrained: refused, and nothing added
+        assert_eq!(s.sketch.points.len(), pts + 1);
+    }
+
+    #[test]
+    fn dimensions_edit_delete_and_round_trip() {
+        let mut s = session();
+        let l1 = fixed_line(&mut s, (0.0, 0.0), (10.0, 0.0));
+        let l2 = s.add_line((DVec2::new(0.0, 3.0), None), (DVec2::new(10.0, 3.0), None));
+        s.apply_dimension(&[Sel::Entity(l1), Sel::Entity(l2)], "5").unwrap();
+        let i = s.sketch.constraints.iter().position(|c| matches!(c, Constraint::LineDistance(..))).unwrap();
+        s.set_dimension(i, "nope").unwrap_err();
+        s.set_dimension(i, "=2*4").unwrap();
+        s.set_dimension(i, "7").unwrap();
+        let json = serde_json::to_string(&s.sketch).unwrap();
+        let back: Sketch = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.constraints, s.sketch.constraints);
+        s.delete_dimension(i);
+        assert!(!s.sketch.constraints.iter().any(|c| matches!(c, Constraint::LineDistance(..))));
     }
 
     #[test]
