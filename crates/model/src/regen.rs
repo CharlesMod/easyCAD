@@ -774,6 +774,13 @@ fn fuse_many(shapes: &[Shape]) -> R<Shape> {
     }
 }
 
+/// Fuse the solids of several picked regions; adjacent regions are merged so the
+/// result has no internal seams (explicit region picks only, so `All` is unchanged).
+fn fuse_regions(shapes: &[Shape], sel: &ProfileSel) -> R<Shape> {
+    let f = fuse_many(shapes)?;
+    Ok(if shapes.len() > 1 && matches!(sel, ProfileSel::Containing(_)) { tidy(f) } else { f })
+}
+
 fn tidy(s: Shape) -> Shape {
     match s.unify() {
         Ok(u) if u.is_valid() => u,
@@ -841,6 +848,21 @@ impl Ctx<'_> {
 
     fn profiles(&mut self, id: SketchId, sel: &ProfileSel) -> R<(Plane, Vec<Profile>)> {
         let sk = self.sketch(id)?;
+        if let ProfileSel::Containing(pts) = sel {
+            let regions = sk.regions();
+            if regions.is_empty() {
+                return fail(format!("sketch `{}` has no closed profile", sk.name));
+            }
+            let mut ids: Vec<usize> = Vec::new();
+            for p in pts {
+                let i = crate::regions::region_at(&regions, *p).ok_or_else(|| Fail::msg(format!("no region contains {p:?}")))?;
+                if !ids.contains(&i) {
+                    ids.push(i);
+                }
+            }
+            let v = ids.into_iter().map(|i| regions[i].profile()).collect();
+            return Ok((sk.plane, v));
+        }
         let all = sk.profiles().profiles;
         if all.is_empty() {
             return fail(format!("sketch `{}` has no closed profile", sk.name));
@@ -848,16 +870,7 @@ impl Ctx<'_> {
         let picked = match sel {
             ProfileSel::All => all,
             ProfileSel::Indices(ix) => ix.iter().map(|i| all.get(*i).cloned().ok_or_else(|| Fail::msg(format!("profile {i} does not exist")))).collect::<R<_>>()?,
-            ProfileSel::Containing(pts) => {
-                let mut v = Vec::new();
-                for p in pts {
-                    let hit = all.iter().find(|pr| profile_contains(pr, *p)).ok_or_else(|| Fail::msg(format!("no profile contains {p:?}")))?;
-                    if !v.contains(hit) {
-                        v.push(hit.clone());
-                    }
-                }
-                v
-            }
+            ProfileSel::Containing(_) => unreachable!(),
         };
         Ok((sk.plane, picked))
     }
@@ -920,7 +933,7 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.extrude_ext(&frame(&plane), dir, d, *symmetric, draft)?);
                 }
-                let tool = self.tx(fuse_many(&tools)?)?;
+                let tool = self.tx(fuse_regions(&tools, profiles)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Revolve { sketch, profiles, axis, angle_deg, op, target } => {
@@ -930,7 +943,7 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.revolve(axis.origin, axis.dir, a)?);
                 }
-                let tool = self.tx(fuse_many(&tools)?)?;
+                let tool = self.tx(fuse_regions(&tools, profiles)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Fillet { body, skipped, .. } | FeatureKind::Chamfer { body, skipped, .. } => {
@@ -1720,11 +1733,6 @@ struct BossSpec {
     hole_depth: Option<f64>,
     fillet: f64,
     draft: f64,
-}
-
-fn profile_contains(pr: &Profile, p: DVec2) -> bool {
-    use crate::sketch::{point_in_polygon, polygonize};
-    point_in_polygon(p, &polygonize(&pr.outer)) && !pr.holes.iter().any(|h| point_in_polygon(p, &polygonize(h)))
 }
 
 /// Thicken open chains into a rib solid: one slab per segment plus round joints.

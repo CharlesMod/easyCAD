@@ -18,6 +18,7 @@ pub mod params;
 pub mod pick;
 pub mod process;
 pub mod provenance;
+pub mod regions;
 pub mod regen;
 pub mod select;
 pub mod sketch;
