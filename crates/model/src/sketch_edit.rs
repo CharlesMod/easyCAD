@@ -67,7 +67,7 @@ impl Constraint {
         use Constraint::*;
         match self {
             Horizontal(e) | Vertical(e) | Length(e, _) | Radius(e, _) | Diameter(e, _) => vec![*e],
-            Parallel(a, b) | Perpendicular(a, b) | Tangent(a, b) | Equal(a, b) | Angle(a, b, _) => vec![*a, *b],
+            Parallel(a, b) | Perpendicular(a, b) | Tangent(a, b) | Equal(a, b) | Angle(a, b, _) | LineDistance(a, b, _) => vec![*a, *b],
             PointOnLine(_, e) | PointOnCircle(_, e) | Midpoint(_, e) | Symmetric(_, _, e) | PointLineDistance(_, e, _) => vec![*e],
             Offset { source, target, .. } => source.iter().chain(target).copied().collect(),
             Coincident(..) | Fix(..) | Distance(..) | DistanceX(..) | DistanceY(..) => vec![],
@@ -98,6 +98,7 @@ impl Constraint {
             Radius(x, d) => Radius(e(*x)?, d.clone()),
             Diameter(x, d) => Diameter(e(*x)?, d.clone()),
             Angle(a, b, d) => Angle(e(*a)?, e(*b)?, d.clone()),
+            LineDistance(a, b, d) => LineDistance(e(*a)?, e(*b)?, d.clone()),
             Offset { source, target, distance } => {
                 let pairs: Vec<(EntityId, EntityId)> = source.iter().zip(target).filter_map(|(s, t)| Some((e(*s)?, e(*t)?))).collect();
                 if pairs.is_empty() {

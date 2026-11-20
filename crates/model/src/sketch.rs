@@ -52,6 +52,8 @@ pub enum Constraint {
     /// Signed `b.y - a.y`.
     DistanceY(PointId, PointId, Expr),
     PointLineDistance(PointId, EntityId, Expr),
+    /// Two lines held parallel at this perpendicular distance.
+    LineDistance(EntityId, EntityId, Expr),
     Length(EntityId, Expr),
     Radius(EntityId, Expr),
     Diameter(EntityId, Expr),
@@ -592,6 +594,12 @@ impl System {
                 C::PointLineDistance(q, l, d) => {
                     let [a, b] = line(i, *l)?;
                     Eq::PointLine(pt(i, *q)?, a, b, ev(d)?)
+                }
+                C::LineDistance(l1, l2, d) => {
+                    let ([a, b], [c, dd]) = (line(i, *l1)?, line(i, *l2)?);
+                    eqs.push(Eq::Parallel([a, b, c, dd]));
+                    eqs.push(Eq::PointLine(c, a, b, ev(d)?));
+                    continue;
                 }
                 C::Length(l, d) => {
                     let [a, b] = line(i, *l)?;
