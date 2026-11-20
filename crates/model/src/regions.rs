@@ -661,6 +661,111 @@ fn sample_point(outer: &Loop2, holes: &[Loop2]) -> DVec2 {
 /// Default tolerance.
 pub const TOL: f64 = CHAIN_TOL;
 
+// ---------------------------------------------------------------------------
+// Union of picked regions, computed in 2D
+
+fn near(a: DVec2, b: DVec2) -> bool {
+    a.distance(b) <= CHAIN_TOL
+}
+
+/// `a` runs exactly along `b` backwards (a shared region edge seen from the other side).
+fn opposite(a: &Segment2, b: &Segment2) -> bool {
+    match (a, b) {
+        (Segment2::Line { a: a0, b: a1 }, Segment2::Line { a: b0, b: b1 }) => near(*a0, *b1) && near(*a1, *b0),
+        (Segment2::Arc { center: c0, start: s0, end: e0, ccw: w0 }, Segment2::Arc { .. }) => {
+            let Segment2::Arc { center: c1, start: s1, end: e1, ccw: w1 } = reverse_segment(b) else { return false };
+            near(*c0, c1) && near(*s0, s1) && near(*e0, e1) && *w0 == w1
+        }
+        (Segment2::Circle { center: c0, radius: r0 }, Segment2::Circle { center: c1, radius: r1 }) => near(*c0, *c1) && (r0 - r1).abs() <= CHAIN_TOL,
+        _ => false,
+    }
+}
+
+/// Join `b` onto `a` when they are one straight line / one arc of the same circle.
+fn merge(a: &Segment2, b: &Segment2) -> Option<Segment2> {
+    match (a, b) {
+        (Segment2::Line { a: a0, b: a1 }, Segment2::Line { b: b1, .. }) => {
+            let (d0, d1) = ((*a1 - *a0).normalize_or_zero(), (*b1 - *a1).normalize_or_zero());
+            (d0.perp_dot(d1).abs() < 1e-9 && d0.dot(d1) > 0.0).then_some(Segment2::Line { a: *a0, b: *b1 })
+        }
+        (Segment2::Arc { center: c0, start: s0, end: e0, ccw: w0 }, Segment2::Arc { center: c1, end: e1, ccw: w1, .. }) => {
+            let same = near(*c0, *c1) && w0 == w1 && ((*e0 - *c0).length() - (*e1 - *c1).length()).abs() <= CHAIN_TOL;
+            // two arcs of one circle that together stay below a full turn
+            (same && arc_sweep(*c0, *s0, *e0, *w0) + arc_sweep(*c0, *e0, *e1, *w0) < TAU - 1e-6)
+                .then_some(Segment2::Arc { center: *c0, start: *s0, end: *e1, ccw: *w0 })
+        }
+        _ => None,
+    }
+}
+
+/// The union of the given regions as profiles (outer CCW, holes CW), found by cancelling
+/// the boundary edges two picked regions share and chaining what is left. Arcs and
+/// circles stay true arcs and circles. `None` if the leftover edges do not close up.
+pub fn union_profiles(regions: &[&Region]) -> Option<Vec<crate::geom::Profile>> {
+    use crate::geom::Profile;
+    if regions.len() == 1 {
+        return Some(vec![regions[0].profile()]);
+    }
+    let mut rem: Vec<Segment2> = regions.iter().flat_map(|r| r.outer.iter().chain(r.holes.iter().flatten())).cloned().collect();
+    // cancel shared edges pairwise
+    let mut i = 0;
+    while i < rem.len() {
+        if let Some(j) = (0..rem.len()).find(|&j| j != i && opposite(&rem[i], &rem[j])) {
+            let (hi, lo) = (i.max(j), i.min(j));
+            rem.remove(hi);
+            rem.remove(lo);
+            i = lo;
+        } else {
+            i += 1;
+        }
+    }
+    // chain into loops
+    let mut loops: Vec<Loop2> = Vec::new();
+    while let Some(first) = rem.pop() {
+        let Some((start, mut end)) = seg_ends(&first) else {
+            loops.push(vec![first]); // a whole circle
+            continue;
+        };
+        let mut lp = vec![first];
+        while !near(end, start) {
+            let k = rem.iter().position(|s| seg_ends(s).is_some_and(|(a, _)| near(a, end)))?;
+            let s = rem.remove(k);
+            end = seg_ends(&s)?.1;
+            lp.push(s);
+        }
+        // merge neighbours that continue each other
+        let mut out: Loop2 = Vec::new();
+        for s in lp {
+            match out.last().and_then(|l| merge(l, &s)) {
+                Some(m) => *out.last_mut().unwrap() = m,
+                None => out.push(s),
+            }
+        }
+        if out.len() > 1 {
+            if let Some(m) = merge(out.last().unwrap(), &out[0]) {
+                out[0] = m;
+                out.pop();
+            }
+        }
+        loops.push(out);
+    }
+    // outers (CCW) and holes (CW); each hole goes into the smallest outer containing it
+    let area = |l: &Loop2| match l.as_slice() {
+        [Segment2::Circle { radius, .. }] => PI * radius * radius,
+        _ => loop_area(l),
+    };
+    let (outers, holes): (Vec<Loop2>, Vec<Loop2>) = loops.into_iter().partition(|l| area(l) > 0.0);
+    let mut profiles: Vec<Profile> = outers.into_iter().map(|outer| Profile { outer, holes: Vec::new() }).collect();
+    for h in holes {
+        let probe = crate::sketch::segment_point(&h[0], 0.5);
+        let best = (0..profiles.len())
+            .filter(|&k| point_in_polygon(probe, &fine(&profiles[k].outer)))
+            .min_by(|&a, &b| area(&profiles[a].outer).total_cmp(&area(&profiles[b].outer)))?;
+        profiles[best].holes.push(h);
+    }
+    (!profiles.is_empty()).then_some(profiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -774,13 +774,6 @@ fn fuse_many(shapes: &[Shape]) -> R<Shape> {
     }
 }
 
-/// Fuse the solids of several picked regions; adjacent regions are merged so the
-/// result has no internal seams (explicit region picks only, so `All` is unchanged).
-fn fuse_regions(shapes: &[Shape], sel: &ProfileSel) -> R<Shape> {
-    let f = fuse_many(shapes)?;
-    Ok(if shapes.len() > 1 && matches!(sel, ProfileSel::Containing(_)) { tidy(f) } else { f })
-}
-
 fn tidy(s: Shape) -> Shape {
     match s.unify() {
         Ok(u) if u.is_valid() => u,
@@ -860,7 +853,9 @@ impl Ctx<'_> {
                     ids.push(i);
                 }
             }
-            let v = ids.into_iter().map(|i| regions[i].profile()).collect();
+            // union in 2D (shared edges cancel), so the extruded solid has no internal seams
+            let picked: Vec<&crate::regions::Region> = ids.iter().map(|&i| &regions[i]).collect();
+            let v = crate::regions::union_profiles(&picked).unwrap_or_else(|| picked.iter().map(|r| r.profile()).collect());
             return Ok((sk.plane, v));
         }
         let all = sk.profiles().profiles;
@@ -933,7 +928,7 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.extrude_ext(&frame(&plane), dir, d, *symmetric, draft)?);
                 }
-                let tool = self.tx(fuse_regions(&tools, profiles)?)?;
+                let tool = self.tx(fuse_many(&tools)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Revolve { sketch, profiles, axis, angle_deg, op, target } => {
@@ -943,7 +938,7 @@ impl Ctx<'_> {
                 for pr in &prs {
                     tools.push(profile_face(&plane, pr)?.revolve(axis.origin, axis.dir, a)?);
                 }
-                let tool = self.tx(fuse_regions(&tools, profiles)?)?;
+                let tool = self.tx(fuse_many(&tools)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
             FeatureKind::Fillet { body, skipped, .. } | FeatureKind::Chamfer { body, skipped, .. } => {

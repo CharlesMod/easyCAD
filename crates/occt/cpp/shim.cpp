@@ -104,6 +104,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -351,6 +352,35 @@ TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op
 TopoDS_Shape doUnify(const TopoDS_Shape &s) {
   if (s.IsNull()) fail("unify: null shape");
   ShapeUpgrade_UnifySameDomain u(s, Standard_True, Standard_True, Standard_False);
+  // Merging two faces on the same periodic surface (cylinder, cone, sphere, torus) whose
+  // parametrisations differ (e.g. axis (0,1,0) vs (0,-1,0): two coincident extrusions)
+  // goes through RelocatePCurvesToNewUorigin, which can loop forever (OCCT has no
+  // timeout). Keep the edges between such faces; everything else is merged as before.
+  {
+    TopTools_IndexedDataMapOfShapeListOfShape e2f;
+    TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, e2f);
+    auto pos = [](const TopoDS_Face &f, gp_Ax3 &ax) {
+      BRepAdaptor_Surface sf(f);
+      switch (sf.GetType()) {
+      case GeomAbs_Cylinder: ax = sf.Cylinder().Position(); return true;
+      case GeomAbs_Cone: ax = sf.Cone().Position(); return true;
+      case GeomAbs_Sphere: ax = sf.Sphere().Position(); return true;
+      case GeomAbs_Torus: ax = sf.Torus().Position(); return true;
+      default: return false;
+      }
+    };
+    TopTools_MapOfShape keep;
+    for (int i = 1; i <= e2f.Extent(); i++) {
+      const TopTools_ListOfShape &fl = e2f.FindFromIndex(i);
+      if (fl.Extent() != 2) continue;
+      gp_Ax3 a0, a1;
+      if (!pos(TopoDS::Face(fl.First()), a0) || !pos(TopoDS::Face(fl.Last()), a1)) continue;
+      bool same = a0.Direction().Dot(a1.Direction()) > 1 - 1e-9 && a0.XDirection().Dot(a1.XDirection()) > 1 - 1e-9 &&
+                  a0.Direct() == a1.Direct();
+      if (!same) keep.Add(e2f.FindKey(i));
+    }
+    u.KeepShapes(keep);
+  }
   u.Build();
   TopoDS_Shape r = u.Shape();
   if (r.IsNull()) fail("unify produced no shape");
