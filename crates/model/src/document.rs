@@ -126,6 +126,12 @@ pub struct DocData {
     /// which moves past them. `None` = the end of the history.
     #[serde(default)]
     pub rollback: Option<usize>,
+    /// Construction features the user hid in the 3D view (default: all shown).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_datums: Vec<FeatureId>,
+    /// Show the origin planes/axes/point in the 3D view (default off; shown while picking).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub origin_visible: bool,
     pub next_id: u32,
 }
 
@@ -152,6 +158,8 @@ impl DocData {
             occurrences: Vec::new(),
             mates: Vec::new(),
             rollback: None,
+            hidden_datums: Vec::new(),
+            origin_visible: false,
             next_id: 1,
         }
     }
@@ -232,6 +240,38 @@ impl DocData {
         if let Some(e) = self.sketches.iter_mut().find(|s| s.id == id) {
             e.visible = v;
         }
+    }
+
+    /// Whether a construction plane/axis/point is drawn (default: yes).
+    pub fn datum_visible(&self, id: FeatureId) -> bool {
+        !self.hidden_datums.contains(&id)
+    }
+
+    pub fn set_datum_visible(&mut self, id: FeatureId, visible: bool) {
+        self.hidden_datums.retain(|f| *f != id);
+        if !visible {
+            self.hidden_datums.push(id);
+            self.hidden_datums.sort();
+        }
+    }
+
+    /// Update the cached `plane` of every sketch that follows a construction plane
+    /// from a fresh regeneration, so editors and drawings use the current plane.
+    /// Sketches whose datum did not resolve keep their stored plane. Returns whether
+    /// anything changed. (A cache update: not an undoable edit, no revision bump.)
+    pub fn refresh_sketch_planes(&mut self, res: &RegenResult) -> bool {
+        let mut changed = false;
+        for e in &mut self.sketches {
+            if let Some(src) = e.sketch.plane_src {
+                if let Some((_, crate::datum::DatumGeom::Plane(p))) = res.datums.iter().find(|(f, _)| *f == src) {
+                    if e.sketch.plane != *p {
+                        e.sketch.plane = *p;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
     }
 
     pub fn import(&self, id: ImportId) -> Option<&Import> {

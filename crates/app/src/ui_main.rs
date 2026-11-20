@@ -1138,6 +1138,9 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::ImportStep { .. } => ("IM", theme::GREEN),
         FeatureKind::InsertPart { .. } => ("PR", theme::GREEN),
         FeatureKind::ContextRef { .. } => ("CX", theme::GREEN),
+        FeatureKind::DatumPlane { .. } => ("CP", theme::TEXT_MUTED),
+        FeatureKind::DatumAxis { .. } => ("CA", theme::TEXT_MUTED),
+        FeatureKind::DatumPoint { .. } => ("CT", theme::TEXT_MUTED),
     }
 }
 

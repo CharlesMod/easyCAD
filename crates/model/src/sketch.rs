@@ -73,6 +73,10 @@ pub struct Sketch {
     pub points: Vec<DVec2>,
     pub entities: Vec<Entity>,
     pub constraints: Vec<Constraint>,
+    /// A construction plane this sketch follows: at regen the sketch lies on that
+    /// datum's current plane, and `plane` is only a cache / fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane_src: Option<crate::feature::FeatureId>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -116,7 +120,7 @@ pub struct SketchProfiles {
 
 impl Sketch {
     pub fn new(name: impl Into<String>, plane: Plane) -> Self {
-        Sketch { name: name.into(), plane, points: Vec::new(), entities: Vec::new(), constraints: Vec::new() }
+        Sketch { name: name.into(), plane, points: Vec::new(), entities: Vec::new(), constraints: Vec::new(), plane_src: None }
     }
 
     pub fn point(&self, p: PointId) -> DVec2 {

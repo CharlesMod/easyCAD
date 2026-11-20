@@ -220,16 +220,17 @@ fn role_of(kind: &FeatureKind, f: &FaceInfo, sketch_plane: Option<&crate::geom::
         FeatureKind::Split { .. } => FaceRole::SplitFace,
         FeatureKind::PartingJoint { .. } => FaceRole::Joint,
         FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => FaceRole::Imported,
+        FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => FaceRole::Other,
     }
 }
 
 /// Tables for `bodies` after `made_by` ran on a state whose tables are `prev`
 /// (links only; nothing is computed here). Unchanged geometry keeps its table.
 /// `made_by = None` is the process stage.
-pub(crate) fn update(prev: &FaceTables, bodies: &[Body], made_by: Option<&Feature>, doc: &DocData) -> FaceTables {
+pub(crate) fn update(prev: &FaceTables, bodies: &[Body], made_by: Option<&Feature>, doc: &DocData, datums: &[(FeatureId, crate::datum::DatumGeom)]) -> FaceTables {
     let made = made_by.map(|f| {
         let plane = match &f.kind {
-            FeatureKind::Extrude { sketch, .. } => doc.sketch(*sketch).map(|s| s.plane),
+            FeatureKind::Extrude { sketch, .. } => doc.sketch(*sketch).map(|s| crate::datum::effective_sketch_plane(s, datums)),
             _ => None,
         };
         (Arc::new(f.clone()), plane)
