@@ -340,11 +340,90 @@ pub enum Hi {
     Face(BodyId, u32),
 }
 
+/// What kind of geometry a pick is, for inferring the construct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cls {
+    Point,
+    Line,
+    Plane,
+    /// Cylindrical / conical face.
+    Cyl,
+    /// Circular edge, sketch circle, sphere face.
+    Circle,
+    /// Any other curve.
+    Curve,
+}
+
 #[derive(Clone, Debug)]
 pub struct Picked {
     pub r: GeomRef,
     pub label: String,
     pub hi: Hi,
+    pub cls: Cls,
+    /// A point on it (plane origin, line point, axis point, the point itself).
+    pub p: DVec3,
+    /// Plane normal / line or axis direction (zero when unknown).
+    pub n: DVec3,
+}
+
+fn item_pick(it: &Item) -> Picked {
+    let (cls, p, n) = match &it.g {
+        G::Plane(pl) => (Cls::Plane, pl.origin, pl.normal),
+        G::Axis(o, d) => (Cls::Line, *o, d.normalize_or_zero()),
+        G::Point(p) => (Cls::Point, *p, DVec3::ZERO),
+        G::Poly { pts, straight } => {
+            let a = pts.first().copied().unwrap_or_default();
+            let b = pts.last().copied().unwrap_or_default();
+            if *straight {
+                (Cls::Line, a, (b - a).normalize_or_zero())
+            } else if (a - b).length() < 1e-6 {
+                (Cls::Circle, a, DVec3::ZERO)
+            } else {
+                (Cls::Curve, a, DVec3::ZERO)
+            }
+        }
+    };
+    Picked { r: it.r.clone(), label: it.name.clone(), hi: Hi::Item(it.g.clone()), cls, p, n }
+}
+
+fn edge_pick(info: &easycad_model::occt::EdgeInfo, poly: Option<Vec<DVec3>>) -> Picked {
+    let (cls, p, n) = if info.kind == CurveKind::Line {
+        (Cls::Line, info.start, (info.end - info.start).normalize_or_zero())
+    } else if let Some((c, ax, _)) = info.circle {
+        (Cls::Circle, c, ax)
+    } else {
+        (Cls::Curve, info.midpoint, info.tangent)
+    };
+    Picked {
+        r: GeomRef::Edge(EdgeSelector::from_pick(info)),
+        label: crate::ui_viewport::edge_label(info).0,
+        hi: match poly {
+            Some(pts) => Hi::Item(G::Poly { pts, straight: info.kind == CurveKind::Line }),
+            None => Hi::None,
+        },
+        cls,
+        p,
+        n,
+    }
+}
+
+fn face_pick(info: &easycad_model::occt::FaceInfo, body: BodyId, f: u32) -> Picked {
+    let (cls, p, n) = match info.kind {
+        SurfaceKind::Plane => (Cls::Plane, info.point, info.normal),
+        SurfaceKind::Cylinder | SurfaceKind::Cone => {
+            let (o, d) = info.axis.unwrap_or((info.centroid, DVec3::Z));
+            (Cls::Cyl, o, d.normalize_or_zero())
+        }
+        _ => (Cls::Circle, info.centroid, DVec3::ZERO),
+    };
+    Picked {
+        r: GeomRef::Face(FaceSelector::from_pick(info)),
+        label: crate::ui_viewport::face_desc(info),
+        hi: Hi::Face(body, f),
+        cls,
+        p,
+        n,
+    }
 }
 
 /// Plain-words name of a reference (for edited datums, whose picks have no highlight).
@@ -592,7 +671,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
     let (o, d) = app.camera.ray(Vec2::new(local.x, local.y), size);
     let h = half(app);
     let mut best: Option<(Score, Picked)> = None;
-    let mut offer = |s: Score, p: Picked, best: &mut Option<(Score, Picked)>| {
+    let offer = |s: Score, p: Picked, best: &mut Option<(Score, Picked)>| {
         if best.as_ref().is_none_or(|b| s < b.0) {
             *best = Some((s, p));
         }
@@ -608,7 +687,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
         match &it.g {
             G::Plane(pl) if acc.has(Accept::PLANE) => {
                 if let Some(t) = ray_plane(o, d, pl, h) {
-                    offer(Score(2, t), Picked { r: it.r.clone(), label: it.name.clone(), hi: Hi::Item(it.g.clone()) }, &mut best);
+                    offer(Score(2, t), item_pick(it), &mut best);
                 }
             }
             G::Axis(ao, ad) if acc.has(Accept::LINE) => {
@@ -616,7 +695,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
                 if let (Some(sa), Some(sb)) = (scr(app, rect, a), scr(app, rect, b)) {
                     let dist = seg_dist(pos, sa, sb);
                     if dist <= 6.0 {
-                        offer(Score(1, dist), Picked { r: it.r.clone(), label: it.name.clone(), hi: Hi::Item(it.g.clone()) }, &mut best);
+                        offer(Score(1, dist), item_pick(it), &mut best);
                     }
                 }
             }
@@ -624,7 +703,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
                 if let Some(s) = scr(app, rect, *p) {
                     let dist = s.distance(pos);
                     if dist <= 10.0 {
-                        offer(Score(0, dist), Picked { r: it.r.clone(), label: it.name.clone(), hi: Hi::Item(it.g.clone()) }, &mut best);
+                        offer(Score(0, dist), item_pick(it), &mut best);
                     }
                 }
             }
@@ -633,7 +712,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
             {
                 if let Some(dist) = poly_dist(app, rect, pos, pts) {
                     if dist <= 6.0 {
-                        offer(Score(1, dist), Picked { r: it.r.clone(), label: it.name.clone(), hi: Hi::Item(it.g.clone()) }, &mut best);
+                        offer(Score(1, dist), item_pick(it), &mut best);
                     }
                 }
             }
@@ -665,6 +744,9 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
                         r: GeomRef::Vertex { hint: v },
                         label: format!("Vertex ({:.1}, {:.1}, {:.1})", v.x, v.y, v.z),
                         hi: Hi::Item(G::Point(v)),
+                        cls: Cls::Point,
+                        p: v,
+                        n: DVec3::ZERO,
                     },
                     &mut best,
                 );
@@ -696,11 +778,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
                             .collect();
                         edge = Some((
                             hit.t,
-                            Picked {
-                                r: GeomRef::Edge(EdgeSelector::from_pick(info)),
-                                label: crate::ui_viewport::edge_label(info).0,
-                                hi: Hi::Item(G::Poly { pts: poly, straight: info.kind == CurveKind::Line }),
-                            },
+                            edge_pick(info, Some(poly)),
                         ));
                     }
                 }
@@ -708,11 +786,7 @@ pub fn pick(app: &EasyCadApp, pos: Pos2, rect: Rect, acc: Accept) -> Option<Pick
                     if let Some(info) = mb.faces.get(f as usize).filter(|i| face_ok(i, acc)) {
                         face = Some((
                             hit.t,
-                            Picked {
-                                r: GeomRef::Face(FaceSelector::from_pick(info)),
-                                label: crate::ui_viewport::face_desc(info),
-                                hi: Hi::Face(hit.body, f),
-                            },
+                            face_pick(info, hit.body, f),
                         ));
                     }
                 }
@@ -742,19 +816,11 @@ pub fn from_key(m: &crate::worker::Output, key: &crate::pickstack::PickKey, acc:
     match key.kind {
         PickKind::Face(f) => {
             let info = mb.faces.get(f as usize).filter(|i| face_ok(i, acc))?;
-            Some(Picked {
-                r: GeomRef::Face(FaceSelector::from_pick(info)),
-                label: crate::ui_viewport::face_desc(info),
-                hi: Hi::Face(key.body, f),
-            })
+            Some(face_pick(info, key.body, f))
         }
         PickKind::Edge(e) => {
             let info = mb.edges.get(e as usize).filter(|i| edge_ok(i, acc))?;
-            Some(Picked {
-                r: GeomRef::Edge(EdgeSelector::from_pick(info)),
-                label: crate::ui_viewport::edge_label(info).0,
-                hi: Hi::None,
-            })
+            Some(edge_pick(info, None))
         }
         PickKind::Body => None,
     }

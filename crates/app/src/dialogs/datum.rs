@@ -6,8 +6,9 @@ use easycad_model::document::DocData;
 use easycad_model::feature::{Feature, FeatureId, FeatureKind};
 use egui::{RichText, Ui};
 
-use super::{BuildCx, DialogCx, Field};
-use crate::datum_ui::{Accept, DatumKind, Hi, Picked};
+use super::{BuildCx, DialogCx, DialogEvent, Field};
+use crate::construct::{infer, Cand};
+use crate::datum_ui::{Accept, Cls, DatumKind, Hi, Picked};
 use crate::theme;
 
 #[derive(Clone, Debug)]
@@ -17,7 +18,19 @@ pub struct SlotVal {
     pub hi: Hi,
 }
 
+/// State of the one-click Construct tool: the clicked things and what they can make.
+pub struct Auto {
+    pub picks: Vec<Picked>,
+    pub alts: Vec<Cand>,
+    pub alt: usize,
+    /// The value field takes the focus (and selects its text) this frame.
+    pub focus: bool,
+    /// Where the last click was (the popup sits next to it).
+    pub anchor: Option<egui::Pos2>,
+}
+
 pub struct DatumD {
+    pub auto: Option<Auto>,
     pub kind: DatumKind,
     pub slots: Vec<Option<SlotVal>>,
     /// The slot a viewport click fills; `None` once every required slot is full.
@@ -29,6 +42,7 @@ pub struct DatumD {
 impl DatumD {
     pub fn new(kind: DatumKind) -> Self {
         DatumD {
+            auto: None,
             kind,
             slots: vec![None; kind.slots().len()],
             active: Some(0),
@@ -37,8 +51,99 @@ impl DatumD {
         }
     }
 
+    /// A fresh Construct tool; `picks` are things already selected.
+    pub fn new_auto(picks: Vec<Picked>) -> Self {
+        let mut d = DatumD::new(DatumKind::PointAt);
+        d.active = None;
+        d.auto = Some(Auto { picks, alts: Vec::new(), alt: 0, focus: false, anchor: None });
+        d.recompute();
+        d
+    }
+
+    /// Add a pick, or remove it when it is already there (the tool's click).
+    pub fn toggle(&mut self, p: Picked, at: Option<egui::Pos2>) {
+        let Some(a) = &mut self.auto else { return };
+        match a.picks.iter().position(|q| q.r == p.r) {
+            Some(i) => {
+                a.picks.remove(i);
+            }
+            None => a.picks.push(p),
+        }
+        a.anchor = at.or(a.anchor);
+        a.alt = 0;
+        self.recompute();
+    }
+
+    pub fn clear_picks(&mut self) {
+        if let Some(a) = &mut self.auto {
+            a.picks.clear();
+            a.alt = 0;
+        }
+        self.recompute();
+    }
+
+    pub fn has_picks(&self) -> bool {
+        self.auto.as_ref().is_some_and(|a| !a.picks.is_empty())
+    }
+
+    pub fn cycle_alt(&mut self, dir: i32) {
+        if let Some(a) = &mut self.auto {
+            if a.alts.len() > 1 {
+                a.alt = (a.alt as i64 + dir as i64).rem_euclid(a.alts.len() as i64) as usize;
+                self.apply_alt(true);
+            }
+        }
+    }
+
+    fn recompute(&mut self) {
+        let Some(a) = &mut self.auto else { return };
+        a.alts = infer(&a.picks);
+        a.alt = a.alt.min(a.alts.len().saturating_sub(1));
+        self.apply_alt(true);
+    }
+
+    /// Make the chosen alternative the dialog's kind, slots and (reset) fields.
+    fn apply_alt(&mut self, reset_fields: bool) {
+        let Some(a) = &mut self.auto else { return };
+        match a.alts.get(a.alt).cloned() {
+            Some(c) => {
+                self.kind = c.kind;
+                self.slots = c
+                    .order
+                    .iter()
+                    .map(|o| o.and_then(|i| a.picks.get(i)).map(|p| SlotVal { r: p.r.clone(), label: p.label.clone(), hi: p.hi.clone() }))
+                    .collect();
+                if reset_fields {
+                    self.fields = c.kind.fields().iter().map(|_| Field::new(c.value)).collect();
+                    a.focus = !self.fields.is_empty();
+                }
+            }
+            None => {
+                self.slots = vec![None; self.kind.slots().len()];
+            }
+        }
+    }
+
+    /// Everything the viewport should show as held: the tool's picks or the slots.
+    pub fn held(&self) -> Vec<(&GeomRef, &Hi)> {
+        match &self.auto {
+            Some(a) => a.picks.iter().map(|p| (&p.r, &p.hi)).collect(),
+            None => self.slots.iter().flatten().map(|s| (&s.r, &s.hi)).collect(),
+        }
+    }
+
+    /// Every required slot is filled and the fields hold something.
+    pub fn ready(&self) -> bool {
+        let defs = self.kind.slots();
+        defs.iter().enumerate().all(|(i, d)| d.optional || self.slots.get(i).is_some_and(|s| s.is_some()))
+            && self.fields.iter().all(|f| !f.text.trim().is_empty())
+    }
+
     /// The accept set of the active slot (`NONE` when no slot waits for a pick).
     pub fn active_accept(&self) -> Accept {
+        if self.auto.is_some() {
+            return Accept(63);
+        }
         self.active.and_then(|i| self.kind.slots().get(i).map(|s| s.accept)).unwrap_or(Accept::NONE)
     }
 
@@ -231,6 +336,38 @@ impl DatumD {
             _ => return None,
         }
         me.active = None;
+        // the Construct tool reopens on it: its refs held, its kind fixed until a click
+        let picks = me
+            .slots
+            .iter()
+            .zip(me.kind.slots())
+            .filter_map(|(s, d)| {
+                let s = s.as_ref()?;
+                let cls = if d.accept.has(Accept::PLANE) {
+                    Cls::Plane
+                } else if d.accept.has(Accept::POINT) {
+                    Cls::Point
+                } else if d.accept.has(Accept::CYLF) {
+                    Cls::Cyl
+                } else if d.accept.has(Accept::CIRCLE) {
+                    Cls::Circle
+                } else {
+                    Cls::Line
+                };
+                Some(Picked { r: s.r.clone(), label: s.label.clone(), hi: s.hi.clone(), cls, p: glam::DVec3::ZERO, n: glam::DVec3::ZERO })
+            })
+            .collect();
+        let order = {
+            let mut k = 0;
+            me.slots.iter().map(|s| s.as_ref().map(|_| { k += 1; k - 1 })).collect()
+        };
+        me.auto = Some(Auto {
+            picks,
+            alts: vec![Cand { kind: me.kind, order, value: "" }],
+            alt: 0,
+            focus: !me.fields.is_empty(),
+            anchor: None,
+        });
         Some(me)
     }
 
@@ -305,4 +442,105 @@ pub fn default_name(kind: DatumKind, cx: &BuildCx) -> String {
         .count()
         + 1;
     format!("{stem} {n}")
+}
+
+impl DatumD {
+    /// The Construct tool's popup next to the last click. Returns the user's intent.
+    pub fn popup(&mut self, ui: &mut Ui, id: egui::Id, cx: &DialogCx, error: Option<&str>) -> DialogEvent {
+        let mut ev = DialogEvent::None;
+        let Some(auto) = &self.auto else { return ev };
+        let (n_alts, n_picks) = (auto.alts.len(), auto.picks.len());
+        // keys first, so a focused field does not swallow them
+        if n_alts > 1 && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            self.cycle_alt(1);
+            ev = DialogEvent::Changed;
+        } else if n_alts > 1 && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)) {
+            self.cycle_alt(-1);
+            ev = DialogEvent::Changed;
+        }
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if esc {
+            if self.has_picks() {
+                self.clear_picks();
+                return DialogEvent::Changed;
+            }
+            return DialogEvent::Cancel;
+        }
+        crate::widgets::card_frame().show(ui, |ui| {
+            ui.set_max_width(270.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let ready = self.ready() && n_alts > 0;
+            if n_alts == 0 {
+                ui.label(widgets_muted(crate::construct::nothing_hint(n_picks)));
+                return;
+            }
+            let alts: Vec<(DatumKind, bool)> = {
+                let a = self.auto.as_ref().unwrap();
+                a.alts.iter().enumerate().map(|(i, c)| (c.kind, i == a.alt)).collect()
+            };
+            ui.label(RichText::new(self.kind.title()).strong().size(13.0));
+            if alts.len() > 1 {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, (k, on)) in alts.iter().enumerate() {
+                        if crate::widgets::pill(ui, k.title(), *on).clicked() {
+                            if let Some(a) = &mut self.auto {
+                                a.alt = i;
+                            }
+                            self.apply_alt(true);
+                            ev = DialogEvent::Changed;
+                        }
+                    }
+                });
+                ui.label(widgets_muted("Tab cycles the alternatives"));
+            }
+            let focus = self.auto.as_ref().is_some_and(|a| a.focus);
+            for (i, fd) in self.kind.fields().iter().enumerate() {
+                let fid = id.with(("construct", i));
+                if focus && i == 0 {
+                    ui.memory_mut(|m| m.request_focus(fid));
+                }
+                if self.fields[i].row(ui, fid, fd.label, &cx.env) {
+                    ev = DialogEvent::Changed;
+                }
+                if focus && i == 0 {
+                    if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), fid) {
+                        let n = self.fields[i].text.chars().count();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(n),
+                        )));
+                        st.store(ui.ctx(), fid);
+                    }
+                }
+            }
+            if let Some(a) = &mut self.auto {
+                a.focus = false;
+            }
+            if self.kind.group() == crate::datum_ui::Group::Plane
+                && ui.checkbox(&mut self.flip, RichText::new("Flip").size(12.0)).changed()
+            {
+                ev = DialogEvent::Changed;
+            }
+            if let Some(e) = error {
+                ui.label(RichText::new(e).size(11.5).color(theme::ORANGE_SOFT));
+            }
+            ui.horizontal(|ui| {
+                ui.label(widgets_muted("Enter \u{2713} \u{b7} Esc clears"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ready && crate::widgets::primary(ui, " OK ").clicked() {
+                        ev = DialogEvent::Ok;
+                    }
+                });
+            });
+            if enter && ready {
+                ev = DialogEvent::Ok;
+            }
+        });
+        ev
+    }
+}
+
+fn widgets_muted(s: &str) -> RichText {
+    crate::widgets::muted(s)
 }
