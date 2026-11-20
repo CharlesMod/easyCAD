@@ -233,18 +233,22 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                     Some(l) => format!("Undo {l} (Ctrl+Z)"),
                     None => "Undo (Ctrl+Z)".into(),
                 };
-                if widgets::icon_button(ui, Icon::Undo, 32.0, &undo_tip, app.doc.can_undo())
-                    .clicked()
-                {
+                let ur = widgets::icon_button(ui, Icon::Undo, 32.0, &undo_tip, app.doc.can_undo());
+                if ur.hovered() && app.doc.can_undo() {
+                    app.hist_peek = Some(crate::history_ui::HistPeek::Undo);
+                }
+                if ur.clicked() {
                     app.undo();
                 }
                 let redo_tip = match app.doc.redo_label() {
                     Some(l) => format!("Redo {l} (Ctrl+Shift+Z)"),
                     None => "Redo (Ctrl+Shift+Z)".into(),
                 };
-                if widgets::icon_button(ui, Icon::Redo, 32.0, &redo_tip, app.doc.can_redo())
-                    .clicked()
-                {
+                let rr = widgets::icon_button(ui, Icon::Redo, 32.0, &redo_tip, app.doc.can_redo());
+                if rr.hovered() && app.doc.can_redo() {
+                    app.hist_peek = Some(crate::history_ui::HistPeek::Redo);
+                }
+                if rr.clicked() {
                     app.redo();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1250,14 +1254,26 @@ pub fn chip_label(app: &EasyCadApp, f: &easycad_model::feature::Feature) -> Stri
 
 fn history(app: &mut EasyCadApp, ui: &mut Ui) {
     egui::Panel::bottom("history")
-        .exact_size(52.0)
+        .exact_size(76.0)
         .frame(
             Frame::new()
                 .fill(theme::PANEL)
                 .inner_margin(Margin::symmetric(12, 0)),
         )
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+            ui.add_space(5.0);
+            // the branch tabs; hovering a stored one previews what it would change
+            let (branch_act, branch_hover) = crate::history_ui::branch_strip(app, ui);
+            ui.add_space(3.0);
+            let toolbar_peek = app.hist_peek.take();
+            if toolbar_peek.is_some() {
+                ui.ctx().request_repaint();
+            }
+            let peek = crate::history_ui::peek_for(app, toolbar_peek, branch_hover);
+            app.hist_diff = peek.as_ref().map(|p| p.diff.clone());
+            let mut branch_at: Option<usize> = None;
+            let mut branch_act = branch_act;
+            ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(RichText::new("HISTORY").size(10.5).color(theme::TEXT_LABEL));
                 if !app.active.is_empty() {
@@ -1290,9 +1306,16 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 let mut shown_sketches = std::collections::HashSet::new();
                 let n = feats.len();
                 let marker = app.rollback().unwrap_or(n);
+                // while the golden head is dragged the chips follow its preview
+                let view_marker = crate::history_ui::drag_preview(ui).unwrap_or(marker).min(n);
+                let ids: Vec<FeatureId> = feats.iter().map(|f| f.0).collect();
+                let disp = crate::history_ui::merged(&ids, peek.as_ref());
+                let mut xs: std::collections::HashMap<FeatureId, f32> = Default::default();
+                let mut head_resp: Option<egui::Response> = None;
                 let mut click: Option<(HistItem, bool)> = None;
                 app.hist_rects.clear();
                 let mut roll_to: Option<usize> = None;
+                let app_root = app.active.is_empty();
                 let mut del_one: Option<HistItem> = None;
                 let mut bounds: Vec<f32> = Vec::new();
                 let mut strip_rect = egui::Rect::NOTHING;
@@ -1309,7 +1332,32 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                         ui.horizontal(|ui| {
                             let mods = ui.input(|i| i.modifiers);
                             let add = mods.ctrl || mods.command || mods.shift;
-                            for (i, (id, label, kind)) in feats.iter().enumerate() {
+                            let pk = peek.as_ref();
+                            let dif = pk.map(|p| &p.diff);
+                            for dsp in &disp {
+                                let Some(i) = dsp.real else {
+                                    // a state the previewed step would bring back: a ghost chip
+                                    let p = pk.expect("ghosts come from a peek");
+                                    let g = &p.ghosts[dsp.ghost.unwrap_or(0)];
+                                    let gsk = match &g.kind {
+                                        FeatureKind::Extrude { sketch, .. }
+                                        | FeatureKind::Revolve { sketch, .. }
+                                        | FeatureKind::Rib { sketch, .. } => Some(*sketch),
+                                        _ => None,
+                                    };
+                                    if let Some(s) = gsk {
+                                        if p.diff.added_sketches.contains(&s) && shown_sketches.insert(s) {
+                                            let name = p.sketch_names.get(&s).cloned().unwrap_or_default();
+                                            history_chip(ui, "SK", theme::ACCENT_LINK, &name, true, false, false, None, ChipMark::Ghost, false);
+                                        }
+                                    }
+                                    let (code, col) = feature_code(&g.kind);
+                                    let r = history_chip(ui, code, col, &g.name, true, false, false, None, ChipMark::Ghost, false);
+                                    xs.insert(g.id, r.rect.right() + 3.0);
+                                    r.on_hover_text(format!("{} · {}: would appear", g.kind.label(), p.label));
+                                    continue;
+                                };
+                                let (id, label, kind) = &feats[i];
                                 let sk = match kind {
                                     FeatureKind::Extrude { sketch, .. }
                                     | FeatureKind::Revolve { sketch, .. }
@@ -1328,10 +1376,16 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                             "SK",
                                             theme::ACCENT_LINK,
                                             &name,
-                                            i < marker,
+                                            i < view_marker,
                                             false,
                                             app.is_hist_selected(HistItem::Sketch(s)),
                                             None,
+                                            match dif {
+                                                Some(d) if d.removed_sketches.contains(&s) => ChipMark::Removed,
+                                                Some(d) if d.changed_sketches.contains(&s) => ChipMark::Changed,
+                                                _ => ChipMark::None,
+                                            },
+                                            false,
                                         );
                                         app.hist_rects.push((HistItem::Sketch(s), r.rect));
                                         let r = r.on_hover_text(
@@ -1377,10 +1431,17 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                     code,
                                     col,
                                     label,
-                                    i < marker,
-                                    i + 1 == marker,
+                                    i < view_marker,
+                                    i + 1 == view_marker,
                                     app.is_hist_selected(HistItem::Feature(*id)),
                                     warn.as_ref().map(|w| w.0),
+                                    match dif {
+                                        Some(d) if d.removed_features.contains(id) => ChipMark::Removed,
+                                        Some(d) if d.changed_features.contains(id) => ChipMark::Changed,
+                                        _ => ChipMark::None,
+                                    },
+                                    // only the real head chip is a drag handle for the golden head
+                                    i + 1 == marker,
                                 );
                                 let tip = match &warn {
                                     Some((_, t)) => format!(
@@ -1407,7 +1468,11 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                 } else if r.clicked() {
                                     click = Some((HistItem::Feature(*id), add));
                                 }
-                bounds.push(r.rect.right() + 3.0);
+                                bounds.push(r.rect.right() + 3.0);
+                                xs.insert(*id, r.rect.right() + 3.0);
+                                if i + 1 == marker {
+                                    head_resp = Some(r.clone());
+                                }
                                 app.hist_rects.push((HistItem::Feature(*id), r.rect));
                                 strip_rect = strip_rect.union(r.rect);
                                 let unresolved = matches!(status, Some(FeatureStatus::Unresolved(_)));
@@ -1427,6 +1492,15 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                         roll_to = Some(i);
                                         ui.close();
                                     }
+                                    if ui
+                                        .add_enabled(app_root, egui::Button::new("Branch here"))
+                                        .on_hover_text("Save this history and continue on a new branch from this step")
+                                        .on_disabled_hover_text("Branches apply to the whole document")
+                                        .clicked()
+                                    {
+                                        branch_at = Some(i + 1);
+                                        ui.close();
+                                    }
                                     if ui.button("Edit").clicked() {
                                         dbl = Some(*id);
                                         ui.close();
@@ -1437,8 +1511,31 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                     }
                                 });
                             }
-                            if let Some(k) = rollback_handle(ui, &bounds, strip_rect, marker) {
+                            if let Some(k) = crate::history_ui::golden_cursor(ui, &bounds, strip_rect, marker, head_resp.as_ref()) {
                                 roll_to = Some(k - 1);
+                            }
+                            // where branches split off, and where a previewed step would put the head
+                            if bounds.len() == n {
+                                let d = &app.doc.data;
+                                let mut splits: Vec<(usize, String)> = Vec::new();
+                                if let Some(p) = &d.branch_parent {
+                                    splits.push((d.branch_split, format!("This branch started from \"{p}\" here")));
+                                }
+                                for b in d.branches.iter().filter(|b| b.parent.as_deref() == Some(d.branch.as_str())) {
+                                    splits.push((b.split, format!("\"{}\" branches off here", b.name)));
+                                }
+                                for (k, tip) in splits {
+                                    if k >= 1 && k <= n {
+                                        crate::history_ui::split_mark(ui, bounds[k - 1], strip_rect.top(), strip_rect.bottom(), theme::ACCENT_LINK);
+                                        let hit = egui::Rect::from_center_size(egui::pos2(bounds[k - 1], strip_rect.top() + 4.0), vec2(8.0, 8.0));
+                                        ui.interact(hit, egui::Id::new(("split_mark", k)), Sense::hover()).on_hover_text(tip);
+                                    }
+                                }
+                            }
+                            if let Some(h) = peek.as_ref().and_then(|p| p.diff.head) {
+                                if let Some(x) = crate::history_ui::head_x(h, &xs, strip_rect.left()) {
+                                    crate::history_ui::ghost_cursor(ui, x, strip_rect.top(), strip_rect.bottom());
+                                }
                             }
                             // a feature was added (or the file changed): show the
                             // newest chip instead of leaving it off to the right
@@ -1459,8 +1556,28 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 } else if bg.clicked() {
                     app.hist_sel.clear();
                 }
+                // Ctrl+Alt+Left / Right nudge the golden head one step (Alt+arrows alone step the camera, and take Alt+Shift too)
+                if app.active.is_empty() && !matches!(app.mode, Mode::Sketch(_)) && !ui.ctx().text_edit_focused() && roll_to.is_none() && n > 0 {
+                    let (l, r) = ui.input_mut(|i| {
+                        (
+                            i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::ArrowLeft),
+                            i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::ArrowRight),
+                        )
+                    });
+                    if l && marker > 1 {
+                        roll_to = Some(marker - 2);
+                    } else if r && marker < n {
+                        roll_to = Some(marker);
+                    }
+                }
                 if let Some(i) = roll_to {
                     app.set_rollback(if i + 1 >= n { None } else { Some(i + 1) });
+                }
+                if let Some(at) = branch_at {
+                    branch_act = Some(crate::history_ui::BranchAct::Here(at));
+                }
+                if let Some(a) = branch_act {
+                    crate::history_ui::apply_branch(app, a);
                 }
                 if let Some(it) = del_one {
                     if app.is_hist_selected(it) && app.hist_sel.len() > 1 {
@@ -1487,11 +1604,12 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("Click to select · Del deletes · drag the yellow marker to roll back")
-                            .size(11.0)
-                            .color(theme::TEXT_MUTED),
-                    );
+                    let msg = match &peek {
+                        Some(p) if p.diff.is_empty() => format!("{}: no change to the history", p.label),
+                        Some(p) => format!("{}: red = goes away · green = comes back · amber dot = changes", p.label),
+                        None => "Click to select · Del deletes · drag the golden head to roll back".to_string(),
+                    };
+                    ui.label(RichText::new(msg).size(11.0).color(if peek.is_some() { theme::GREEN } else { theme::TEXT_MUTED }));
                 });
             });
         });
@@ -1517,45 +1635,6 @@ pub fn history_hint(app: &EasyCadApp) -> Option<String> {
     })
 }
 
-/// The draggable rollback marker: a yellow bar after the last live chip. `bounds[k-1]`
-/// is the x of the gap after feature k. Returns the new marker position (1..=n) on release.
-fn rollback_handle(ui: &mut Ui, bounds: &[f32], strip: egui::Rect, marker: usize) -> Option<usize> {
-    if bounds.is_empty() {
-        return None;
-    }
-    let id = egui::Id::NULL.with("history_rollback_handle");
-    let cur = marker.clamp(1, bounds.len());
-    let (top, bot) = (strip.top(), strip.bottom());
-    let rect = egui::Rect::from_min_max(egui::pos2(bounds[cur - 1] - 4.0, top), egui::pos2(bounds[cur - 1] + 4.0, bot));
-    let r = ui.interact(rect, id, Sense::drag()).on_hover_text("Drag to roll the model back to a step");
-    let mut show = cur;
-    let mut done = None;
-    if r.dragged() || r.drag_stopped() {
-        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-            let mut best = (f32::MAX, cur);
-            for (k, x) in bounds.iter().enumerate() {
-                let d = (x - p.x).abs();
-                if d < best.0 {
-                    best = (d, k + 1);
-                }
-            }
-            show = best.1;
-        }
-        if r.drag_stopped() {
-            done = Some(show);
-        }
-    }
-    let x = bounds[show - 1];
-    let col = if r.hovered() || r.dragged() { theme::HEAD } else { theme::HEAD.gamma_multiply(0.8) };
-    ui.painter().line_segment([egui::pos2(x, top - 2.0), egui::pos2(x, bot + 2.0)], Stroke::new(3.0, col));
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![egui::pos2(x - 5.0, top - 4.0), egui::pos2(x + 5.0, top - 4.0), egui::pos2(x, top + 3.0)],
-        col,
-        Stroke::NONE,
-    ));
-    done.filter(|k| *k != cur)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn history_chip(
     ui: &mut Ui,
@@ -1566,6 +1645,8 @@ fn history_chip(
     head: bool,
     selected: bool,
     warn: Option<Color32>,
+    mark: ChipMark,
+    drag: bool,
 ) -> egui::Response {
     let font = theme::prop(12.0);
     let code_font = theme::mono(10.0);
@@ -1579,8 +1660,20 @@ fn history_chip(
         .layout_no_wrap(code.to_owned(), code_font.clone(), theme::TEXT)
         .size()
         .x;
-    let (rect, resp) = ui.allocate_exact_size(vec2(lw + cw + 26.0, 32.0), Sense::click());
-    let border = if selected {
+    let sense = match (mark, drag) {
+        (ChipMark::Ghost, _) => Sense::hover(),
+        (_, true) => Sense::click_and_drag(),
+        _ => Sense::click(),
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(lw + cw + 26.0, 32.0), sense);
+    if drag && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    let border = if mark == ChipMark::Removed {
+        theme::RED
+    } else if mark == ChipMark::Ghost {
+        theme::GREEN
+    } else if selected {
         theme::ACCENT
     } else if head {
         theme::HEAD
@@ -1589,7 +1682,11 @@ fn history_chip(
     } else {
         theme::hex(0x33373e)
     };
-    let fill = if selected {
+    let fill = if mark == ChipMark::Removed {
+        theme::hex(0x3a1e1e)
+    } else if mark == ChipMark::Ghost {
+        theme::hex(0x1b3a2a)
+    } else if selected {
         theme::ACCENT_BG
     } else if head {
         theme::HEAD_BG
@@ -1599,6 +1696,7 @@ fn history_chip(
         theme::CARD
     };
     let op: f32 = if active { 1.0 } else { 0.4 };
+    let op = if mark == ChipMark::Ghost { 0.85 } else { op };
     ui.painter().rect(
         rect,
         CornerRadius::same(16),
@@ -1618,9 +1716,34 @@ fn history_chip(
         egui::Align2::LEFT_CENTER,
         label,
         font,
-        theme::TEXT.gamma_multiply(op),
+        if mark == ChipMark::Ghost { theme::GREEN } else { theme::TEXT }.gamma_multiply(op),
     );
+    match mark {
+        ChipMark::Removed => {
+            let y = rect.center().y;
+            ui.painter().line_segment(
+                [egui::pos2(rect.left() + 12.0, y), egui::pos2(rect.right() - 12.0, y)],
+                Stroke::new(1.5, theme::RED),
+            );
+        }
+        ChipMark::Changed => {
+            ui.painter().circle_filled(egui::pos2(rect.right() - 7.0, rect.top() + 7.0), 3.5, theme::ORANGE);
+        }
+        _ => {}
+    }
     resp
+}
+
+/// How the diff preview tints a chip.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChipMark {
+    None,
+    /// would disappear
+    Removed,
+    /// would appear (not part of the live history yet)
+    Ghost,
+    /// parameters change
+    Changed,
 }
 
 // ---------------------------------------------------------------- status

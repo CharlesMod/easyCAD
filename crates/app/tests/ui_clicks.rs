@@ -1282,6 +1282,80 @@ mod hist {
     }
 
     #[test]
+    fn dragging_the_golden_head_rolls_back_in_one_undo_step() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let mut h = harness(doc);
+        let from = chip(&h, HistItem::Feature(b)).center();
+        let to = egui::pos2(chip(&h, HistItem::Feature(a)).right() + 3.0, from.y);
+        h.hover_at(from);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        for i in 1..=10 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 10.0)));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(3);
+        assert_eq!(h.state().rollback(), Some(1), "the head moved to the gap after the first feature");
+        assert!(h.state().hist_sel.is_empty(), "a drag is not a click");
+        assert_eq!(h.state().doc.undo_label(), Some("Roll back to 1"));
+        h.state_mut().undo();
+        assert_eq!(h.state().rollback(), None, "one undo step per drag");
+    }
+
+    #[test]
+    fn alt_arrows_nudge_the_head() {
+        let _g = serial();
+        let (doc, _s, _a, _b) = two_blocks();
+        let mut h = harness(doc);
+        h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::ArrowLeft);
+        h.run_steps(3);
+        assert_eq!(h.state().rollback(), Some(1));
+        h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::ArrowRight);
+        h.run_steps(3);
+        assert_eq!(h.state().rollback(), None);
+    }
+
+    #[test]
+    fn hovering_undo_previews_the_diff_in_the_history() {
+        let _g = serial();
+        let (doc, _s, _a, _b) = two_blocks();
+        let mut h = harness(doc);
+        assert!(h.state().hist_diff.is_none());
+        // an edit made through the app, so there is something to undo
+        let x = h.state_mut().doc.add_feature("Extra", easycad_model::feature::FeatureKind::ImportStep { import: easycad_model::feature::ImportId(1), reference: false, translate: glam::DVec3::ZERO });
+        h.run_steps(2);
+        h.state_mut().hist_peek = Some(easycad_app::history_ui::HistPeek::Undo);
+        h.step();
+        let d = h.state().hist_diff.clone().expect("a diff is previewed");
+        assert_eq!(d.removed_features, vec![x], "undo would remove the last feature");
+        h.run_steps(2);
+        assert!(h.state().hist_diff.is_none(), "it stops with the hover");
+    }
+
+    #[test]
+    fn branch_here_then_switch_back_restores_the_features() {
+        use easycad_app::history_ui::{apply_branch, BranchAct};
+        let _g = serial();
+        let (doc, _s, _a, _b) = two_blocks();
+        let mut h = harness(doc);
+        apply_branch(h.state_mut(), BranchAct::Here(1));
+        settle(&mut h);
+        assert_eq!(nfeat(&h), 1);
+        assert_eq!(h.state().doc.data.branch, "Try 1");
+        h.get_by_label("main  2").click();
+        settle(&mut h);
+        assert_eq!(nfeat(&h), 2, "clicking the tab switches back");
+        assert_eq!(h.state().doc.data.branch, "main");
+        apply_branch(h.state_mut(), BranchAct::Switch("Try 1".into()));
+        apply_branch(h.state_mut(), BranchAct::BackToSplit);
+        settle(&mut h);
+        assert_eq!(h.state().rollback(), Some(1), "back to the split rolls the head to it");
+    }
+
+    #[test]
     fn multi_select_deletes_as_one_undo_step() {
         let _g = serial();
         let (doc, _s, a, b) = two_blocks();
