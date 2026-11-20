@@ -989,7 +989,7 @@ pub(crate) fn pcb_layer_colors(tree: &mut occt::StepTree) {
 fn step_component(blob: &str, node: u32, reference: bool, blobs: &BlobStore, cache: &mut AssemblyCache) -> RegenResult {
     use crate::regen::{Appearance, BodyGeom, FeatureReport, FeatureStatus, SubPart};
     let fid = FeatureId(0);
-    let mut out = RegenResult { bodies: Vec::new(), reports: Vec::new(), recomputed: 0, reused: 0, process: Default::default(), face_origins: Default::default() };
+    let mut out = RegenResult { bodies: Vec::new(), reports: Vec::new(), recomputed: 0, reused: 0, process: Default::default(), face_origins: Default::default(), datums: Vec::new() };
     let res = step_tree(blob, blobs, cache).and_then(|t| t.nodes.get(node as usize).cloned().ok_or_else(|| format!("STEP node {node} does not exist")));
     match res {
         Ok(n) => {

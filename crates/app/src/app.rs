@@ -563,6 +563,10 @@ impl EasyCadApp {
                 if self.asm.hold.as_ref().is_some_and(|h| out.data.revision >= h.2) {
                     self.asm.hold = None;
                 }
+                // sketches on construction planes follow their plane (a cache, not an edit)
+                if out.data.revision == self.doc.data.revision {
+                    self.doc.data.refresh_sketch_planes(&out.result);
+                }
                 self.model = Some(Arc::new(out));
             }
             Purpose::Drawing => {

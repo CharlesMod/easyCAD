@@ -3,6 +3,7 @@
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
+use crate::datum::{AxisDef, PlaneDef, PointDef};
 use crate::geom::{Axis, Plane};
 use crate::library::HoleChoice;
 use crate::params::Expr;
@@ -342,6 +343,17 @@ pub enum FeatureKind {
         #[serde(default)]
         threads: Threads,
     },
+    /// Construction plane (see `crate::datum`). Makes no body and consumes no sketch.
+    DatumPlane {
+        def: PlaneDef,
+        /// Reverse the plane's normal.
+        #[serde(default)]
+        flip: bool,
+    },
+    /// Construction axis.
+    DatumAxis { def: AxisDef },
+    /// Construction point.
+    DatumPoint { def: PointDef },
     /// In-context reference: a body of another occurrence, resolved after that
     /// component regenerates and placed into this component's frame (the frame of
     /// this component's first occurrence). Used as a new body, a reference body, or
@@ -492,11 +504,19 @@ impl FeatureKind {
             FeatureKind::ImportStep { .. } => "Import STEP",
             FeatureKind::InsertPart { .. } => "Insert part",
             FeatureKind::ContextRef { .. } => "In-context reference",
+            FeatureKind::DatumPlane { .. } => "Construction plane",
+            FeatureKind::DatumAxis { .. } => "Construction axis",
+            FeatureKind::DatumPoint { .. } => "Construction point",
         }
     }
 }
 
 impl FeatureKind {
+    /// True for construction planes/axes/points.
+    pub fn is_datum(&self) -> bool {
+        matches!(self, FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. })
+    }
+
     /// The sketch this feature builds from, if any.
     pub fn sketch(&self) -> Option<SketchId> {
         match self {

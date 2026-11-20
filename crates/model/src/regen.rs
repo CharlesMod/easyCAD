@@ -228,6 +228,8 @@ struct ModelState {
     /// Face provenance per body geometry.
     faces: crate::provenance::FaceTables,
     tools: BTreeMap<FeatureId, Vec<ToolOp>>,
+    /// Construction geometry resolved so far (live features, history order).
+    datums: Vec<(FeatureId, crate::datum::DatumGeom)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -317,6 +319,8 @@ pub struct RegenResult {
     pub process: ProcessReport,
     /// Per body: the feature and role that made each face (see [`RegenResult::face_origin`]).
     pub face_origins: crate::provenance::FaceOrigins,
+    /// Construction planes/axes/points that resolved (live features, history order).
+    pub datums: Vec<(FeatureId, crate::datum::DatumGeom)>,
 }
 
 /// A cylindrical hole considered by the teardrop stage.
@@ -438,6 +442,15 @@ macro_rules! fail_from {
 }
 fail_from!(occt::Error, crate::sketch::SketchError, crate::library::LibraryError, crate::dxf::DxfError, crate::params::ExprError);
 
+impl From<crate::datum::DatumError> for Fail {
+    fn from(e: crate::datum::DatumError) -> Self {
+        match e {
+            crate::datum::DatumError::Select(s) => s.into(),
+            crate::datum::DatumError::Msg(m) => Fail::msg(m),
+        }
+    }
+}
+
 impl From<SelectError> for Fail {
     fn from(e: SelectError) -> Self {
         let msg = e.to_string();
@@ -486,7 +499,13 @@ fn fingerprint(f: &Feature, doc: &DocData, vals: &Values) -> u64 {
         _ => None,
     };
     if let Some(s) = sketch.and_then(|s| doc.sketch(s)) {
-        deps.push(serde_json::to_value(s).unwrap_or_default());
+        // the cached plane of a datum-following sketch is overridden at regen: keep
+        // it out of the key so refreshing the cache does not recompute the history
+        let mut s = s.clone();
+        if s.plane_src.is_some() {
+            s.plane = Plane::XY;
+        }
+        deps.push(serde_json::to_value(&s).unwrap_or_default());
     }
     let import = match &f.kind {
         FeatureKind::ImportStep { import, .. } => Some(*import),
@@ -584,10 +603,11 @@ impl Regenerator {
                     target_default: None,
                     edge_requests: Vec::new(),
                     skipped_edges: Vec::new(),
+                    cur_datums: Vec::new(),
                 };
                 let res = ctx.exec(f, &state).map(|mut s| {
                     let tp = std::time::Instant::now();
-                    s.faces = crate::provenance::update(&state.faces, &s.bodies, Some(f), doc);
+                    s.faces = crate::provenance::update(&state.faces, &s.bodies, Some(f), doc, &state.datums);
                     t_prov += tp.elapsed().as_secs_f64() * 1000.0;
                     s
                 });
@@ -642,7 +662,7 @@ impl Regenerator {
             Some(hit) => hit.clone(),
             None => {
                 let (b, p) = process_stage(&state.bodies, &profile, doc);
-                let fo = crate::provenance::FaceOrigins(crate::provenance::update(&state.faces, &b, None, doc));
+                let fo = crate::provenance::FaceOrigins(crate::provenance::update(&state.faces, &b, None, doc, &[]));
                 let r = (b, p, fo);
                 if self.stages.len() > self.capacity {
                     self.stages.clear();
@@ -654,7 +674,7 @@ impl Regenerator {
         if prof {
             eprintln!("  regen keys {t_key:.1} ms · provenance {t_prov:.1} ms · process stage {:.1} ms", ts.elapsed().as_secs_f64() * 1000.0);
         }
-        RegenResult { bodies, reports, recomputed, reused, process, face_origins }
+        RegenResult { bodies, reports, recomputed, reused, process, face_origins, datums: state.datums.clone() }
     }
 
     fn insert(&mut self, key: u64, s: Step) {
@@ -686,6 +706,8 @@ struct Ctx<'a> {
     target_default: Option<BodyId>,
     edge_requests: Vec<EdgeRequest>,
     skipped_edges: Vec<u32>,
+    /// Datums available to sketches (the state before the feature being run).
+    cur_datums: Vec<(FeatureId, crate::datum::DatumGeom)>,
 }
 
 fn frame(p: &Plane) -> Frame {
@@ -796,6 +818,16 @@ impl Ctx<'_> {
 
     fn sketch(&mut self, id: SketchId) -> R<Sketch> {
         let mut sk = self.doc.sketch(id).cloned().ok_or_else(|| Fail::msg(format!("sketch {id:?} does not exist")))?;
+        if let Some(src) = sk.plane_src {
+            match self.cur_datums.iter().find(|(f, _)| *f == src) {
+                Some((_, crate::datum::DatumGeom::Plane(p))) => sk.plane = *p,
+                _ => {
+                    self.warning.get_or_insert_with(|| {
+                        format!("sketch `{}` follows a construction plane that is not available here; using its stored plane", sk.name)
+                    });
+                }
+            }
+        }
         if !sk.constraints.is_empty() {
             let rep = sk.solve(self.vals)?;
             let ok = rep.converged;
@@ -860,6 +892,7 @@ impl Ctx<'_> {
 
     fn exec(&mut self, f: &Feature, prev: &ModelState) -> R<ModelState> {
         let mut st = prev.clone();
+        self.cur_datums = prev.datums.clone();
         self.exec_kind(&f.kind, &f.name, f.id, &mut st)?;
         Ok(st)
     }
@@ -1099,6 +1132,12 @@ impl Ctx<'_> {
                     draft: self.ev(draft_deg)?,
                 };
                 self.bosses(st, fid, *body, plane, &pts, &spec)?;
+            }
+            FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => {
+                let ctx = crate::datum::RefCtx { doc: self.doc, bodies: &st.bodies, datums: &st.datums, vals: self.vals };
+                let g = crate::datum::eval_datum(kind, &ctx)?;
+                st.datums.retain(|(f, _)| *f != fid);
+                st.datums.push((fid, g));
             }
             FeatureKind::Pattern { source, kind } => {
                 let xfs: Vec<Xf> = match kind {
@@ -1600,6 +1639,7 @@ impl Ctx<'_> {
                         FeatureKind::Shell { .. } => Some("hollows the whole body, so a copy would shell it a second time"),
                         FeatureKind::Split { .. } | FeatureKind::PartingJoint { .. } => Some("cuts the whole body in two, so a copy would cut it again"),
                         FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => Some("brings in a body that has no recipe to repeat"),
+                        FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => Some("is construction geometry, which has nothing to repeat"),
                         _ => None,
                     };
                     if let Some(why) = why {
