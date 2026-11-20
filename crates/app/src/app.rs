@@ -121,6 +121,10 @@ pub struct EasyCadApp {
     /// sketch's id: the default target of an Extrude / Revolve on that sketch.
     /// Waiting for the click that names the plane of a new sketch.
     pub plane_pick: Option<crate::plane_pick::PlanePick>,
+    /// Origin rows drawn in the viewport (XY XZ YZ X Y Z origin); hidden by default.
+    pub origin_vis: [bool; 7],
+    /// What a datum dialog's active slot would pick under the pointer.
+    pub datum_hover: Option<crate::datum_ui::Picked>,
     pub sketch_body: Option<(Option<easycad_model::feature::SketchId>, BodyId)>,
     /// In-app path prompt (no system file dialog) and what to do with the path.
     pub path_prompt: Option<(crate::files::PathPrompt, OnPath)>,
@@ -236,6 +240,8 @@ impl EasyCadApp {
             pending_cycle: 0,
             typing: false,
             plane_pick: None,
+            origin_vis: [false; 7],
+            datum_hover: None,
             sketch_body: None,
             path_prompt: None,
             wizard: None,
@@ -860,6 +866,10 @@ impl EasyCadApp {
     pub fn start_sketch_on_target(&mut self, t: &crate::plane_pick::Target) {
         if let Some((pl, b)) = crate::plane_pick::resolve(self, t) {
             self.start_sketch_on(pl, b);
+            // a sketch on a construction plane follows it when it moves
+            if let (crate::plane_pick::Target::Datum(f), Mode::Sketch(s)) = (t, &mut self.mode) {
+                s.sketch.plane_src = Some(*f);
+            }
         }
     }
 

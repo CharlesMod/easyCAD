@@ -453,6 +453,9 @@ pub enum Icon {
     Check,
     Warn,
     Cross,
+    Plane,
+    Axis,
+    Point,
 }
 
 /// Paint an icon in a `size`² box (24-unit design grid like the mock's SVGs).
@@ -666,6 +669,23 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Cross => {
             line(&[(6.0, 6.0), (18.0, 18.0)]);
             line(&[(18.0, 6.0), (6.0, 18.0)]);
+        }
+        Icon::Plane => {
+            closed(&[(3.0, 16.0), (9.0, 6.0), (21.0, 6.0), (15.0, 16.0)]);
+            line(&[(12.0, 11.0), (12.0, 21.0)]);
+        }
+        Icon::Axis => {
+            line(&[(3.0, 20.0), (7.0, 16.0)]);
+            line(&[(9.5, 13.5), (10.5, 12.5)]);
+            line(&[(13.0, 10.0), (16.0, 7.0)]);
+            line(&[(18.0, 5.0), (21.0, 2.5)]);
+        }
+        Icon::Point => {
+            circle(12.0, 12.0, 2.5);
+            line(&[(12.0, 3.0), (12.0, 7.0)]);
+            line(&[(12.0, 17.0), (12.0, 21.0)]);
+            line(&[(3.0, 12.0), (7.0, 12.0)]);
+            line(&[(17.0, 12.0), (21.0, 12.0)]);
         }
     }
 }

@@ -21,6 +21,8 @@ pub enum Target {
     Origin(usize),
     /// A planar face of a body.
     Face(BodyId, u32),
+    /// A visible construction plane (its feature).
+    Datum(easycad_model::feature::FeatureId),
 }
 
 /// The state while waiting for the click.
@@ -126,6 +128,23 @@ pub fn target_at(app: &EasyCadApp, o: Vec3, d: Vec3, tol: easycad_model::pick::E
             best = Some((t, Target::Origin(i)));
         }
     }
+    for it in crate::datum_ui::datum_items(app, None) {
+        let (crate::datum_ui::G::Plane(pl), Some(fid)) = (&it.g, it.fid) else { continue };
+        let (n, p0) = (pl.normal.as_vec3(), pl.origin.as_vec3());
+        let den = n.dot(d);
+        if den.abs() < 1e-6 {
+            continue;
+        }
+        let t = n.dot(p0 - o) / den;
+        if t <= 0.0 {
+            continue;
+        }
+        let q = o + d * t - p0;
+        let (x, y) = (q.dot(pl.x_dir.as_vec3()), q.dot(pl.y_dir().as_vec3()));
+        if x.abs() <= h as f32 && y.abs() <= h as f32 && best.as_ref().is_none_or(|b| t < b.0) {
+            best = Some((t, Target::Datum(fid)));
+        }
+    }
     if let Some(m) = app.model.as_deref() {
         for hit in m.pick_all(o, d, tol, &|_| false) {
             if let easycad_model::pick::HitKind::Face(f) = hit.kind {
@@ -201,6 +220,7 @@ pub fn paint_labels(app: &EasyCadApp, p: &egui::Painter, rect: Rect) {
 pub fn resolve(app: &EasyCadApp, t: &Target) -> Option<(Plane, Option<BodyId>)> {
     match t {
         Target::Origin(i) => Some((origin_plane(*i), None)),
+        Target::Datum(f) => crate::datum_ui::plane_of(app, *f).map(|p| (p, None)),
         Target::Face(b, f) => {
             let m = app.model.as_deref()?;
             face_plane(m, *b, *f).map(|p| (p, Some(*b)))

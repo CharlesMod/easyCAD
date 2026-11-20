@@ -198,7 +198,8 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         }
     }
     let hover = resp.hover_pos();
-    let picking = app.plane_pick.is_some();
+    let datum_pick = crate::datum_ui::interact(app, &resp, rect);
+    let picking = app.plane_pick.is_some() || datum_pick;
     crate::plane_pick::interact(app, ui, &resp, rect);
     if let Some(p) = hover {
         let (scroll, raw) = ui.input(|i| {
@@ -333,6 +334,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 
     crate::plane_pick::paint_labels(app, &painter, rect);
+    crate::datum_ui::paint(app, &painter, rect);
 
     // edge highlights (thick lines over the image)
     if let Some(m) = &model {
@@ -693,6 +695,17 @@ fn build_frame(
                 }
             }
         }
+        for (b, f, hot) in crate::datum_ui::face_highlights(app) {
+            if let Some(mesh) = mesh_of(m, b) {
+                highlights.push(FaceHighlight {
+                    mesh: mesh.clone(),
+                    face: f,
+                    color: if hot { HOVER_COLOR } else { SELECT_COLOR },
+                    xray: false,
+                    model: body_model(app, m, b),
+                });
+            }
+        }
         if let Some((b, f)) = crate::plane_pick::hovered_face(app) {
             if let Some(mesh) = mesh_of(m, b) {
                 highlights.push(FaceHighlight {
@@ -766,6 +779,14 @@ fn build_frame(
             .chain(crate::plane_pick::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
                 mesh,
                 color: crate::sketch_view::LINE,
+                translucent: hot,
+                colors: None,
+                model: glam::Mat4::IDENTITY,
+            }))
+            // construction planes: translucent squares with a border; `translucent` = hovered / picked
+            .chain(crate::datum_ui::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
+                mesh,
+                color: [0.59, 0.84, 0.75, 1.0],
                 translucent: hot,
                 colors: None,
                 model: glam::Mat4::IDENTITY,

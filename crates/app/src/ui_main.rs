@@ -343,7 +343,7 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 type Item = (Icon, &'static str, &'static str, Cmd);
-                let groups: [(&str, Vec<Item>); 6] = [
+                let groups: [(&str, Vec<Item>); 7] = [
                     (
                         "CREATE",
                         vec![
@@ -416,6 +416,29 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                                 "Mirror",
                                 "Mirror features (M)",
                                 Cmd::Dialog(DialogKind::Mirror),
+                            ),
+                        ],
+                    ),
+                    (
+                        "CONSTRUCT",
+                        vec![
+                            (
+                                Icon::Plane,
+                                "Plane ▾",
+                                "Construction planes: offset, at angle, midplane…",
+                                Cmd::Menu(crate::datum_ui::Group::Plane),
+                            ),
+                            (
+                                Icon::Axis,
+                                "Axis ▾",
+                                "Construction axes: through a cylinder, an edge, two points…",
+                                Cmd::Menu(crate::datum_ui::Group::Axis),
+                            ),
+                            (
+                                Icon::Point,
+                                "Point ▾",
+                                "Construction points: at a vertex, circle center, intersections…",
+                                Cmd::Menu(crate::datum_ui::Group::Point),
                             ),
                         ],
                     ),
@@ -544,8 +567,11 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                     child.spacing_mut().item_spacing = vec2(2.0, 0.0);
                     child.add_space(8.0);
                     for (ic, label, tip, cmd) in items {
-                        if widgets::tool_button(&mut child, ic, label, tip, false).clicked() {
-                            run(app, cmd);
+                        let r = widgets::tool_button(&mut child, ic, label, tip, false);
+                        match cmd {
+                            Cmd::Menu(g) => construct_menu(app, &r, g),
+                            _ if r.clicked() => run(app, cmd),
+                            _ => {}
                         }
                     }
                     ui.painter().text(
@@ -571,6 +597,7 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
 enum Cmd {
     Sketch,
     Dialog(DialogKind),
+    Menu(crate::datum_ui::Group),
     Parts,
     Import,
     Export,
@@ -583,10 +610,29 @@ enum Cmd {
     Bom,
 }
 
+/// The Plane / Axis / Point dropdown of the CONSTRUCT group.
+fn construct_menu(app: &mut EasyCadApp, r: &egui::Response, g: crate::datum_ui::Group) {
+    use crate::datum_ui::{DatumKind, Group};
+    let kinds: &[DatumKind] = match g {
+        Group::Plane => &DatumKind::PLANES,
+        Group::Axis => &DatumKind::AXES,
+        Group::Point => &DatumKind::POINTS,
+    };
+    egui::Popup::menu(r).show(|ui| {
+        ui.set_min_width(230.0);
+        for k in kinds {
+            if ui.button(k.title()).clicked() {
+                app.open_dialog(DialogKind::Datum(*k));
+            }
+        }
+    });
+}
+
 fn run(app: &mut EasyCadApp, c: Cmd) {
     match c {
         Cmd::Sketch => app.open_sketch(None),
         Cmd::Dialog(k) => app.open_dialog(k),
+        Cmd::Menu(_) => {}
         Cmd::Parts => app.mode = Mode::Parts(Box::new(crate::ui_parts::PartsUi::new(&app.doc))),
         Cmd::Import => app.import_file(),
         Cmd::Export => app.export = Some(crate::dialogs::export::ExportDialog::new(&app.doc.data)),
@@ -684,6 +730,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         theme::prop(13.0),
         theme::TEXT_MUTED,
     );
+    crate::datum_ui::origin_rows(app, ui, &p);
 
     let Some(model) = app.model.clone() else {
         ui.add_space(8.0);
@@ -865,6 +912,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
     if let Some(s) = edit {
         app.open_sketch(Some(s));
     }
+    crate::datum_ui::construction_rows(app, ui, &p);
     let refs: Vec<_> = model
         .bodies
         .iter()
@@ -1138,6 +1186,9 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::ImportStep { .. } => ("IM", theme::GREEN),
         FeatureKind::InsertPart { .. } => ("PR", theme::GREEN),
         FeatureKind::ContextRef { .. } => ("CX", theme::GREEN),
+        FeatureKind::DatumPlane { .. } => ("PL", crate::datum_ui::AXIS_COLOR),
+        FeatureKind::DatumAxis { .. } => ("AX", crate::datum_ui::AXIS_COLOR),
+        FeatureKind::DatumPoint { .. } => ("PN", crate::datum_ui::AXIS_COLOR),
     }
 }
 

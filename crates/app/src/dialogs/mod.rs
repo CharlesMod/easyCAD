@@ -1,6 +1,7 @@
 //! Feature dialogs: they float over the viewport (top-right), preview live through
 //! the worker, bind every dimension to an expression, Enter = OK, Esc = cancel.
 
+pub mod datum;
 pub mod export;
 pub mod fillet;
 pub mod joint;
@@ -51,6 +52,8 @@ pub enum DialogKind {
     Rib,
     Standoffs,
     Joint,
+    /// Construction plane / axis / point.
+    Datum(crate::datum_ui::DatumKind),
 }
 
 impl DialogKind {
@@ -69,6 +72,7 @@ impl DialogKind {
             DialogKind::Rib => "Rib",
             DialogKind::Standoffs => "Standoffs from PCB",
             DialogKind::Joint => "Parting joint",
+            DialogKind::Datum(k) => k.title(),
         }
     }
     /// Title-bar accent: modify = orange, enclosure = green, create = blue.
@@ -82,6 +86,7 @@ impl DialogKind {
             DialogKind::Boss | DialogKind::Rib | DialogKind::Standoffs | DialogKind::Joint => {
                 theme::GREEN
             }
+            DialogKind::Datum(_) => theme::hex(0xe6c85a),
             _ => theme::ACCENT_LINK,
         }
     }
@@ -278,6 +283,7 @@ pub enum Body {
     Mirror(MirrorD),
     Standoffs(standoffs::StandoffsD),
     Joint(joint::JointD),
+    Datum(datum::DatumD),
 }
 
 pub struct Dialog {
@@ -521,12 +527,26 @@ impl Dialog {
             }),
             DialogKind::Standoffs => Body::Standoffs(standoffs::StandoffsD::new(d, model)?),
             DialogKind::Joint => Body::Joint(joint::JointD::new(d, model)),
+            DialogKind::Datum(k) => {
+                let mut dd = datum::DatumD::new(k);
+                if let Some(m) = model {
+                    let acc = crate::datum_ui::Accept::PLANE
+                        .or(crate::datum_ui::Accept::LINE)
+                        .or(crate::datum_ui::Accept::CYLF)
+                        .or(crate::datum_ui::Accept::CIRCLE);
+                    dd.prefill(sel.iter().filter_map(|k| crate::datum_ui::from_key(m, k, acc)).collect());
+                }
+                Body::Datum(dd)
+            }
         };
         let as_components = matches!(kind, DialogKind::Split | DialogKind::Joint).then_some(false);
         let mut dlg = Dialog {
             kind,
             editing: None,
-            name: kind.title().into(),
+            name: match kind {
+                DialogKind::Datum(k) => datum::default_name(k, cx),
+                _ => kind.title().into(),
+            },
             body,
             error: None,
             as_components,
@@ -730,6 +750,10 @@ impl Dialog {
                 DialogKind::Joint,
                 Body::Joint(joint::JointD::from_feature(f, d)?),
             ),
+            FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => {
+                let dd = datum::DatumD::from_feature(f, d)?;
+                (DialogKind::Datum(dd.kind), Body::Datum(dd))
+            }
             _ => return None,
         };
         Some(Dialog {
@@ -931,6 +955,14 @@ impl Dialog {
             }
             Body::Standoffs(s) => s.build(cx, self.editing, &self.name),
             Body::Joint(j) => j.build(cx, self.editing, &self.name),
+            Body::Datum(dd) => {
+                for (i, f) in dd.fields.iter().enumerate() {
+                    if f.text.trim().is_empty() || num(f).is_err() {
+                        return Err(format!("{}: enter a number or expression", dd.kind.fields()[i].label));
+                    }
+                }
+                Ok(vec![dd.build(id0, &self.name)?])
+            }
         }
     }
 
@@ -1279,6 +1311,7 @@ impl Dialog {
             }
             Body::Standoffs(s) => ch |= s.ui(ui, id, cx),
             Body::Joint(j) => ch |= j.ui(ui, id, cx),
+            Body::Datum(dd) => ch |= dd.ui(ui, id, cx),
         }
         (ch, ev)
     }
