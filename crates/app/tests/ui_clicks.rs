@@ -1225,3 +1225,177 @@ fn offset_plane_arrow_steps_in_the_construct_tool() {
     press_enter(&mut h);
     assert_eq!(datum_kinds(&h).len(), 1);
 }
+
+// ------------------------------------------------------------ history: select / delete
+
+mod hist {
+    use super::*;
+    use easycad_app::hist_sel::HistItem;
+    use easycad_model::feature::{BoolOp, FeatureId, FeatureKind, ProfileSel, SketchId};
+    use easycad_model::sketch::Sketch;
+
+    fn two_blocks() -> (easycad_model::document::Document, SketchId, FeatureId, FeatureId) {
+        let mut doc = easycad_model::document::Document::new("hist");
+        let mut s = Sketch::new("S1", easycad_model::geom::Plane::XY);
+        s.rect(glam::DVec2::new(-30.0, -20.0), glam::DVec2::new(30.0, 20.0));
+        let sid = doc.add_sketch(s);
+        let k = |sk, op, target| FeatureKind::Extrude { sketch: sk, profiles: ProfileSel::All, distance: 20.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op, target };
+        let a = doc.add_feature("Block", k(sid, BoolOp::NewBody, None));
+        let mut s2 = Sketch::new("S2", easycad_model::geom::Plane::XY);
+        s2.rect(glam::DVec2::new(100.0, 100.0), glam::DVec2::new(120.0, 120.0));
+        let sid2 = doc.add_sketch(s2);
+        let b = doc.add_feature("Block2", k(sid2, BoolOp::NewBody, None));
+        (doc, sid, a, b)
+    }
+
+    fn chip(h: &Harness<'static, EasyCadApp>, it: HistItem) -> egui::Rect {
+        h.state().hist_rects.iter().find(|(i, _)| *i == it).map(|(_, r)| *r).expect("chip drawn")
+    }
+
+    fn click_chip(h: &mut Harness<'static, EasyCadApp>, it: HistItem) {
+        let p = chip(h, it).center();
+        click_at(h, p, egui::PointerButton::Primary);
+    }
+
+    fn nfeat(h: &Harness<'static, EasyCadApp>) -> usize {
+        h.state().doc.data.features.len()
+    }
+
+    #[test]
+    fn click_then_delete_and_backspace_remove_a_feature_and_undo_restores() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let mut h = harness(doc);
+        click_chip(&mut h, HistItem::Feature(b));
+        assert_eq!(h.state().hist_sel, vec![HistItem::Feature(b)]);
+        assert_eq!(h.state().rollback(), None, "a click selects; it no longer rolls back");
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 1);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 2, "Ctrl+Z restores");
+        click_chip(&mut h, HistItem::Feature(a));
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(3);
+        assert!(h.state().doc.data.features.iter().all(|f| f.id != a), "Backspace deletes too");
+    }
+
+    #[test]
+    fn multi_select_deletes_as_one_undo_step() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let mut h = harness(doc);
+        click_chip(&mut h, HistItem::Feature(a));
+        let p = chip(&h, HistItem::Feature(b)).center();
+        h.hover_at(p);
+        h.step();
+        for pressed in [true, false] {
+            h.event_modifiers(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::COMMAND }, egui::Modifiers::COMMAND);
+            h.step();
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().hist_sel.len(), 2);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 0);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 2, "one Ctrl+Z restores both");
+    }
+
+    #[test]
+    fn deleting_a_sketch_with_a_consumer_asks_first() {
+        let _g = serial();
+        let (doc, s, a, _b) = two_blocks();
+        let mut h = harness(doc);
+        click_chip(&mut h, HistItem::Sketch(s));
+        assert_eq!(h.state().hist_sel, vec![HistItem::Sketch(s)]);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert!(h.state().delete_ask.is_some(), "popup");
+        assert_eq!(nfeat(&h), 2);
+        h.get_by_label("Delete all").click();
+        h.run_steps(3);
+        assert!(h.state().doc.data.features.iter().all(|f| f.id != a));
+        assert!(h.state().doc.data.sketch(s).is_none());
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 2);
+        // only this: the extrude stays and reports a problem
+        h.state_mut().hist_sel = vec![HistItem::Sketch(s)];
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        h.get_by_label("Delete only this").click();
+        h.run_steps(3);
+        settle(&mut h);
+        assert_eq!(nfeat(&h), 2);
+        assert!(h.state().doc.data.sketch(s).is_none());
+        assert!(!h.state().model.as_ref().unwrap().result.errors().is_empty(), "the extrude reports a problem");
+    }
+
+    #[test]
+    fn text_focus_does_not_delete() {
+        let _g = serial();
+        let (doc, _s, _a, b) = two_blocks();
+        let mut h = harness(doc);
+        click_chip(&mut h, HistItem::Feature(b));
+        h.state_mut().params.adding = Some(("zz".into(), "1".into()));
+        h.run_steps(3);
+        h.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("a text field").click();
+        h.run_steps(3);
+        assert!(h.ctx.text_edit_focused());
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(3);
+        assert_eq!(nfeat(&h), 2, "Backspace in a text field edits text, not history");
+    }
+
+    #[test]
+    fn head_chip_and_rollback_marker() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let mut h = harness(doc);
+        assert_eq!(h.state().head_feature(), Some(b), "head is the last feature when not rolled back");
+        h.state_mut().set_rollback(Some(1));
+        h.run_steps(3);
+        assert_eq!(h.state().head_feature(), Some(a));
+        // chip menu: roll back to here on the last chip rolls forward again
+        h.state_mut().set_rollback(None);
+        h.run_steps(3);
+        let r = chip(&h, HistItem::Feature(a));
+        click_at(&mut h, r.center(), egui::PointerButton::Secondary);
+        h.get_by_label("Roll back to here").click();
+        h.run_steps(3);
+        assert_eq!(h.state().rollback(), Some(1));
+        assert_eq!(h.state().head_feature(), Some(a));
+    }
+
+    #[test]
+    fn sketch_chip_double_click_opens_the_sketch() {
+        let _g = serial();
+        let (doc, s, _a, _b) = two_blocks();
+        let mut h = harness(doc);
+        let p = chip(&h, HistItem::Sketch(s)).center();
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        h.run_steps(3);
+        assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    }
+
+    #[test]
+    fn sketch_lines_in_3d_select_and_double_click_opens() {
+        let _g = serial();
+        let mut doc = easycad_model::document::Document::new("lines");
+        let mut s = Sketch::new("Loose", easycad_model::geom::Plane::XY);
+        s.rect(glam::DVec2::new(-30.0, -20.0), glam::DVec2::new(30.0, 20.0));
+        let sid = doc.add_sketch(s);
+        let mut h = harness(doc);
+        top_view(&mut h);
+        let p = screen_of(&h, glam::Vec3::new(0.0, 20.0, 0.0));
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        assert_eq!(h.state().hist_sel, vec![HistItem::Sketch(sid)]);
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        h.run_steps(3);
+        assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    }
+}

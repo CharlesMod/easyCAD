@@ -8,6 +8,7 @@ use egui::{vec2, Color32, CornerRadius, Frame, Margin, RichText, Sense, Stroke, 
 use crate::app::{EasyCadApp, Mode};
 use crate::dialogs::DialogKind;
 use crate::pickstack::{PickKey, PickKind};
+use crate::hist_sel::HistItem;
 use crate::theme;
 use crate::widgets::{self, Icon};
 
@@ -852,8 +853,9 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         .collect();
     let mut edit = None;
     let mut toggle = None;
+    let mut del_sketch = None;
     for (sid, name, dxf, vis) in sketches {
-        let (r, resp) = row(ui, 40.0, 28.0, false);
+        let (r, resp) = row(ui, 40.0, 28.0, app.is_hist_selected(HistItem::Sketch(sid)));
         let eye = egui::Rect::from_center_size(egui::pos2(r.right() - 26.0, r.center().y), vec2(28.0, 28.0));
         let er = ui.interact(eye, ui.scope_id().with(("sketch_eye", sid.0)), Sense::click());
         if er.hovered() {
@@ -888,13 +890,21 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
                 theme::TEXT_LABEL,
             );
         }
-        let resp = resp.on_hover_text("Double-click to edit");
+        let resp = resp.on_hover_text("Click to select (Del deletes) · double-click to edit");
         if resp.double_clicked() && toggle.is_none() {
             edit = Some(sid);
+        } else if resp.clicked() {
+            let m = ui.input(|i| i.modifiers);
+            app.hist_click(HistItem::Sketch(sid), m.ctrl || m.command || m.shift);
         }
         resp.context_menu(|ui| {
             if ui.button("Edit sketch").clicked() {
                 edit = Some(sid);
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                del_sketch = Some(sid);
+                ui.close();
             }
             if ui.button(if vis { "Hide sketch" } else { "Show sketch" }).clicked() {
                 toggle = Some((sid, !vis));
@@ -914,6 +924,9 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
     }
     if let Some((sid, v)) = toggle {
         crate::sketch_view::set_visible(app, sid, v);
+    }
+    if let Some(s) = del_sketch {
+        app.hist_delete_request(vec![HistItem::Sketch(s)]);
     }
     if let Some(s) = edit {
         app.open_sketch(Some(s));
@@ -1277,7 +1290,13 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 let mut shown_sketches = std::collections::HashSet::new();
                 let n = feats.len();
                 let marker = app.rollback().unwrap_or(n);
-                let mut click: Option<usize> = None;
+                let mut click: Option<(HistItem, bool)> = None;
+                app.hist_rects.clear();
+                let mut roll_to: Option<usize> = None;
+                let mut del_one: Option<HistItem> = None;
+                let mut bounds: Vec<f32> = Vec::new();
+                let mut strip_rect = egui::Rect::NOTHING;
+                let bg = ui.interact(ui.max_rect(), egui::Id::NULL.with("history_bg"), Sense::click());
                 let mut dbl: Option<FeatureId> = None;
                 let mut sketch_edit = None;
                 let mut accept: Option<FeatureId> = None;
@@ -1288,6 +1307,8 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                     .max_width(ui.available_width() - 210.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            let mods = ui.input(|i| i.modifiers);
+                            let add = mods.ctrl || mods.command || mods.shift;
                             for (i, (id, label, kind)) in feats.iter().enumerate() {
                                 let sk = match kind {
                                     FeatureKind::Extrude { sketch, .. }
@@ -1309,13 +1330,28 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                             &name,
                                             i < marker,
                                             false,
+                                            app.is_hist_selected(HistItem::Sketch(s)),
                                             None,
                                         );
-                                        if r.on_hover_text("Double-click to edit the sketch")
-                                            .double_clicked()
-                                        {
+                                        app.hist_rects.push((HistItem::Sketch(s), r.rect));
+                                        let r = r.on_hover_text(
+                                            "Click to select (Del deletes) · double-click to edit the sketch",
+                                        );
+                                        if r.double_clicked() {
                                             sketch_edit = Some(s);
+                                        } else if r.clicked() {
+                                            click = Some((HistItem::Sketch(s), add));
                                         }
+                                        r.context_menu(|ui| {
+                                            if ui.button("Edit sketch").clicked() {
+                                                sketch_edit = Some(s);
+                                                ui.close();
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                del_one = Some(HistItem::Sketch(s));
+                                                ui.close();
+                                            }
+                                        });
                                     }
                                 }
                                 let (code, col) = feature_code(kind);
@@ -1342,16 +1378,17 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                     col,
                                     label,
                                     i < marker,
-                                    i + 1 == marker && app.rollback().is_some(),
+                                    i + 1 == marker,
+                                    app.is_hist_selected(HistItem::Feature(*id)),
                                     warn.as_ref().map(|w| w.0),
                                 );
                                 let tip = match &warn {
                                     Some((_, t)) => format!(
-                                        "{}\n{t}\nClick to roll back here · double-click to edit",
+                                        "{}\n{t}\nClick to select · double-click to edit",
                                         kind.label()
                                     ),
                                     None => format!(
-                                        "{} · click to roll back here · double-click to edit",
+                                        "{} · click to select (Del deletes) · double-click to edit",
                                         kind.label()
                                     ),
                                 };
@@ -1368,18 +1405,40 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                 if r.double_clicked() {
                                     dbl = Some(*id);
                                 } else if r.clicked() {
-                                    click = Some(i);
+                                    click = Some((HistItem::Feature(*id), add));
                                 }
-                                if matches!(status, Some(FeatureStatus::Unresolved(_))) {
-                                    r.context_menu(|ui| {
+                bounds.push(r.rect.right() + 3.0);
+                                app.hist_rects.push((HistItem::Feature(*id), r.rect));
+                                strip_rect = strip_rect.union(r.rect);
+                                let unresolved = matches!(status, Some(FeatureStatus::Unresolved(_)));
+                                r.context_menu(|ui| {
+                                    if unresolved {
                                         if ui.button("Accept the closest candidate").clicked() {
                                             accept = Some(*id);
+                                            ui.close();
                                         }
                                         if ui.button("Re-pick…").clicked() {
                                             dbl = Some(*id);
+                                            ui.close();
                                         }
-                                    });
-                                }
+                                        ui.separator();
+                                    }
+                                    if ui.button("Roll back to here").clicked() {
+                                        roll_to = Some(i);
+                                        ui.close();
+                                    }
+                                    if ui.button("Edit").clicked() {
+                                        dbl = Some(*id);
+                                        ui.close();
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        del_one = Some(HistItem::Feature(*id));
+                                        ui.close();
+                                    }
+                                });
+                            }
+                            if let Some(k) = rollback_handle(ui, &bounds, strip_rect, marker) {
+                                roll_to = Some(k - 1);
                             }
                             // a feature was added (or the file changed): show the
                             // newest chip instead of leaving it off to the right
@@ -1393,9 +1452,24 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                             }
                         });
                     });
-                if let Some(i) = click {
+                if let Some((it, add)) = click {
+                    // a selected item that is also the target of a context-menu delete
+                    // keeps the selection; right-click on an unselected chip selects it
+                    app.hist_click(it, add);
+                } else if bg.clicked() {
+                    app.hist_sel.clear();
+                }
+                if let Some(i) = roll_to {
                     app.set_rollback(if i + 1 >= n { None } else { Some(i + 1) });
                 }
+                if let Some(it) = del_one {
+                    if app.is_hist_selected(it) && app.hist_sel.len() > 1 {
+                        app.hist_delete_selected();
+                    } else {
+                        app.hist_delete_request(vec![it]);
+                    }
+                }
+                crate::hist_sel::confirm_ui(app, ui.ctx());
                 if let Some(id) = dbl {
                     app.edit_feature(id);
                 }
@@ -1414,7 +1488,7 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new("Click to roll back · double-click to edit")
+                        RichText::new("Click to select · Del deletes · drag the yellow marker to roll back")
                             .size(11.0)
                             .color(theme::TEXT_MUTED),
                     );
@@ -1443,13 +1517,54 @@ pub fn history_hint(app: &EasyCadApp) -> Option<String> {
     })
 }
 
+/// The draggable rollback marker: a yellow bar after the last live chip. `bounds[k-1]`
+/// is the x of the gap after feature k. Returns the new marker position (1..=n) on release.
+fn rollback_handle(ui: &mut Ui, bounds: &[f32], strip: egui::Rect, marker: usize) -> Option<usize> {
+    if bounds.is_empty() {
+        return None;
+    }
+    let id = egui::Id::NULL.with("history_rollback_handle");
+    let cur = marker.clamp(1, bounds.len());
+    let (top, bot) = (strip.top(), strip.bottom());
+    let rect = egui::Rect::from_min_max(egui::pos2(bounds[cur - 1] - 4.0, top), egui::pos2(bounds[cur - 1] + 4.0, bot));
+    let r = ui.interact(rect, id, Sense::drag()).on_hover_text("Drag to roll the model back to a step");
+    let mut show = cur;
+    let mut done = None;
+    if r.dragged() || r.drag_stopped() {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            let mut best = (f32::MAX, cur);
+            for (k, x) in bounds.iter().enumerate() {
+                let d = (x - p.x).abs();
+                if d < best.0 {
+                    best = (d, k + 1);
+                }
+            }
+            show = best.1;
+        }
+        if r.drag_stopped() {
+            done = Some(show);
+        }
+    }
+    let x = bounds[show - 1];
+    let col = if r.hovered() || r.dragged() { theme::HEAD } else { theme::HEAD.gamma_multiply(0.8) };
+    ui.painter().line_segment([egui::pos2(x, top - 2.0), egui::pos2(x, bot + 2.0)], Stroke::new(3.0, col));
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![egui::pos2(x - 5.0, top - 4.0), egui::pos2(x + 5.0, top - 4.0), egui::pos2(x, top + 3.0)],
+        col,
+        Stroke::NONE,
+    ));
+    done.filter(|k| *k != cur)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn history_chip(
     ui: &mut Ui,
     code: &str,
     code_col: Color32,
     label: &str,
     active: bool,
-    marker: bool,
+    head: bool,
+    selected: bool,
     warn: Option<Color32>,
 ) -> egui::Response {
     let font = theme::prop(12.0);
@@ -1465,14 +1580,20 @@ fn history_chip(
         .size()
         .x;
     let (rect, resp) = ui.allocate_exact_size(vec2(lw + cw + 26.0, 32.0), Sense::click());
-    let border = if marker {
+    let border = if selected {
         theme::ACCENT
+    } else if head {
+        theme::HEAD
     } else if let Some(w) = warn {
         w
     } else {
         theme::hex(0x33373e)
     };
-    let fill = if resp.hovered() {
+    let fill = if selected {
+        theme::ACCENT_BG
+    } else if head {
+        theme::HEAD_BG
+    } else if resp.hovered() {
         theme::HOVER
     } else {
         theme::CARD
@@ -1482,7 +1603,7 @@ fn history_chip(
         rect,
         CornerRadius::same(16),
         fill.gamma_multiply(op.max(0.6)),
-        Stroke::new(1.0, border.gamma_multiply(op)),
+        Stroke::new(if head || selected { 2.0 } else { 1.0 }, border.gamma_multiply(op)),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(

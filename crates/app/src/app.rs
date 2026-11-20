@@ -119,6 +119,12 @@ pub struct EasyCadApp {
     pub pending_cycle: i32,
     /// A text field had keyboard focus this frame.
     pub typing: bool,
+    /// Where the history strip drew each chip last frame (for tests and hit-testing).
+    pub hist_rects: Vec<(crate::hist_sel::HistItem, egui::Rect)>,
+    /// History chips selected by click (Del deletes them).
+    pub hist_sel: Vec<crate::hist_sel::HistItem>,
+    /// A delete waiting on the "dependents" confirm.
+    pub delete_ask: Option<crate::hist_sel::DeleteAsk>,
     /// The body whose face a new sketch was placed on, and once committed the
     /// sketch's id: the default target of an Extrude / Revolve on that sketch.
     /// Waiting for the click that names the plane of a new sketch.
@@ -242,6 +248,9 @@ impl EasyCadApp {
             state_dump: crate::e2e_state::StateDump::from_env(),
             pending_cycle: 0,
             typing: false,
+            hist_sel: Vec::new(),
+            hist_rects: Vec::new(),
+            delete_ask: None,
             plane_pick: None,
             origin_vis: [false; 7],
             datum_hover: None,
@@ -287,6 +296,13 @@ impl EasyCadApp {
         } else {
             self.doc.data.component(c).and_then(|c| c.rollback)
         }
+    }
+
+    /// The last live feature: the chip drawn yellow as the history's head.
+    pub fn head_feature(&self) -> Option<easycad_model::feature::FeatureId> {
+        let f = &self.view().features;
+        let n = self.rollback().unwrap_or(f.len()).min(f.len());
+        n.checked_sub(1).and_then(|i| f.get(i)).map(|f| f.id)
     }
 
     /// Move the rollback marker of the component being edited (undoable, saved).
@@ -1344,6 +1360,17 @@ impl EasyCadApp {
             if pressed(Key::F) {
                 self.fit_all();
             }
+            return;
+        }
+        if self.delete_ask.is_some() {
+            return; // the confirm popup owns the keyboard
+        }
+        if !self.hist_sel.is_empty() && (pressed(Key::Delete) || pressed(Key::Backspace)) {
+            self.hist_delete_selected();
+            return;
+        }
+        if !self.hist_sel.is_empty() && pressed(Key::Escape) {
+            self.hist_sel.clear();
             return;
         }
         if pressed(Key::Escape) {

@@ -54,6 +54,9 @@ pub const GREEN: Color32 = hex(0x6fd29a);
 pub const GREEN_REF: Color32 = hex(0x3a9a5c);
 pub const RED: Color32 = hex(0xe5534b);
 pub const PURPLE: Color32 = hex(0xb48cff);
+/// The active head of the history (the last live step).
+pub const HEAD: Color32 = hex(0xf5c518);
+pub const HEAD_BG: Color32 = hex(0x4a3f12);
 pub const SILK: Color32 = hex(0xd6c36a);
 
 /// Body display colour (light grey like the mock's top faces).

@@ -227,6 +227,27 @@ pub fn draw_list(app: &EasyCadApp) -> Vec<(SketchId, Arc<Mesh>)> {
         .collect()
 }
 
+/// The visible sketch whose lines pass within `tol` points of `p` (viewport-local points).
+pub fn pick(app: &EasyCadApp, p: glam::Vec2, size: glam::Vec2, tol: f32) -> Option<SketchId> {
+    let mut best: Option<(f32, SketchId)> = None;
+    for (id, mesh) in draw_list(app) {
+        for e in &mesh.edges {
+            let pts: Vec<Option<glam::Vec2>> =
+                e.points.iter().map(|q| app.camera.project(glam::Vec3::from(*q), size)).collect();
+            for w in pts.windows(2) {
+                let (Some(a), Some(b)) = (w[0], w[1]) else { continue };
+                let ab = b - a;
+                let t = if ab.length_squared() < 1e-9 { 0.0 } else { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) };
+                let d = (a + ab * t).distance(p);
+                if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, id));
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// Show or hide a sketch in the 3D view (an undoable edit; the choice sticks).
 pub fn set_visible(app: &mut EasyCadApp, id: SketchId, visible: bool) {
     let scope = app.scope();

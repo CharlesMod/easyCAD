@@ -1162,6 +1162,6 @@ pub fn construction_rows(app: &mut EasyCadApp, ui: &mut egui::Ui, p: &egui::Pain
         app.edit_feature(f);
     }
     if let Some(f) = del {
-        delete(app, f);
+        app.hist_delete_request(vec![crate::hist_sel::HistItem::Feature(f)]);
     }
 }

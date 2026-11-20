@@ -329,9 +329,37 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     let gizmo_owns = crate::drag_arrow::arrow(app, ui, rect, &resp) || gizmo_owns;
 
     // ------------------------------------------------ click selection
-    if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {
-        let cur = app.stack.current().map(|c| c.key);
-        select(app, cur, mods.command || mods.shift);
+    let free = !gizmo_owns && !picking && app.dialog.is_none() && matches!(app.mode, crate::app::Mode::Model);
+    let sketch_under = |app: &EasyCadApp, p: egui::Pos2| {
+        let l = p - rect.min;
+        crate::sketch_view::pick(app, Vec2::new(l.x, l.y), size, 6.0)
+    };
+    let ctx_key = egui::Id::NULL.with("viewport_ctx_sketch");
+    if free && resp.secondary_clicked() {
+        let hit = resp.interact_pointer_pos().and_then(|p| sketch_under(app, p));
+        ui.data_mut(|d| d.insert_temp(ctx_key, hit));
+        if let Some(s) = hit {
+            app.hist_sel = vec![crate::hist_sel::HistItem::Sketch(s)];
+        }
+    }
+    let mut opened = false;
+    if free && resp.double_clicked_by(egui::PointerButton::Primary) {
+        if let Some(s) = resp.interact_pointer_pos().and_then(|p| sketch_under(app, p)) {
+            opened = true;
+            app.open_sketch(Some(s));
+        }
+    }
+    if !opened && resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {
+        let hit = if free { resp.interact_pointer_pos().and_then(|p| sketch_under(app, p)) } else { None };
+        if let Some(s) = hit {
+            app.hist_click(crate::hist_sel::HistItem::Sketch(s), mods.command || mods.shift);
+        } else {
+            let cur = app.stack.current().map(|c| c.key);
+            select(app, cur, mods.command || mods.shift);
+            if !(mods.command || mods.shift) {
+                app.hist_sel.clear();
+            }
+        }
     }
 
     crate::plane_pick::paint_labels(app, &painter, rect);
@@ -769,9 +797,13 @@ fn build_frame(
         highlights,
         sketches: crate::sketch_view::draw_list(app)
             .into_iter()
-            .map(|(_, mesh)| DrawBody {
+            .map(|(id, mesh)| DrawBody {
                 mesh,
-                color: crate::sketch_view::LINE,
+                color: if app.is_hist_selected(crate::hist_sel::HistItem::Sketch(id)) {
+                    [1.0, 0.78, 0.1, 1.0]
+                } else {
+                    crate::sketch_view::LINE
+                },
                 translucent: false,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
@@ -1407,6 +1439,18 @@ fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
 }
 
 fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
+    let hit: Option<easycad_model::feature::SketchId> = ui.data(|d| d.get_temp(egui::Id::NULL.with("viewport_ctx_sketch"))).flatten();
+    if let Some(s) = hit {
+        if ui.button("Edit sketch").clicked() {
+            app.open_sketch(Some(s));
+            ui.close();
+        }
+        if ui.button("Delete").clicked() {
+            app.hist_delete_request(vec![crate::hist_sel::HistItem::Sketch(s)]);
+            ui.close();
+        }
+        return;
+    }
     let sel = app.selection.clone();
     if sel.is_empty() {
         if ui.button("Fit all").clicked() {

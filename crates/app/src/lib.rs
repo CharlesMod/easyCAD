@@ -16,6 +16,7 @@ pub mod scope;
 pub mod settings;
 pub mod construct;
 pub mod datum_ui;
+pub mod hist_sel;
 pub mod drag_arrow;
 pub mod plane_pick;
 pub mod sketch_mode;
