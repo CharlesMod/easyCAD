@@ -1399,3 +1399,45 @@ mod hist {
         assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
     }
 }
+
+#[test]
+fn m_key_opens_move_gizmo_esc_restores_and_ctrl_z_undoes() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Sel;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    let e = if let Mode::Sketch(sk) = &mut h.state_mut().mode {
+        let e = sk.add_line((glam::DVec2::ZERO, None), (glam::DVec2::new(5.0, 0.0), None));
+        sk.selection = vec![Sel::Entity(e)];
+        e
+    } else {
+        panic!()
+    };
+    h.run_steps(2);
+    let start = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => {
+            let easycad_model::sketch::Geom::Line { a, .. } = s.sketch.entities[e.0 as usize].geom else { panic!() };
+            (s.mv.is_some(), s.sketch.point(a))
+        }
+        _ => panic!(),
+    };
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::M);
+    assert!(start(&h).0, "M opens the gizmo");
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.apply_move_text("4", "2");
+    }
+    assert_eq!(start(&h).1, glam::DVec2::new(4.0, 2.0));
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::Escape);
+    assert_eq!(start(&h), (false, glam::DVec2::ZERO), "Esc restores");
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::M);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.apply_move_text("4", "2");
+        s.commit_move();
+    }
+    assert_eq!(start(&h).1, glam::DVec2::new(4.0, 2.0));
+    chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(start(&h).1, glam::DVec2::ZERO, "Ctrl+Z undoes the move");
+}
