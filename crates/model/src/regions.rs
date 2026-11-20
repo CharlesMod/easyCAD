@@ -54,6 +54,36 @@ pub fn region_at(regions: &[Region], p: DVec2) -> Option<usize> {
     regions.iter().position(|r| r.contains(p))
 }
 
+/// Indices of the regions a `ProfileSel` picks (`All` = the filled ones).
+pub fn selected_regions(sel: &crate::feature::ProfileSel, sk: &crate::sketch::Sketch, regions: &[Region]) -> Vec<usize> {
+    use crate::feature::ProfileSel;
+    let mut v: Vec<usize> = match sel {
+        ProfileSel::All => (0..regions.len()).filter(|&i| regions[i].filled).collect(),
+        ProfileSel::Containing(pts) => pts.iter().filter_map(|p| region_at(regions, *p)).collect(),
+        ProfileSel::Indices(ix) => {
+            let profs = sk.profiles().profiles;
+            (0..regions.len())
+                .filter(|&i| {
+                    regions[i].filled
+                        && ix.iter().any(|&k| {
+                            profs.get(k).is_some_and(|p| {
+                                point_in_polygon(regions[i].sample, &fine(&p.outer)) && !p.holes.iter().any(|h| point_in_polygon(regions[i].sample, &fine(h)))
+                            })
+                        })
+                })
+                .collect()
+        }
+    };
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The selection that picks exactly these regions (by interior point).
+pub fn selection_of(regions: &[Region], idx: &[usize]) -> crate::feature::ProfileSel {
+    crate::feature::ProfileSel::Containing(idx.iter().filter_map(|&i| regions.get(i)).map(|r| r.sample).collect())
+}
+
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]

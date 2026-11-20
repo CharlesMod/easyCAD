@@ -71,6 +71,12 @@ becomes the master. Halves are named after their bodies ("Base (in context)" los
 its suffix; a name already used gets " (lower)" / " (upper)"). Root imports (the
 sample's reference PCB) move into the master and are hidden with it.
 
+## Region picking (Extrude, Revolve)
+
+A sketch's closed shapes are split into **regions**: every curve is cut at all crossings and T-junctions, and each bounded face of the result is one region (`Sketch::regions()`, `crates/model/src/regions.rs`). A ring crossed by radial lines gives one region per sector plus the inner disc; overlapping circles give three; a line that pokes out past a circle, or stops short inside, bounds nothing and is ignored there. Coincident curves (the same circle twice, an arc over a circle) are merged.
+
+While an Extrude or Revolve dialog is open, hovering the dialog's sketch in the 3D view tints the region under the pointer, and a click toggles that region in or out of the selection (`region_pick.rs`). Selected regions are filled in the accent colour and the preview follows. The dialog shows "N regions selected (of M)" with **All** and **Clear**. A new dialog starts as `All` (the old even/odd fill of closed loops, so existing documents regenerate identically); clicking a region while `All` is active starts from everything selected and removes that one, so cutting "2/3 of a ring" is: click the sectors to keep. The disc inside a ring is a region too but is not part of `All`; click it to add it. After the first click the choice is stored as `ProfileSel::Containing` with one interior point per region, so edits that move geometry slightly keep the selection; picked regions are fused into one solid without seams. Editing an extrude from the history shows and changes its picked regions. Fills (3D view and sketch mode) draw holes correctly.
+
 ## Drag arrow (Extrude distance, offset planes)
 
 While an Extrude dialog (new or edit), or the Construct tool / datum dialog with an offset plane, is open, an accent-coloured arrow (`drag_arrow.rs`) is drawn over the 3D view. Extrude: at the profile's bounding-box centre on the sketch plane, offset by the current distance along the extrude direction (Flip-aware; a symmetric extrude marks the far face, so the arrow moves half as far as the value). Offset plane: on the preview plane at the picked point, along the offset direction (Flip-aware). Hover highlights it and shows a grab cursor.

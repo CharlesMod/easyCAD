@@ -2812,21 +2812,16 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
         p.add(egui::Shape::line(pts, Stroke::new(1.4, theme::ORANGE_SOFT)));
     }
-    // profile fill
-    for pr in s.sketch.profiles().profiles {
-        let poly = easycad_model::sketch::polygonize(&pr.outer);
-        let pts: Vec<Pos2> = poly.iter().map(|q| to(*q)).collect();
-        if pts.len() > 2 {
+    // region fill (holes respected)
+    {
+        let col = Color32::from_rgba_unmultiplied(76, 155, 255, 18);
+        for rg in crate::region_pick::geoms_of(&s.sketch).iter().filter(|r| r.region.filled) {
             let mut mesh = egui::Mesh::default();
-            // fan from centroid (profiles are usually convex enough for a hint fill)
-            let c = pts.iter().fold(vec2(0.0, 0.0), |a, b| a + b.to_vec2()) / pts.len() as f32;
-            let col = Color32::from_rgba_unmultiplied(76, 155, 255, 18);
-            mesh.colored_vertex(c.to_pos2(), col);
-            for q in &pts {
-                mesh.colored_vertex(*q, col);
+            for q in &rg.pts {
+                mesh.colored_vertex(to(*q), col);
             }
-            for i in 0..pts.len() as u32 {
-                mesh.add_triangle(0, 1 + i, 1 + (i + 1) % pts.len() as u32);
+            for t in &rg.tris {
+                mesh.add_triangle(t[0] as u32, t[1] as u32, t[2] as u32);
             }
             p.add(mesh);
         }

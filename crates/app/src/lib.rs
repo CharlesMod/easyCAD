@@ -36,6 +36,7 @@ pub mod ui_main;
 pub mod ui_parts;
 pub mod ui_process;
 pub mod ui_settings;
+pub mod region_pick;
 pub mod ui_viewport;
 pub mod ui_welcome;
 pub mod units;

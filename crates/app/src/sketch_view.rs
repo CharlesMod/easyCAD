@@ -34,7 +34,7 @@ fn ccw_sweep(a0: f64, a1: f64) -> f64 {
 }
 
 /// Tessellated outline of one segment (2D).
-fn seg_points(s: &Segment2) -> Vec<DVec2> {
+pub(crate) fn seg_points(s: &Segment2) -> Vec<DVec2> {
     match *s {
         Segment2::Line { a, b } => vec![a, b],
         Segment2::Arc { center, start, end, ccw } => {
@@ -87,6 +87,119 @@ fn triangulate(poly: &[DVec2]) -> Vec<[usize; 3]> {
         }
         if !clipped {
             break;
+        }
+    }
+    if idx.len() == 3 {
+        out.push([idx[0], idx[1], idx[2]]);
+    }
+    out
+}
+
+fn loop_points(l: &easycad_model::geom::Loop2) -> Vec<DVec2> {
+    let mut poly = Vec::new();
+    for s in l {
+        let mut p = seg_points(s);
+        p.pop();
+        poly.extend(p);
+    }
+    poly
+}
+
+fn proper_cross(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> bool {
+    let o = |p: DVec2, q: DVec2, r: DVec2| (q - p).perp_dot(r - p);
+    let (d1, d2, d3, d4) = (o(a, b, c), o(a, b, d), o(c, d, a), o(c, d, b));
+    ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12))
+}
+
+/// Triangles of a region (outer minus holes): holes are bridged into the outer polygon,
+/// then ear-clipped. Returns the vertex list and index triples into it.
+pub fn triangulate_region(r: &easycad_model::regions::Region) -> (Vec<DVec2>, Vec<[usize; 3]>) {
+    let mut poly = loop_points(&r.outer);
+    if area(&poly) < 0.0 {
+        poly.reverse();
+    }
+    let mut holes: Vec<Vec<DVec2>> = r
+        .holes
+        .iter()
+        .map(|h| {
+            let mut p = loop_points(h);
+            if area(&p) > 0.0 {
+                p.reverse();
+            }
+            p
+        })
+        .filter(|h| h.len() >= 3)
+        .collect();
+    holes.sort_by(|a, b| {
+        let mx = |h: &Vec<DVec2>| h.iter().map(|p| p.x).fold(f64::MIN, f64::max);
+        mx(b).total_cmp(&mx(a))
+    });
+    for hi in 0..holes.len() {
+        let hole = holes[hi].clone();
+        let mi = (0..hole.len()).max_by(|&a, &b| hole[a].x.total_cmp(&hole[b].x)).unwrap();
+        let m = hole[mi];
+        // candidate bridge vertices, nearest first; must see M without crossing any edge
+        let mut order: Vec<usize> = (0..poly.len()).collect();
+        order.sort_by(|&a, &b| poly[a].distance_squared(m).total_cmp(&poly[b].distance_squared(m)));
+        let blocked = |v: DVec2, poly: &[DVec2]| {
+            let n = poly.len();
+            (0..n).any(|i| proper_cross(m, v, poly[i], poly[(i + 1) % n]))
+                || holes[hi..].iter().any(|h| (0..h.len()).any(|i| proper_cross(m, v, h[i], h[(i + 1) % h.len()])))
+        };
+        let Some(&vi) = order.iter().find(|&&k| !blocked(poly[k], &poly)) else { continue };
+        let mut merged: Vec<DVec2> = poly[..=vi].to_vec();
+        for k in 0..=hole.len() {
+            merged.push(hole[(mi + k) % hole.len()]);
+        }
+        merged.extend_from_slice(&poly[vi..]);
+        poly = merged;
+    }
+    let tris = clip_ears(&poly);
+    (poly, tris)
+}
+
+/// Ear clipping of a CCW polygon that may have coincident (bridge) vertices.
+fn clip_ears(poly: &[DVec2]) -> Vec<[usize; 3]> {
+    let mut idx: Vec<usize> = (0..poly.len()).collect();
+    let mut out = Vec::new();
+    let mut guard = 0;
+    while idx.len() > 3 && guard < 100_000 {
+        guard += 1;
+        let n = idx.len();
+        let mut done = false;
+        for i in 0..n {
+            let (a, b, c) = (idx[(i + n - 1) % n], idx[i], idx[(i + 1) % n]);
+            let (pa, pb, pc) = (poly[a], poly[b], poly[c]);
+            if (pb - pa).perp_dot(pc - pb) <= 1e-12 {
+                continue;
+            }
+            let same = |p: DVec2, q: DVec2| p.distance_squared(q) < 1e-18;
+            let inside = idx.iter().any(|&k| {
+                let p = poly[k];
+                if k == a || k == b || k == c || same(p, pa) || same(p, pb) || same(p, pc) {
+                    return false;
+                }
+                (pb - pa).perp_dot(p - pa) >= 0.0 && (pc - pb).perp_dot(p - pb) >= 0.0 && (pa - pc).perp_dot(p - pc) >= 0.0
+            });
+            if !inside {
+                out.push([a, b, c]);
+                idx.remove(i);
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            // drop a degenerate (zero-area) vertex, else give up
+            let n = idx.len();
+            match (0..n).find(|&i| {
+                let (a, b, c) = (idx[(i + n - 1) % n], idx[i], idx[(i + 1) % n]);
+                (poly[b] - poly[a]).perp_dot(poly[c] - poly[b]).abs() <= 1e-12
+            }) {
+                Some(i) => {
+                    idx.remove(i);
+                }
+                None => break,
+            }
         }
     }
     if idx.len() == 3 {
@@ -162,22 +275,14 @@ pub fn sketch_mesh(sk: &Sketch) -> Mesh {
         }
     }
     let n = pl.normal.as_vec3().to_array();
-    for prof in sk.profiles().profiles.iter().filter(|p| p.holes.is_empty()) {
-        let mut poly: Vec<DVec2> = Vec::new();
-        for s in &prof.outer {
-            let mut p = seg_points(s);
-            p.pop();
-            poly.extend(p);
-        }
-        if poly.len() < 3 {
-            continue;
-        }
+    for r in sk.regions().iter().filter(|r| r.filled) {
+        let (poly, tris) = triangulate_region(r);
         let base = m.positions.len() as u32;
         for p in &poly {
             m.positions.push(w(*p));
             m.normals.push(n);
         }
-        for t in triangulate(&poly) {
+        for t in tris {
             m.indices.push([base + t[0] as u32, base + t[1] as u32, base + t[2] as u32]);
             m.tri_face.push(0);
         }

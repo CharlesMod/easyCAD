@@ -221,6 +221,8 @@ impl Op {
 
 pub struct ExtrudeD {
     pub sketch: Option<SketchId>,
+    /// Which regions of the sketch to extrude (`All` until the user clicks a region).
+    pub profiles: ProfileSel,
     pub distance: Field,
     pub symmetric: bool,
     pub reverse: bool,
@@ -231,6 +233,7 @@ pub struct ExtrudeD {
 
 pub struct RevolveD {
     pub sketch: Option<SketchId>,
+    pub profiles: ProfileSel,
     pub axis: usize,
     pub angle: Field,
     pub op: Op,
@@ -427,6 +430,36 @@ pub fn fmt(v: f64) -> String {
     }
 }
 
+fn region_sel(p: &ProfileSel) -> Result<ProfileSel, String> {
+    match p {
+        ProfileSel::Containing(v) if v.is_empty() => Err("pick at least one region (click regions of the sketch, or press All)".into()),
+        p => Ok(p.clone()),
+    }
+}
+
+/// "N regions selected" with All / Clear buttons; clicks in the viewport toggle regions
+/// (see `region_pick`).
+fn region_row(ui: &mut egui::Ui, sketch: Option<SketchId>, sel: &mut ProfileSel, cx: &DialogCx) -> bool {
+    let Some(sk) = sketch.and_then(|id| cx.data.sketch(id)) else { return false };
+    let regions = sk.regions();
+    let n = easycad_model::regions::selected_regions(sel, sk, &regions).len();
+    let mut ch = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Regions").size(12.0).color(theme::TEXT_DIM));
+        ui.label(RichText::new(format!("{n} region{} selected (of {})", if n == 1 { "" } else { "s" }, regions.len())).size(12.0));
+        if ui.small_button("All").clicked() {
+            *sel = ProfileSel::All;
+            ch = true;
+        }
+        if ui.small_button("Clear").clicked() {
+            *sel = ProfileSel::Containing(Vec::new());
+            ch = true;
+        }
+    });
+    ui.label(RichText::new("Click regions of the sketch in the view to add or remove them.").size(11.0).color(theme::TEXT_MUTED));
+    ch
+}
+
 const AXES: [(&str, DVec3); 3] = [("X", DVec3::X), ("Y", DVec3::Y), ("Z", DVec3::Z)];
 const PLANES: [(&str, Plane); 3] = [("XY", Plane::XY), ("XZ", Plane::XZ), ("YZ", Plane::YZ)];
 
@@ -441,6 +474,7 @@ impl Dialog {
         let body = match kind {
             DialogKind::Extrude => Body::Extrude(ExtrudeD {
                 sketch: last_sketch(d, true),
+                profiles: ProfileSel::All,
                 distance: Field::new("10"),
                 symmetric: false,
                 reverse: false,
@@ -454,6 +488,7 @@ impl Dialog {
             }),
             DialogKind::Revolve => Body::Revolve(RevolveD {
                 sketch: last_sketch(d, true),
+                profiles: ProfileSel::All,
                 axis: 1,
                 angle: Field::new("360"),
                 op: Op::NewBody,
@@ -593,17 +628,18 @@ impl Dialog {
         let (kind, body) = match &f.kind {
             FeatureKind::Extrude {
                 sketch,
+                profiles,
                 distance,
                 symmetric,
                 reverse,
                 draft_deg,
                 op,
                 target,
-                ..
             } => (
                 DialogKind::Extrude,
                 Body::Extrude(ExtrudeD {
                     sketch: Some(*sketch),
+                    profiles: profiles.clone(),
                     distance: Field::from_expr(distance, None),
                     symmetric: *symmetric,
                     reverse: *reverse,
@@ -614,6 +650,7 @@ impl Dialog {
             ),
             FeatureKind::Revolve {
                 sketch,
+                profiles,
                 axis,
                 angle_deg,
                 op,
@@ -622,6 +659,7 @@ impl Dialog {
                 DialogKind::Revolve,
                 Body::Revolve(RevolveD {
                     sketch: Some(*sketch),
+                    profiles: profiles.clone(),
                     axis: AXES.iter().position(|a| a.1 == axis.dir).unwrap_or(1),
                     angle: Field::from_expr(angle_deg, None),
                     op: Op::from(*op),
@@ -867,7 +905,7 @@ impl Dialog {
         match &self.body {
             Body::Extrude(e) => one(FeatureKind::Extrude {
                 sketch: e.sketch.ok_or("pick a sketch with a closed profile")?,
-                profiles: ProfileSel::All,
+                profiles: region_sel(&e.profiles)?,
                 distance: e.distance.expr(None),
                 symmetric: e.symmetric,
                 reverse: e.reverse,
@@ -877,7 +915,7 @@ impl Dialog {
             }),
             Body::Revolve(r) => one(FeatureKind::Revolve {
                 sketch: r.sketch.ok_or("pick a sketch")?,
-                profiles: ProfileSel::All,
+                profiles: region_sel(&r.profiles)?,
                 axis: Axis {
                     origin: DVec3::ZERO,
                     dir: AXES[r.axis].1,
@@ -1029,6 +1067,23 @@ impl Dialog {
             if let easycad_model::regen::FeatureStatus::Error(e) = &r.status {
                 self.error = Some(e.clone());
             }
+        }
+    }
+
+    /// The sketch and region selection of an Extrude/Revolve dialog.
+    pub fn region_target(&self) -> Option<(SketchId, &ProfileSel)> {
+        match &self.body {
+            Body::Extrude(e) => e.sketch.map(|s| (s, &e.profiles)),
+            Body::Revolve(r) => r.sketch.map(|s| (s, &r.profiles)),
+            _ => None,
+        }
+    }
+
+    pub fn set_region_sel(&mut self, sel: ProfileSel) {
+        match &mut self.body {
+            Body::Extrude(e) => e.profiles = sel,
+            Body::Revolve(r) => r.profiles = sel,
+            _ => {}
         }
     }
 
@@ -1204,7 +1259,12 @@ impl Dialog {
             .collect();
         match &mut self.body {
             Body::Extrude(e) => {
+                let before = e.sketch;
                 ch |= sketch_combo(ui, id.with("sk"), &mut e.sketch, &sketches);
+                if e.sketch != before {
+                    e.profiles = ProfileSel::All;
+                }
+                ch |= region_row(ui, e.sketch, &mut e.profiles, cx);
                 ch |= e.distance.row(ui, id.with("d"), "Distance", env);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Direction").size(12.0).color(theme::TEXT_DIM));
@@ -1229,7 +1289,12 @@ impl Dialog {
                 }
             }
             Body::Revolve(r) => {
+                let before = r.sketch;
                 ch |= sketch_combo(ui, id.with("sk"), &mut r.sketch, &sketches);
+                if r.sketch != before {
+                    r.profiles = ProfileSel::All;
+                }
+                ch |= region_row(ui, r.sketch, &mut r.profiles, cx);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Axis").size(12.0).color(theme::TEXT_DIM));
                     for (i, (n, _)) in AXES.iter().enumerate() {
