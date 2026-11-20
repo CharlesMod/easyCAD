@@ -32,6 +32,16 @@ fn out_dir() -> PathBuf {
 }
 
 fn harness(doc: easycad_model::document::Document) -> Harness<'static, EasyCadApp> {
+    // never read the user's real settings or crash-recovery copies
+    static ISOLATE: std::sync::Once = std::sync::Once::new();
+    ISOLATE.call_once(|| {
+        let root = std::env::temp_dir().join(format!("easycad-ui-snapshots-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("XDG_DATA_HOME", root.join("data"));
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+        }
+    });
     let mut h = Harness::builder()
         .with_size(egui::vec2(W, H))
         .with_pixels_per_point(1.0)
