@@ -423,6 +423,12 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                         "CONSTRUCT",
                         vec![
                             (
+                                Icon::Construct,
+                                "Construct",
+                                "Click points, edges, planes: the construct is inferred (Q)",
+                                Cmd::Dialog(DialogKind::Construct),
+                            ),
+                            (
                                 Icon::Plane,
                                 "Plane ▾",
                                 "Construction planes: offset, at angle, midplane…",

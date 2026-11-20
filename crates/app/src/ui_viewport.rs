@@ -1271,7 +1271,22 @@ fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
         app.worker.busy_with(crate::worker::Purpose::Preview) || app.preview_dirty.is_some();
     let mut ev = DialogEvent::None;
     let card_w = app.dialog_card_w.max(300.0);
-    let pos = pos2(rect.right() - 16.0 - card_w, rect.top() + 12.0);
+    let mut pos = pos2(rect.right() - 16.0 - card_w, rect.top() + 12.0);
+    let construct = d.kind == crate::dialogs::DialogKind::Construct;
+    if construct {
+        // the Construct popup sits next to the last click
+        let anchor = match &d.body {
+            crate::dialogs::Body::Datum(dd) => dd.auto.as_ref().and_then(|a| a.anchor),
+            _ => None,
+        };
+        pos = match anchor {
+            Some(a) => pos2(
+                (a.x + 16.0).min(rect.right() - 290.0).max(rect.left() + 4.0),
+                (a.y + 16.0).min(rect.bottom() - 190.0).max(rect.top() + 4.0),
+            ),
+            None => pos2(rect.right() - 290.0, rect.top() + 12.0),
+        };
+    }
     let shown = egui::Area::new(egui::Id::unique("dialog"))
         .order(egui::Order::Middle)
         .fixed_pos(pos)
@@ -1291,7 +1306,15 @@ fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                     regenerating,
                     next_id: app.doc.data.next_id,
                 };
-                ev = d.ui(ui, &cx);
+                ev = if construct {
+                    let err = d.error.clone();
+                    match &mut d.body {
+                        crate::dialogs::Body::Datum(dd) => dd.popup(ui, egui::Id::new("construct_popup"), &cx, err.as_deref()),
+                        _ => DialogEvent::None,
+                    }
+                } else {
+                    d.ui(ui, &cx)
+                };
             }
         });
     let w = shown.response.rect.width();

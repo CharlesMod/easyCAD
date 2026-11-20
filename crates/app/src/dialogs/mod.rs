@@ -54,6 +54,8 @@ pub enum DialogKind {
     Joint,
     /// Construction plane / axis / point.
     Datum(crate::datum_ui::DatumKind),
+    /// The one inferred Construct tool.
+    Construct,
 }
 
 impl DialogKind {
@@ -73,6 +75,7 @@ impl DialogKind {
             DialogKind::Standoffs => "Standoffs from PCB",
             DialogKind::Joint => "Parting joint",
             DialogKind::Datum(k) => k.title(),
+            DialogKind::Construct => "Construct",
         }
     }
     /// Title-bar accent: modify = orange, enclosure = green, create = blue.
@@ -86,7 +89,7 @@ impl DialogKind {
             DialogKind::Boss | DialogKind::Rib | DialogKind::Standoffs | DialogKind::Joint => {
                 theme::GREEN
             }
-            DialogKind::Datum(_) => theme::hex(0xe6c85a),
+            DialogKind::Datum(_) | DialogKind::Construct => theme::hex(0xe6c85a),
             _ => theme::ACCENT_LINK,
         }
     }
@@ -527,6 +530,13 @@ impl Dialog {
             }),
             DialogKind::Standoffs => Body::Standoffs(standoffs::StandoffsD::new(d, model)?),
             DialogKind::Joint => Body::Joint(joint::JointD::new(d, model)),
+            DialogKind::Construct => {
+                let picks = match model {
+                    Some(m) => sel.iter().filter_map(|k| crate::datum_ui::from_key(m, k, crate::datum_ui::Accept(63))).collect(),
+                    None => Vec::new(),
+                };
+                Body::Datum(datum::DatumD::new_auto(picks))
+            }
             DialogKind::Datum(k) => {
                 let mut dd = datum::DatumD::new(k);
                 if let Some(m) = model {
@@ -545,6 +555,7 @@ impl Dialog {
             editing: None,
             name: match kind {
                 DialogKind::Datum(k) => datum::default_name(k, cx),
+                DialogKind::Construct => "Construct".into(),
                 _ => kind.title().into(),
             },
             body,
@@ -752,7 +763,7 @@ impl Dialog {
             ),
             FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => {
                 let dd = datum::DatumD::from_feature(f, d)?;
-                (DialogKind::Datum(dd.kind), Body::Datum(dd))
+                (DialogKind::Construct, Body::Datum(dd))
             }
             _ => return None,
         };
@@ -960,6 +971,10 @@ impl Dialog {
                     if f.text.trim().is_empty() || num(f).is_err() {
                         return Err(format!("{}: enter a number or expression", dd.kind.fields()[i].label));
                     }
+                }
+                if dd.auto.is_some() && self.editing.is_none() {
+                    let name = datum::default_name(dd.kind, cx);
+                    return Ok(vec![dd.build(id0, &name)?]);
                 }
                 Ok(vec![dd.build(id0, &self.name)?])
             }

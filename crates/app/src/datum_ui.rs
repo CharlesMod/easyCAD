@@ -568,7 +568,7 @@ pub fn draw_list(app: &EasyCadApp) -> Vec<(Arc<Mesh>, bool)> {
 /// References held by the open datum dialog's slots.
 pub fn picked_refs(app: &EasyCadApp) -> Vec<GeomRef> {
     match app.dialog.as_ref().map(|d| &d.body) {
-        Some(crate::dialogs::Body::Datum(dd)) => dd.slots.iter().flatten().map(|s| s.r.clone()).collect(),
+        Some(crate::dialogs::Body::Datum(dd)) => dd.held().into_iter().map(|(r, _)| r.clone()).collect(),
         _ => Vec::new(),
     }
 }
@@ -580,8 +580,8 @@ pub fn face_highlights(app: &EasyCadApp) -> Vec<(BodyId, u32, bool)> {
         v.push((*b, *f, true));
     }
     if let Some(crate::dialogs::Body::Datum(dd)) = app.dialog.as_ref().map(|d| &d.body) {
-        for s in dd.slots.iter().flatten() {
-            if let Hi::Face(b, f) = &s.hi {
+        for (_, hi) in dd.held() {
+            if let Hi::Face(b, f) = hi {
                 v.push((*b, *f, false));
             }
         }
@@ -840,7 +840,11 @@ pub fn interact(app: &mut EasyCadApp, resp: &egui::Response, rect: Rect) -> bool
     app.datum_hover = hover.clone();
     if resp.clicked_by(egui::PointerButton::Primary) {
         if let (Some(p), Some(crate::dialogs::Body::Datum(dd))) = (hover, app.dialog.as_mut().map(|d| &mut d.body)) {
-            dd.fill(p);
+            if dd.auto.is_some() {
+                dd.toggle(p, resp.interact_pointer_pos());
+            } else {
+                dd.fill(p);
+            }
             app.request_preview();
         }
     }
@@ -967,8 +971,8 @@ pub fn paint(app: &EasyCadApp, p: &egui::Painter, rect: Rect) {
         }
     }
     if let Some(crate::dialogs::Body::Datum(dd)) = app.dialog.as_ref().map(|d| &d.body) {
-        for s in dd.slots.iter().flatten() {
-            if let Hi::Item(g) = &s.hi {
+        for (_, hi) in dd.held() {
+            if let Hi::Item(g) = hi {
                 if matches!(g, G::Poly { .. } | G::Point(_)) {
                     paint_g(app, p, rect, g, theme::ACCENT, 3.0);
                 }

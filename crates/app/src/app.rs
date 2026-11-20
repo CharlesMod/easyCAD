@@ -787,6 +787,7 @@ impl EasyCadApp {
 
     pub fn close_dialog(&mut self, ok: bool) {
         let Some(mut d) = self.dialog.take() else { return };
+        let mut reopen = false;
         if ok {
             // a fillet whose report still has failing edges: say so once
             if let crate::dialogs::Body::Fillet(f) = &mut d.body {
@@ -807,6 +808,7 @@ impl EasyCadApp {
                 Ok(feats) if !feats.is_empty() => {
                     let label = d.title_case();
                     let before: HashSet<FeatureId> = crate::scope::features(&self.doc.data, self.scope()).iter().map(|f| f.id).collect();
+                    reopen = d.kind == DialogKind::Construct && d.editing().is_none();
                     self.commit_features(&label, feats, d.editing());
                     if d.as_components == Some(true) {
                         // the split just committed: a new one, or the Split a joint replaced
@@ -832,6 +834,11 @@ impl EasyCadApp {
         self.worker.cancel(Purpose::Preview);
         self.filter = Filter::default();
         self.request_model();
+        if reopen {
+            // the Construct tool stays active for the next one
+            self.selection.clear();
+            self.open_dialog(DialogKind::Construct);
+        }
     }
 
     pub fn open_sketch(&mut self, id: Option<easycad_model::feature::SketchId>) {
@@ -1313,6 +1320,13 @@ impl EasyCadApp {
             }
             return;
         }
+        if self.dialog.as_ref().is_some_and(|d| d.kind == DialogKind::Construct) {
+            // the Construct popup owns Enter, Esc and Tab
+            if pressed(Key::F) {
+                self.fit_all();
+            }
+            return;
+        }
         if self.dialog.is_some() {
             if pressed(Key::Escape) {
                 self.close_dialog(false);
@@ -1364,7 +1378,8 @@ impl EasyCadApp {
             let a = self.viewport_size.x / self.viewport_size.y.max(1.0);
             self.camera.go_home(self.now, a);
         }
-        let keymap: [(Key, Option<DialogKind>); 9] = [
+        let keymap: [(Key, Option<DialogKind>); 10] = [
+            (Key::Q, Some(DialogKind::Construct)),
             (Key::E, Some(DialogKind::Extrude)),
             (Key::H, Some(DialogKind::Shell)),
             (Key::B, Some(DialogKind::Boss)),

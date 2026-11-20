@@ -857,3 +857,245 @@ fn x_key_toggles_construction_in_sketch_mode() {
     chord(&mut h, egui::Modifiers::NONE, egui::Key::X);
     assert_eq!(s(&h), (false, 1, u0 + 1));
 }
+
+// ---------------------------------------------------------------- the Construct tool
+
+fn construct_state(h: &Harness<'static, EasyCadApp>) -> (usize, Vec<easycad_app::datum_ui::DatumKind>, usize) {
+    match h.state().dialog.as_ref().map(|d| &d.body) {
+        Some(easycad_app::dialogs::Body::Datum(dd)) => {
+            let a = dd.auto.as_ref().expect("auto");
+            (a.picks.len(), a.alts.iter().map(|c| c.kind).collect(), a.alt)
+        }
+        _ => panic!("the Construct tool is not open"),
+    }
+}
+
+fn datum_kinds(h: &Harness<'static, EasyCadApp>) -> Vec<String> {
+    h.state()
+        .doc
+        .data
+        .features
+        .iter()
+        .filter(|f| f.kind.is_datum())
+        .map(|f| format!("{:?}", f.kind))
+        .collect()
+}
+
+fn box_doc() -> easycad_model::document::Document {
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::sketch::Sketch;
+    let mut doc = easycad_model::document::Document::new("box");
+    let mut s = Sketch::new("S", easycad_model::geom::Plane::XY);
+    s.rect(glam::DVec2::new(-30.0, -20.0), glam::DVec2::new(30.0, 20.0));
+    let sid = doc.add_sketch(s);
+    doc.add_feature(
+        "Block",
+        FeatureKind::Extrude { sketch: sid, profiles: ProfileSel::All, distance: 20.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    );
+    doc
+}
+
+fn click_w(h: &mut Harness<'static, EasyCadApp>, w: glam::Vec3) {
+    let p = screen_of(h, w);
+    hover_click(h, p);
+}
+
+fn press_enter(h: &mut Harness<'static, EasyCadApp>) {
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    settle(h);
+}
+
+#[test]
+fn construct_one_point_makes_a_point_and_stays_active() {
+    use easycad_app::datum_ui::DatumKind;
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::ZERO);
+    let (n, kinds, _) = construct_state(&h);
+    assert_eq!((n, kinds), (1, vec![DatumKind::PointAt]));
+    press_enter(&mut h);
+    let made = datum_kinds(&h);
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(made[0].contains("DatumPoint"), "{made:?}");
+    let (n, _, _) = construct_state(&h);
+    assert_eq!(n, 0, "tool stays active with a cleared selection");
+    // undo takes the whole construct back in one step
+    h.state_mut().undo();
+    assert!(datum_kinds(&h).is_empty());
+}
+
+#[test]
+fn construct_two_points_axis_three_points_plane() {
+    use easycad_app::datum_ui::DatumKind;
+    let _g = serial();
+    let mut h = harness(box_doc());
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(-30.0, -20.0, 20.0));
+    click_w(&mut h, glam::Vec3::new(30.0, -20.0, 20.0));
+    let (n, kinds, _) = construct_state(&h);
+    assert_eq!((n, kinds), (2, vec![DatumKind::AxisTwoPoints]));
+    press_enter(&mut h);
+    assert!(datum_kinds(&h)[0].contains("DatumAxis"), "{:?}", datum_kinds(&h));
+    click_w(&mut h, glam::Vec3::new(-30.0, -20.0, 20.0));
+    click_w(&mut h, glam::Vec3::new(30.0, -20.0, 20.0));
+    click_w(&mut h, glam::Vec3::new(30.0, 20.0, 20.0));
+    let (n, kinds, _) = construct_state(&h);
+    assert_eq!((n, kinds), (3, vec![DatumKind::PlaneThreePoints]));
+    press_enter(&mut h);
+    let made = datum_kinds(&h);
+    assert_eq!(made.len(), 2, "{made:?}");
+    assert!(made[1].contains("DatumPlane"), "{made:?}");
+    // a click on a picked point removes it again
+    click_w(&mut h, glam::Vec3::new(30.0, 20.0, 20.0));
+    assert_eq!(construct_state(&h).0, 1);
+    click_w(&mut h, glam::Vec3::new(30.0, 20.0, 20.0));
+    assert_eq!(construct_state(&h).0, 0);
+}
+
+#[test]
+fn construct_plane_types_the_offset_and_enter_commits() {
+    use easycad_app::datum_ui::DatumKind;
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    let (n, kinds, _) = construct_state(&h);
+    assert_eq!((n, kinds), (1, vec![DatumKind::PlaneOffset]));
+    // the value is already focused with its text selected: just type
+    h.run_steps(2);
+    h.event(egui::Event::Text("10".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let made = datum_kinds(&h);
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(made[0].contains("Offset") && made[0].contains("10"), "{made:?}");
+}
+
+#[test]
+fn construct_line_and_plane_make_an_angle_plane_and_tab_cycles() {
+    use easycad_app::datum_ui::DatumKind;
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(20.0, 0.0, 0.0));
+    assert_eq!(construct_state(&h).1, vec![DatumKind::AxisLine, DatumKind::PlaneNormal]);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    let (n, kinds, alt) = construct_state(&h);
+    assert_eq!(n, 2);
+    assert_eq!(kinds, vec![DatumKind::PlaneAngle, DatumKind::PointEdgePlane]);
+    assert_eq!(alt, 0);
+    h.key_press(egui::Key::Tab);
+    h.run_steps(3);
+    assert_eq!(construct_state(&h).2, 1, "Tab picks the next alternative");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(3);
+    assert_eq!(construct_state(&h).2, 0, "and wraps around");
+    press_enter(&mut h);
+    let made = datum_kinds(&h);
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(made[0].contains("Angle"), "{made:?}");
+}
+
+#[test]
+fn construct_esc_clears_then_exits() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::ZERO);
+    assert_eq!(construct_state(&h).0, 1);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(construct_state(&h).0, 0);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().dialog.is_none());
+}
+
+#[test]
+fn editing_a_datum_reopens_the_tool_with_its_refs() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    h.run_steps(2);
+    h.event(egui::Event::Text("10".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let fid = h.state().doc.data.features.iter().find(|f| f.kind.is_datum()).unwrap().id;
+    h.state_mut().edit_feature(fid);
+    h.run_steps(3);
+    settle(&mut h);
+    let (n, kinds, _) = construct_state(&h);
+    assert_eq!((n, kinds), (1, vec![easycad_app::datum_ui::DatumKind::PlaneOffset]));
+    h.event(egui::Event::Text("25".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let made = datum_kinds(&h);
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(made[0].contains("25"), "{made:?}");
+}
+
+#[test]
+fn sketch_on_a_construction_plane_follows_it() {
+    use easycad_app::app::Mode;
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    h.run_steps(2);
+    h.event(egui::Event::Text("10".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let fid = h.state().doc.data.features.iter().find(|f| f.kind.is_datum()).unwrap().id;
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 10.0));
+    match &h.state().mode {
+        Mode::Sketch(s) => {
+            assert_eq!(s.sketch.plane_src, Some(fid));
+            assert!((s.sketch.plane.origin.z - 10.0).abs() < 1e-6, "{:?}", s.sketch.plane);
+        }
+        _ => panic!("expected sketch mode on the construction plane"),
+    }
+}
+
+#[test]
+fn hiding_a_construction_plane_removes_it_from_the_scene() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    press_enter(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let fid = h.state().doc.data.features.iter().find(|f| f.kind.is_datum()).unwrap().id;
+    let shown = |h: &Harness<'static, EasyCadApp>| easycad_app::datum_ui::datum_items(h.state(), None).len();
+    assert_eq!(shown(&h), 1);
+    easycad_app::datum_ui::set_visible(h.state_mut(), fid, false);
+    h.run_steps(2);
+    assert_eq!(shown(&h), 0);
+    easycad_app::datum_ui::set_visible(h.state_mut(), fid, true);
+    assert_eq!(shown(&h), 1);
+}

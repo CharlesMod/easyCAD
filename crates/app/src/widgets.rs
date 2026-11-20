@@ -454,6 +454,7 @@ pub enum Icon {
     Warn,
     Cross,
     Plane,
+    Construct,
     Axis,
     Point,
 }
@@ -673,6 +674,11 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Plane => {
             closed(&[(3.0, 16.0), (9.0, 6.0), (21.0, 6.0), (15.0, 16.0)]);
             line(&[(12.0, 11.0), (12.0, 21.0)]);
+        }
+        Icon::Construct => {
+            closed(&[(3.0, 17.0), (9.0, 8.0), (21.0, 8.0), (15.0, 17.0)]);
+            circle(12.0, 12.5, 2.0);
+            line(&[(12.0, 3.0), (12.0, 7.0)]);
         }
         Icon::Axis => {
             line(&[(3.0, 20.0), (7.0, 16.0)]);
