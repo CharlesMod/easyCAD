@@ -63,6 +63,10 @@ pub enum Constraint {
     Diameter(EntityId, Expr),
     /// Signed angle (degrees, CCW) from the first line's direction to the second's.
     Angle(EntityId, EntityId, Expr),
+    /// The angle (degrees, CCW) from a ray of the first line to a ray of the second:
+    /// a flag set means the ray points from the line's end `b` back to its start
+    /// `a`. Picks one of the four angles two crossing lines make, without flipping.
+    AngleRays(EntityId, bool, EntityId, bool, Expr),
     /// `target[i]` is `source[i]` offset by `distance`: lines stay parallel at that
     /// distance, arcs/circles concentric with the radius changed by it (the side is
     /// the one the target is on). Joints between targets that share a point are
@@ -623,6 +627,12 @@ impl System {
                 C::Diameter(c, d) => Eq::Radius(circ(i, *c)?.1, ev(d)? / 2.0),
                 C::Angle(l1, l2, d) => {
                     let ([a, b], [c, dd]) = (line(i, *l1)?, line(i, *l2)?);
+                    Eq::Angle([a, b, c, dd], ev(d)?.to_radians())
+                }
+                C::AngleRays(l1, r1, l2, r2, d) => {
+                    let ([a, b], [c, dd]) = (line(i, *l1)?, line(i, *l2)?);
+                    let (a, b) = if *r1 { (b, a) } else { (a, b) };
+                    let (c, dd) = if *r2 { (dd, c) } else { (c, dd) };
                     Eq::Angle([a, b, c, dd], ev(d)?.to_radians())
                 }
                 C::Offset { source, target, distance } => {

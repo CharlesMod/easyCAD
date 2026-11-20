@@ -1669,3 +1669,212 @@ fn line_after_an_angled_one_locks_exactly_horizontal() {
     assert_eq!(ys[1].0, ys[1].1, "second line exactly horizontal: {ys:?}");
     assert_ne!(ys[0].0, ys[0].1, "first stays angled");
 }
+
+// ---- inline dimension editing -------------------------------------------------
+
+fn double_click_at(h: &mut Harness<'static, EasyCadApp>, p: egui::Pos2) {
+    h.hover_at(p);
+    h.run_steps(2);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(3);
+}
+
+/// Two 20 mm circles; the Dimension tool picks both centres and a placement click
+/// above them: the inline field is open on a new horizontal distance.
+fn two_circles_pending_dimension() -> (Harness<'static, EasyCadApp>, egui::Pos2, egui::Pos2) {
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    let (a, b) = (egui::pos2(600.0, 450.0), egui::pos2(800.0, 400.0));
+    for c in [a, b] {
+        if let Mode::Sketch(s) = &mut h.state_mut().mode {
+            s.tool = Tool::Circle;
+        }
+        click_at(&mut h, c, egui::PointerButton::Primary);
+        h.run_steps(3);
+        h.event(egui::Event::Text("20".into()));
+        h.run_steps(3);
+        press_enter(&mut h);
+    }
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Dimension;
+    }
+    h.run_steps(2);
+    hover_click(&mut h, a);
+    hover_click(&mut h, b);
+    hover_click(&mut h, egui::pos2(700.0, 250.0));
+    (h, a, b)
+}
+
+fn sk_state(h: &Harness<'static, EasyCadApp>) -> (Option<String>, Option<usize>, Vec<easycad_model::sketch::Constraint>) {
+    match &h.state().mode {
+        easycad_app::app::Mode::Sketch(s) => (s.input.clone(), s.edit_dim, s.sketch.constraints.clone()),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn dimension_value_is_an_inline_field_not_a_window() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let (mut h, _, _) = two_circles_pending_dimension();
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_some(), "the inline field is open after placement");
+    h.run_steps(2);
+    // focused, and no window with a title: only the foreground area
+    let ctx = h.ctx.clone();
+    let id = egui::Id::NULL.with("sk_input_text");
+    assert!(ctx.memory(|m| m.has_focus(id)), "the field has focus");
+    assert!(h.query_by_label("value").is_none(), "no 'value' window caption");
+    h.event(egui::Event::Text("100".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none());
+    assert!(cs.iter().any(|c| matches!(c, Constraint::DistanceX(..))), "{cs:?}");
+}
+
+#[test]
+fn escape_on_a_new_dimension_leaves_no_constraint() {
+    let _g = serial();
+    let (mut h, _, _) = two_circles_pending_dimension();
+    let before = sk_state(&h).2.len();
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none());
+    assert_eq!(cs.len(), before);
+}
+
+#[test]
+fn invalid_dimension_text_keeps_the_field_open() {
+    let _g = serial();
+    let (mut h, _, _) = two_circles_pending_dimension();
+    let before = sk_state(&h).2.len();
+    h.event(egui::Event::Text("nonsense_param".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_some(), "an invalid value keeps the field open");
+    assert_eq!(cs.len(), before);
+    match &h.state().mode {
+        easycad_app::app::Mode::Sketch(s) => assert!(s.input_err.is_some()),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn double_click_on_the_dimension_line_edits_inline() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let (mut h, _, _) = two_circles_pending_dimension();
+    h.event(egui::Event::Text("100".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    h.run_steps(3);
+    // a point on the dimension line, well away from its label
+    let p = match &h.state().mode {
+        easycad_app::app::Mode::Sketch(s) => {
+            let segs = s.dim_segs.borrow();
+            let seg = segs.first().expect("dimension line recorded").0;
+            let label = s.dim_rects.borrow()[0].0;
+            let mid = seg[0] + (seg[1] - seg[0]) * 0.5;
+            let dir = (seg[1] - seg[0]).normalized();
+            let q = mid + dir * (label.width() / 2.0 + 25.0);
+            assert!(!label.contains(q));
+            q
+        }
+        _ => panic!(),
+    };
+    double_click_at(&mut h, p);
+    let (input, edit, _) = sk_state(&h);
+    assert!(edit.is_some() && input.is_some(), "double-click on the line opens the inline edit");
+    assert_eq!(input.as_deref(), Some("100"));
+    h.event(egui::Event::Text("77".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (input, edit, cs) = sk_state(&h);
+    assert!(input.is_none() && edit.is_none());
+    let ok = cs.iter().any(|c| matches!(c, Constraint::DistanceX(_, _, e) if e.0.trim() == "77"));
+    assert!(ok, "{cs:?}");
+}
+
+// ---- angle between two lines / lone length (Fusion style) --------------------
+
+/// A chain of two lines A-B-C drawn with the Line tool (they share B), then the
+/// Dimension tool.
+fn two_lines_dimension_tool() -> Harness<'static, EasyCadApp> {
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Line;
+    }
+    h.run_steps(2);
+    for p in [egui::pos2(700.0, 500.0), egui::pos2(700.0, 300.0), egui::pos2(850.0, 400.0)] {
+        hover_click(&mut h, p);
+    }
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.cancel_input();
+        s.clicks.clear();
+        s.tool = Tool::Dimension;
+    }
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn click_line_then_line_then_placement_makes_an_angle_with_inline_field() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let mut h = two_lines_dimension_tool();
+    hover_click(&mut h, egui::pos2(700.0, 330.0)); // first line (clear of its midpoint and the origin)
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none() && !cs.iter().any(|c| c.dim_expr().is_some()), "a lone pick waits");
+    hover_click(&mut h, egui::pos2(812.0, 375.0)); // second line
+    match &h.state().mode {
+        easycad_app::app::Mode::Sketch(s) => assert!(s.dim_pending, "two lines wait for the angle placement click"),
+        _ => panic!(),
+    }
+    hover_click(&mut h, egui::pos2(740.0, 360.0)); // inside the angle
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_some(), "the inline field opens");
+    h.event(egui::Event::Text("45".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none());
+    assert!(cs.iter().any(|c| matches!(c, Constraint::AngleRays(..))), "{cs:?}");
+}
+
+#[test]
+fn click_line_then_empty_space_makes_a_length() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let mut h = two_lines_dimension_tool();
+    hover_click(&mut h, egui::pos2(700.0, 330.0));
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_none());
+    hover_click(&mut h, egui::pos2(500.0, 600.0)); // empty space
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_some(), "the inline length field opens");
+    h.event(egui::Event::Text("40".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (_, _, cs) = sk_state(&h);
+    assert!(cs.iter().any(|c| matches!(c, Constraint::Length(..))), "{cs:?}");
+}
