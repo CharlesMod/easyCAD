@@ -342,7 +342,7 @@ fn push_edge(edges: &mut Vec<Edge>, verts: &[DVec2], c: &Curve, t0: f64, t1: f64
 /// Direction and signed curvature of half-edge `h` at its start.
 fn leave(g: &Graph, h: usize) -> (f64, f64) {
     let e = &g.edges[h / 2];
-    let fwd = h % 2 == 0;
+    let fwd = h.is_multiple_of(2);
     match e.seg {
         Segment2::Line { a, b } => {
             let d = if fwd { b - a } else { a - b };
@@ -361,7 +361,7 @@ fn leave(g: &Graph, h: usize) -> (f64, f64) {
 
 fn start_of(g: &Graph, h: usize) -> usize {
     let e = &g.edges[h / 2];
-    if h % 2 == 0 {
+    if h.is_multiple_of(2) {
         e.u
     } else {
         e.v
@@ -370,7 +370,7 @@ fn start_of(g: &Graph, h: usize) -> usize {
 
 fn half_seg(g: &Graph, h: usize) -> Segment2 {
     let e = &g.edges[h / 2];
-    if h % 2 == 0 {
+    if h.is_multiple_of(2) {
         e.seg
     } else {
         reverse_segment(&e.seg)
@@ -425,7 +425,7 @@ pub fn regions_from_segments(segs: &[Segment2], tol: f64) -> Vec<Region> {
     let trace = |alive: &[bool], out: &[Vec<usize>]| -> Vec<Vec<usize>> {
         let mut seen = vec![false; 2 * ne];
         let mut faces = Vec::new();
-        for e in 0..ne {
+        for (e, _) in alive.iter().enumerate().take(ne) {
             for h0 in [2 * e, 2 * e + 1] {
                 if !alive[e] || seen[h0] {
                     continue;
@@ -598,13 +598,13 @@ fn split_cycles(g: &Graph, walk: &[usize]) -> Vec<(Loop2, f64)> {
     for &h in walk {
         let u = start_of(g, h);
         let e = &g.edges[h / 2];
-        let v = if h % 2 == 0 { e.v } else { e.u };
+        let v = if h.is_multiple_of(2) { e.v } else { e.u };
         if e.full {
             if let Segment2::Arc { center, start, .. } = e.seg {
                 let r = (start - center).length();
                 let sg = Segment2::Circle { center, radius: r };
                 let a = PI * r * r;
-                cycles.push((vec![sg], if h % 2 == 0 { a } else { -a }));
+                cycles.push((vec![sg], if h.is_multiple_of(2) { a } else { -a }));
             }
             continue;
         }
@@ -641,7 +641,7 @@ fn sample_point(outer: &Loop2, holes: &[Loop2]) -> DVec2 {
             }
         }
         xs.sort_by(|a, b| a.total_cmp(b));
-        for pair in xs.chunks_exact(2) {
+        for pair in xs.as_chunks::<2>().0 {
             let w = pair[1] - pair[0];
             if best.is_none_or(|b| w > b.0) {
                 best = Some((w, DVec2::new((pair[0] + pair[1]) / 2.0, y)));

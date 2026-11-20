@@ -80,7 +80,7 @@ fn soap3_sketch4_regions() {
     let mut a: Vec<f64> = regions.iter().map(|r| r.area).collect();
     a.sort_by(|x, y| x.total_cmp(y));
     let disc = PI * 22.8 * 22.8;
-    let discs: f64 = regions.iter().filter(|r| r.area > 100.0).map(|r| r.area).sum();
+    let discs: f64 = regions.iter().filter(|r| r.area > 200.0).map(|r| r.area).sum();
     assert_eq!(regions.len(), 4, "{a:?}");
     assert!((discs - disc).abs() < 1e-3, "{a:?}");
     assert!(a[0] < 200.0 && a[0] > 150.0, "ring sector {a:?}");

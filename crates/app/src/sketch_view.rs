@@ -53,48 +53,6 @@ fn area(p: &[DVec2]) -> f64 {
     p.iter().enumerate().map(|(i, a)| a.perp_dot(p[(i + 1) % p.len()])).sum::<f64>() / 2.0
 }
 
-/// Ear clipping of a simple polygon (any winding).
-fn triangulate(poly: &[DVec2]) -> Vec<[usize; 3]> {
-    let mut idx: Vec<usize> = (0..poly.len()).collect();
-    if area(poly) < 0.0 {
-        idx.reverse();
-    }
-    let mut out = Vec::new();
-    let mut guard = 0;
-    while idx.len() > 3 && guard < 10_000 {
-        guard += 1;
-        let n = idx.len();
-        let mut clipped = false;
-        for i in 0..n {
-            let (a, b, c) = (idx[(i + n - 1) % n], idx[i], idx[(i + 1) % n]);
-            let (pa, pb, pc) = (poly[a], poly[b], poly[c]);
-            if (pb - pa).perp_dot(pc - pb) <= 1e-12 {
-                continue;
-            }
-            let inside = idx.iter().any(|&k| {
-                if k == a || k == b || k == c {
-                    return false;
-                }
-                let p = poly[k];
-                (pb - pa).perp_dot(p - pa) >= 0.0 && (pc - pb).perp_dot(p - pb) >= 0.0 && (pa - pc).perp_dot(p - pc) >= 0.0
-            });
-            if !inside {
-                out.push([a, b, c]);
-                idx.remove(i);
-                clipped = true;
-                break;
-            }
-        }
-        if !clipped {
-            break;
-        }
-    }
-    if idx.len() == 3 {
-        out.push([idx[0], idx[1], idx[2]]);
-    }
-    out
-}
-
 fn loop_points(l: &easycad_model::geom::Loop2) -> Vec<DVec2> {
     let mut poly = Vec::new();
     for s in l {
