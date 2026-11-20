@@ -429,7 +429,7 @@ impl DocData {
     /// and imports, the document params with the component's local params on top,
     /// and its process profile. `None` for an unknown id.
     pub fn component_view(&self, id: ComponentId) -> Option<DocData> {
-        let mut d = DocData { components: Vec::new(), occurrences: Vec::new(), mates: Vec::new(), drawings: Vec::new(), ..self.clone() };
+        let mut d = DocData { components: Vec::new(), occurrences: Vec::new(), mates: Vec::new(), drawings: Vec::new(), branches: Vec::new(), ..self.clone() };
         if id == ComponentId::ROOT {
             return Some(d);
         }

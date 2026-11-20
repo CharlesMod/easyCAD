@@ -3,6 +3,7 @@
 //! kernel bridge.
 
 pub mod assembly;
+pub mod branch;
 pub mod datum;
 pub mod document;
 pub mod drawing;

@@ -133,6 +133,21 @@ pub struct DocData {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub origin_visible: bool,
     pub next_id: u32,
+    /// Saved alternative histories (each a full snapshot with its own `branches`
+    /// emptied). The live history is `branch`; see `branch.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<crate::branch::Branch>,
+    /// Name of the branch the live history is.
+    #[serde(default = "crate::branch::main_name", skip_serializing_if = "crate::branch::is_main")]
+    pub branch: String,
+    /// Stable id of the live branch (0 for the original).
+    #[serde(default, skip_serializing_if = "crate::branch::is_zero")]
+    pub branch_id: u32,
+    /// The branch this one was started from, and the feature count it shared with it then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_parent: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::branch::is_zero_usize")]
+    pub branch_split: usize,
 }
 
 impl DocData {
@@ -161,6 +176,11 @@ impl DocData {
             hidden_datums: Vec::new(),
             origin_visible: false,
             next_id: 1,
+            branches: Vec::new(),
+            branch: crate::branch::main_name(),
+            branch_id: 0,
+            branch_parent: None,
+            branch_split: 0,
         }
     }
 
@@ -535,6 +555,14 @@ impl Document {
     }
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|s| s.label.as_str())
+    }
+    /// The document state an undo would restore (for previews; nothing changes).
+    pub fn peek_undo(&self) -> Option<&DocData> {
+        self.undo.last().map(|s| &s.data)
+    }
+    /// The document state a redo would restore.
+    pub fn peek_redo(&self) -> Option<&DocData> {
+        self.redo.last().map(|s| &s.data)
     }
 
     /// Undo the last edit; returns its label.
