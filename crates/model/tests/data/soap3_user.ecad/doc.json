@@ -1,0 +1,661 @@
+{
+  "active_profile": "Injection molded (nominal)",
+  "body_orientations": [],
+  "build_orientation": {
+    "down": "NegZ",
+    "quarter_turns": 0
+  },
+  "components": [],
+  "doc_id": "d2fba24d-21e5-4be2-84b7-5146a3494e84",
+  "drawings": [],
+  "features": [
+    {
+      "id": 2,
+      "kind": {
+        "Extrude": {
+          "distance": "15",
+          "draft_deg": "0",
+          "op": "NewBody",
+          "profiles": "All",
+          "reverse": false,
+          "sketch": 1,
+          "symmetric": false,
+          "target": null
+        }
+      },
+      "name": "Extrude",
+      "suppressed": false
+    },
+    {
+      "id": 4,
+      "kind": {
+        "Extrude": {
+          "distance": "wall*2",
+          "draft_deg": "0",
+          "op": "Join",
+          "profiles": "All",
+          "reverse": false,
+          "sketch": 3,
+          "symmetric": false,
+          "target": {
+            "feature": 2,
+            "index": 0
+          }
+        }
+      },
+      "name": "Extrude",
+      "suppressed": false
+    },
+    {
+      "id": 6,
+      "kind": {
+        "Extrude": {
+          "distance": "10",
+          "draft_deg": "0",
+          "op": "Join",
+          "profiles": {
+            "Containing": [
+              [
+                0.004700013436794492,
+                22.484210526292085
+              ],
+              [
+                -23.293898296396748,
+                56.58947368377072
+              ]
+            ]
+          },
+          "reverse": false,
+          "sketch": 5,
+          "symmetric": true,
+          "target": null
+        }
+      },
+      "name": "Extrude",
+      "suppressed": false
+    }
+  ],
+  "format": 2,
+  "imports": [],
+  "mates": [],
+  "meta": {},
+  "modified_by_device": "test-host",
+  "name": "Untitled",
+  "next_id": 8,
+  "occurrences": [],
+  "params": {
+    "list": [
+      {
+        "comment": "uniform wall (sink marks grow with thickness)",
+        "expr": "2.0",
+        "name": "wall"
+      },
+      {
+        "comment": "gap between mating parts",
+        "expr": "0.1",
+        "name": "clearance"
+      },
+      {
+        "comment": "draft on faces along the pull direction",
+        "expr": "1 deg",
+        "name": "draft"
+      },
+      {
+        "comment": "rib thickness / wall (avoids sink opposite the rib)",
+        "expr": "0.6",
+        "name": "rib_ratio"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "first_layer_chamfer": 0.4,
+      "first_layer_comp": 0.15,
+      "fits": {
+        "loose": 0.3,
+        "press": -0.05,
+        "slide": 0.15,
+        "snug": 0.05
+      },
+      "hole_comp": {
+        "base": 0.1,
+        "per_mm": 0.01
+      },
+      "kind": "Fdm",
+      "name": "FDM 0.4 generic",
+      "notes": "Starting point for a 0.4 mm nozzle, 0.2 mm layers (PLA/PETG). Calibrate with the fit coupon.",
+      "params": [
+        {
+          "comment": "4 perimeters x 0.4 mm nozzle",
+          "expr": "1.6",
+          "name": "wall"
+        },
+        {
+          "comment": "gap between mating parts (slide fit)",
+          "expr": "0.15",
+          "name": "clearance"
+        },
+        {
+          "comment": "layer height",
+          "expr": "0.2",
+          "name": "layer"
+        },
+        {
+          "comment": "nozzle diameter",
+          "expr": "0.4",
+          "name": "nozzle"
+        },
+        {
+          "comment": "smallest feature that prints (2 x nozzle)",
+          "expr": "0.8",
+          "name": "min_feature"
+        }
+      ],
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": true,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.05
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.15,
+        "press": -0.02,
+        "slide": 0.08,
+        "snug": 0.03
+      },
+      "hole_comp": {
+        "base": 0.05,
+        "per_mm": 0.0
+      },
+      "kind": "Sla",
+      "name": "SLA generic",
+      "notes": "Starting point for desktop MSLA resin printers. Calibrate with the fit coupon.",
+      "params": [
+        {
+          "comment": "thin enough to cure cleanly, stiff enough to handle",
+          "expr": "1.5",
+          "name": "wall"
+        },
+        {
+          "comment": "gap between mating parts (slide fit)",
+          "expr": "0.08",
+          "name": "clearance"
+        },
+        {
+          "comment": "layer height",
+          "expr": "0.05",
+          "name": "layer"
+        },
+        {
+          "comment": "smallest feature that prints",
+          "expr": "0.3",
+          "name": "min_feature"
+        }
+      ],
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.02
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.3,
+        "press": -0.05,
+        "slide": 0.15,
+        "snug": 0.05
+      },
+      "hole_comp": {
+        "base": 0.1,
+        "per_mm": 0.0
+      },
+      "kind": "Sls",
+      "name": "SLS nylon generic",
+      "notes": "Starting point for powder-bed nylon (PA12). Self-supporting; no teardrops. Calibrate with the fit coupon.",
+      "params": [
+        {
+          "comment": "minimum reliable wall for PA12",
+          "expr": "1.2",
+          "name": "wall"
+        },
+        {
+          "comment": "gap between mating parts (slide fit)",
+          "expr": "0.15",
+          "name": "clearance"
+        },
+        {
+          "comment": "layer height",
+          "expr": "0.1",
+          "name": "layer"
+        },
+        {
+          "comment": "smallest feature that survives depowdering",
+          "expr": "0.8",
+          "name": "min_feature"
+        }
+      ],
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.05
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.0,
+        "press": 0.0,
+        "slide": 0.0,
+        "snug": 0.0
+      },
+      "hole_comp": {
+        "base": 0.0,
+        "per_mm": 0.0
+      },
+      "kind": "Molded",
+      "name": "Injection molded (nominal)",
+      "notes": "Nominal geometry: no process compensation.",
+      "params": [
+        {
+          "comment": "uniform wall (sink marks grow with thickness)",
+          "expr": "2.0",
+          "name": "wall"
+        },
+        {
+          "comment": "gap between mating parts",
+          "expr": "0.1",
+          "name": "clearance"
+        },
+        {
+          "comment": "draft on faces along the pull direction",
+          "expr": "1 deg",
+          "name": "draft"
+        },
+        {
+          "comment": "rib thickness / wall (avoids sink opposite the rib)",
+          "expr": "0.6",
+          "name": "rib_ratio"
+        }
+      ],
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.0
+    },
+    {
+      "first_layer_chamfer": null,
+      "first_layer_comp": 0.0,
+      "fits": {
+        "loose": 0.0,
+        "press": 0.0,
+        "slide": 0.0,
+        "snug": 0.0
+      },
+      "hole_comp": {
+        "base": 0.0,
+        "per_mm": 0.0
+      },
+      "kind": "Cnc",
+      "name": "CNC machined (nominal)",
+      "notes": "Nominal geometry: machining tolerances are handled by the shop.",
+      "params": [
+        {
+          "comment": "thinnest wall that machines without chatter (aluminium)",
+          "expr": "1.5",
+          "name": "wall"
+        },
+        {
+          "comment": "gap between mating parts",
+          "expr": "0.05",
+          "name": "clearance"
+        },
+        {
+          "comment": "end mill diameter (1/8 in)",
+          "expr": "3.175",
+          "name": "tool_d"
+        },
+        {
+          "comment": "smallest internal corner radius",
+          "expr": "tool_d / 2",
+          "name": "min_radius"
+        }
+      ],
+      "teardrop": {
+        "angle_threshold_deg": 30.0,
+        "enabled": false,
+        "min_diameter": 2.0,
+        "style": {
+          "Flat": 1.0
+        }
+      },
+      "xy_comp": 0.0
+    }
+  ],
+  "revision": 16,
+  "rollback": null,
+  "sketches": [
+    {
+      "id": 1,
+      "sketch": {
+        "constraints": [
+          {
+            "Diameter": [
+              0,
+              "19.4"
+            ]
+          },
+          {
+            "Offset": {
+              "distance": "wall",
+              "source": [
+                0
+              ],
+              "target": [
+                1
+              ]
+            }
+          }
+        ],
+        "entities": [
+          {
+            "construction": false,
+            "geom": {
+              "Circle": {
+                "center": 0,
+                "radius": 9.7
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Circle": {
+                "center": 0,
+                "radius": 11.7
+              }
+            }
+          }
+        ],
+        "name": "Sketch 1",
+        "plane": {
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x_dir": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "points": [
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "sketch": {
+        "constraints": [
+          {
+            "Fix": [
+              0,
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          {
+            "Radius": [
+              0,
+              "11.7"
+            ]
+          }
+        ],
+        "entities": [
+          {
+            "construction": false,
+            "geom": {
+              "Circle": {
+                "center": 0,
+                "radius": 11.7
+              }
+            },
+            "projected": true
+          }
+        ],
+        "name": "Sketch 2",
+        "plane": {
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "origin": [
+            0.0,
+            0.0,
+            15.0
+          ],
+          "x_dir": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "points": [
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "sketch": {
+        "constraints": [
+          {
+            "Diameter": [
+              0,
+              "45.6"
+            ]
+          },
+          {
+            "Fix": [
+              1,
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          {
+            "DistanceY": [
+              1,
+              0,
+              "45.6"
+            ]
+          },
+          {
+            "Offset": {
+              "distance": "6",
+              "source": [
+                0
+              ],
+              "target": [
+                1
+              ]
+            }
+          },
+          {
+            "Horizontal": 2
+          },
+          {
+            "AngleRays": [
+              3,
+              false,
+              2,
+              false,
+              "30"
+            ]
+          },
+          {
+            "AngleRays": [
+              4,
+              true,
+              2,
+              true,
+              "180-30"
+            ]
+          },
+          {
+            "Vertical": 5
+          }
+        ],
+        "entities": [
+          {
+            "construction": false,
+            "geom": {
+              "Circle": {
+                "center": 0,
+                "radius": 22.8
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Circle": {
+                "center": 0,
+                "radius": 28.8
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 0,
+                "b": 2
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 0,
+                "b": 3
+              }
+            }
+          },
+          {
+            "construction": false,
+            "geom": {
+              "Line": {
+                "a": 0,
+                "b": 4
+              }
+            }
+          },
+          {
+            "construction": true,
+            "geom": {
+              "Line": {
+                "a": 5,
+                "b": 6
+              }
+            }
+          }
+        ],
+        "name": "Sketch 3",
+        "plane": {
+          "normal": [
+            0.0,
+            -1.0,
+            0.0
+          ],
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x_dir": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "points": [
+          [
+            0.00470001343517432,
+            45.599999999998886
+          ],
+          [
+            0.0,
+            -5.576747406921432e-13
+          ],
+          [
+            -45.39996787996049,
+            45.59999999999853
+          ],
+          [
+            -44.07872204383709,
+            71.0515755902104
+          ],
+          [
+            31.873960914781627,
+            63.99972635997321
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            59.0
+          ],
+          [
+            0.0,
+            56.39866000948241
+          ]
+        ]
+      },
+      "visible": false
+    }
+  ],
+  "teardrop_overrides": []
+}

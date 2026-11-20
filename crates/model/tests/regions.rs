@@ -92,3 +92,28 @@ fn soap3_sketch4_regions() {
         assert_eq!(easycad_model::regions::region_at(&regions, r.sample), Some(i));
     }
 }
+
+#[test]
+fn union_of_adjacent_sectors_has_no_internal_seam() {
+    use easycad_model::regions::union_profiles;
+    let mut cs = Sketch::new("Cut", Plane::XY);
+    cs.circle(v(0.0, 0.0), 9.8);
+    cs.circle(v(0.0, 0.0), 11.4);
+    for ang in [0.0f64, 120.0, 240.0] {
+        let d = v(ang.to_radians().cos(), ang.to_radians().sin());
+        cs.line(d * 9.0, d * 13.0);
+    }
+    let regions = cs.regions();
+    let sectors: Vec<_> = regions.iter().filter(|r| r.holes.is_empty() && r.area < 100.0).collect();
+    let u = union_profiles(&[sectors[0], sectors[1]]).unwrap();
+    assert_eq!(u.len(), 1);
+    assert!(u[0].holes.is_empty());
+    // two sectors = 2/3 of the ring, bounded by 2 radial lines + 2 arcs (shared radial edge gone)
+    assert_eq!(u[0].outer.len(), 4, "{:?}", u[0].outer);
+    let area = sectors[0].area + sectors[1].area;
+    assert!((easycad_model::sketch::loop_area(&u[0].outer) - area).abs() < 1e-6);
+    // all three sectors: the ring itself, outer circle + inner hole circle
+    let u = union_profiles(&sectors).unwrap();
+    assert_eq!(u.len(), 1);
+    assert_eq!(u[0].holes.len(), 1);
+}
