@@ -72,6 +72,8 @@ pub enum Sel {
     Entity(EntityId),
     /// The midpoint of a line: an anchor for the Dimension tool only.
     Mid(EntityId),
+    /// The sketch origin (0, 0): an anchor for the Dimension tool only.
+    Origin,
 }
 
 /// A live Select-tool drag of a point, or of every point of a line/arc/circle.
@@ -507,7 +509,7 @@ impl SketchSession {
         let ids: Vec<PointId> = match x {
             Sel::Point(p) => vec![p],
             Sel::Entity(e) => geom_points(&self.sketch.entities[e.0 as usize].geom),
-            Sel::Mid(_) => Vec::new(),
+            Sel::Mid(_) | Sel::Origin => Vec::new(),
         };
         let ids: Vec<PointId> = ids
             .into_iter()
@@ -955,8 +957,9 @@ impl SketchSession {
     }
 
     /// Swap each `Sel::Mid` for a helper point held at that line's midpoint (an
-    /// existing helper is reused). Helper points belong to no entity, so they are
-    /// neither drawn nor pickable.
+    /// existing helper is reused), and `Sel::Origin` for a point fixed at (0, 0)
+    /// (any point already fixed there is reused). Helper points belong to no
+    /// entity, so they are neither drawn nor pickable.
     fn resolve_mids(sk: &mut Sketch, sel: &[Sel]) -> Vec<Sel> {
         sel.iter()
             .map(|x| match *x {
@@ -977,6 +980,18 @@ impl SketchSession {
                     });
                     Sel::Point(p)
                 }
+                Sel::Origin => {
+                    let have = sk.constraints.iter().find_map(|c| match c {
+                        Constraint::Fix(p, v) if v.x == 0.0 && v.y == 0.0 => Some(*p),
+                        _ => None,
+                    });
+                    let p = have.unwrap_or_else(|| {
+                        let p = sk.add_point(DVec2::ZERO);
+                        sk.constrain(Constraint::Fix(p, DVec2::ZERO));
+                        p
+                    });
+                    Sel::Point(p)
+                }
                 o => o,
             })
             .collect()
@@ -987,8 +1002,9 @@ impl SketchSession {
     /// circle/arc reads as diameter/radius, swapped by `dim_toggle`.
     pub fn dimension_for(&self, sel: &[Sel]) -> Option<(f64, DimMaker)> {
         let mut tmp;
+        let origin = sel.contains(&Sel::Origin);
         let mut sel = sel.to_vec();
-        let s: &Sketch = if sel.iter().any(|x| matches!(x, Sel::Mid(_))) {
+        let s: &Sketch = if sel.iter().any(|x| matches!(x, Sel::Mid(_) | Sel::Origin)) {
             tmp = self.sketch.clone();
             sel = Self::resolve_mids(&mut tmp, &sel);
             &tmp
@@ -1038,6 +1054,9 @@ impl SketchSession {
                             return None;
                         }
                         let (pa, pb) = (s.point(a), s.point(b));
+                        if origin && pa.distance(pb) < 1e-9 {
+                            return None; // e.g. a centre sitting on the origin
+                        }
                         Some(match self.dim_orient {
                             DimOrient::Aligned => (
                                 pa.distance(pb),
@@ -1104,6 +1123,7 @@ impl SketchSession {
                     Geom::Line { a, b } => (s.point(a) + s.point(b)) / 2.0,
                     _ => return None,
                 },
+                Sel::Origin => DVec2::ZERO,
                 Sel::Entity(e) => match s.entities[e.0 as usize].geom {
                     Geom::Circle { center, .. } | Geom::Arc { center, .. } => s.point(center),
                     _ => return None,
@@ -1120,7 +1140,7 @@ impl SketchSession {
     /// dimension then waits for a placement click that picks its orientation.
     pub fn dim_needs_placement(&self, sel: &[Sel]) -> bool {
         let pt = |x: &Sel| match *x {
-            Sel::Point(_) | Sel::Mid(_) => true,
+            Sel::Point(_) | Sel::Mid(_) | Sel::Origin => true,
             Sel::Entity(e) => !matches!(self.sketch.entities[e.0 as usize].geom, Geom::Line { .. }),
         };
         matches!(sel, [x, y] if pt(x) && pt(y))
@@ -1234,7 +1254,15 @@ impl SketchSession {
                 }
             }
         }
-        best.map(|b| b.1).or(r)
+        if let Some(b) = best {
+            return Some(b.1);
+        }
+        if (r.is_none() || matches!(r, Some(Sel::Entity(_))))
+            && self.to_screen(rect, DVec2::ZERO).distance(p) < 7.0
+        {
+            return Some(Sel::Origin);
+        }
+        r
     }
 
     fn pick(&self, rect: Rect, p: Pos2) -> Option<Sel> {
@@ -1330,6 +1358,7 @@ impl SketchSession {
                 }
             }
         }
+        offer(&mut cands, tol, q.length(), DVec2::ZERO, None, "origin");
         if let Some((_, pos, pid, l)) = nearest(&cands) {
             return (pos, pid, Some(l));
         }
@@ -2888,6 +2917,7 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     Geom::Line { a, b } => ((s.sketch.point(a) + s.sketch.point(b)) / 2.0, 2),
                     _ => return,
                 },
+                Sel::Origin => (DVec2::ZERO, 1),
                 Sel::Entity(_) => return,
             };
             let c = to(pt);
@@ -3477,6 +3507,73 @@ mod tests {
         s.dim_orient = DimOrient::Horizontal;
         s.apply_dimension(&sel, "13").unwrap_err(); // over-constrained: refused, and nothing added
         assert_eq!(s.sketch.points.len(), pts + 1);
+    }
+
+    #[test]
+    fn origin_is_a_dimension_anchor() {
+        let mut s = session();
+        let (pc, c) = circle_at(&mut s, (3.0, 4.0), 1.0);
+        // centre to origin: the distance, by orientation
+        let (v, mk) = s.dimension_for(&[Sel::Entity(c), Sel::Origin]).unwrap();
+        assert!((v - 5.0).abs() < 1e-9);
+        assert!(matches!(mk("5".into()), Constraint::Distance(..)));
+        s.dim_orient = DimOrient::Horizontal;
+        let (v, _) = s.dimension_for(&[Sel::Point(pc), Sel::Origin]).unwrap();
+        assert!((v - 3.0).abs() < 1e-9);
+        s.dim_orient = DimOrient::Vertical;
+        let (v, _) = s.dimension_for(&[Sel::Origin, Sel::Point(pc)]).unwrap();
+        assert!((v - 4.0).abs() < 1e-9);
+        // line to origin: the perpendicular distance
+        let l = s.add_line((DVec2::new(-5.0, 2.0), None), (DVec2::new(5.0, 2.0), None));
+        let (v, mk) = s.dimension_for(&[Sel::Origin, Sel::Entity(l)]).unwrap();
+        assert!((v - 2.0).abs() < 1e-9);
+        assert!(matches!(mk("2".into()), Constraint::PointLineDistance(..)));
+        // dimension_for does not touch the sketch
+        let n = s.sketch.points.len();
+        assert_eq!(s.sketch.points.len(), n);
+        // applying adds one fixed point at the origin, reused the next time
+        s.dim_orient = DimOrient::Aligned;
+        s.apply_dimension(&[Sel::Entity(c), Sel::Origin], "7").unwrap();
+        assert_eq!(s.sketch.points.len(), n + 1);
+        let fixed0 = |s: &SketchSession| {
+            s.sketch.constraints.iter().filter(|k| matches!(k, Constraint::Fix(_, v) if *v == DVec2::ZERO)).count()
+        };
+        assert_eq!(fixed0(&s), 1);
+        assert!((s.sketch.point(pc).length() - 7.0).abs() < 1e-6);
+        s.apply_dimension(&[Sel::Origin, Sel::Entity(l)], "3").unwrap();
+        assert_eq!(s.sketch.points.len(), n + 1, "origin point reused");
+        // the orphan point survives save/load, and a profile still builds
+        let back: Sketch = serde_json::from_str(&serde_json::to_string(&s.sketch).unwrap()).unwrap();
+        assert_eq!(back.constraints, s.sketch.constraints);
+        assert_eq!(back.points.len(), s.sketch.points.len());
+        // dragging the orphan origin point does not move it
+        let o = s
+            .sketch
+            .constraints
+            .iter()
+            .find_map(|k| match k {
+                Constraint::Fix(p, v) if *v == DVec2::ZERO => Some(*p),
+                _ => None,
+            })
+            .unwrap();
+        s.drag_begin(Sel::Point(o), DVec2::ZERO);
+        s.drag_to(DVec2::new(1.0, 1.0));
+        assert!(s.sketch.point(o).length() < 1e-6, "{:?} {:?}", s.sketch.point(o), s.error);
+    }
+
+    #[test]
+    fn origin_with_a_centre_on_it_is_not_dimensionable() {
+        let mut s = session();
+        let (_, c) = circle_at(&mut s, (0.0, 0.0), 1.0);
+        assert!(s.dimension_for(&[Sel::Entity(c), Sel::Origin]).is_none());
+        assert!(s.apply_dimension(&[Sel::Entity(c), Sel::Origin], "1").is_err());
+        // an existing point fixed at the origin is reused rather than duplicated
+        let (_, c2) = circle_at(&mut s, (4.0, 0.0), 1.0);
+        let o = s.sketch.add_point(DVec2::ZERO);
+        s.sketch.constrain(Constraint::Fix(o, DVec2::ZERO));
+        let n = s.sketch.points.len();
+        s.apply_dimension(&[Sel::Entity(c2), Sel::Origin], "5").unwrap();
+        assert_eq!(s.sketch.points.len(), n, "no duplicate origin point");
     }
 
     #[test]

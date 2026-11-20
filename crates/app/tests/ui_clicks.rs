@@ -1448,6 +1448,76 @@ fn dimension_tool_centre_to_centre_orientation_follows_placement() {
 }
 
 #[test]
+fn dimension_tool_circle_centre_to_sketch_origin_makes_a_distance() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    use easycad_model::sketch::Constraint;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    let a = egui::pos2(560.0, 380.0);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Circle;
+        s.snap = false;
+    }
+    click_at(&mut h, a, egui::PointerButton::Primary);
+    h.run_steps(3);
+    h.event(egui::Event::Text("20".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    // where the origin is on screen: the centre was placed unsnapped under `a`
+    let origin = match &h.state().mode {
+        Mode::Sketch(s) => {
+            let c = match s.sketch.entities[0].geom {
+                easycad_model::sketch::Geom::Circle { center, .. } => s.sketch.point(center),
+                _ => panic!(),
+            };
+            assert!(c.length() > 1.0, "centre is away from the origin");
+            egui::pos2(a.x - (c.x as f32) * s.scale, a.y + (c.y as f32) * s.scale)
+        }
+        _ => panic!(),
+    };
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Dimension;
+    }
+    h.run_steps(2);
+    hover_click(&mut h, a);
+    hover_click(&mut h, origin);
+    let (pending, input) = match &h.state().mode {
+        Mode::Sketch(s) => (s.dim_pending, s.input.clone()),
+        _ => panic!(),
+    };
+    assert!(pending && input.is_none(), "centre + origin wait for a placement click");
+    // beside the pair: vertical or aligned, any placement works; pick aligned (below-left diagonal)
+    hover_click(&mut h, egui::pos2((a.x + origin.x) / 2.0 + 60.0, (a.y + origin.y) / 2.0 - 60.0));
+    let input = match &h.state().mode {
+        Mode::Sketch(s) => s.input.clone(),
+        _ => panic!(),
+    };
+    assert!(input.is_some(), "the value box opens");
+    h.event(egui::Event::Text("55".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    match &h.state().mode {
+        Mode::Sketch(s) => {
+            let cs = &s.sketch.constraints;
+            assert!(
+                cs.iter().any(|c| matches!(
+                    c,
+                    Constraint::Distance(..) | Constraint::DistanceX(..) | Constraint::DistanceY(..)
+                )),
+                "{cs:?}"
+            );
+            assert!(cs.iter().any(|c| matches!(c, Constraint::Fix(_, v) if v.length() == 0.0)), "origin point fixed");
+            assert!(s.input.is_none());
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
 fn m_key_opens_move_gizmo_esc_restores_and_ctrl_z_undoes() {
     let _g = serial();
     use easycad_app::app::Mode;
