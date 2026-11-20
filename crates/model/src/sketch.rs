@@ -304,7 +304,10 @@ enum Eq {
     Distance(usize, usize, f64),
     Dx(usize, usize, f64),
     Dy(usize, usize, f64),
-    PointLine(usize, usize, usize, f64),
+    /// Distance from a point to the infinite line through two points. The last field is the
+    /// side the point started on (+1/-1), kept so the residual stays smooth through the
+    /// solve; 0 means unsigned (`abs`).
+    PointLine(usize, usize, usize, f64, f64),
     Length(usize, usize, f64),
     Radius(Rad, f64),
     /// `rad(target) - rad(source) = v`.
@@ -425,7 +428,7 @@ fn lower_offset(
         }
     }
     let on = |k: usize, q: usize| match srcs[k] {
-        Src::Line(a, b) => Eq::PointLine(q, a, b, d),
+        Src::Line(a, b) => Eq::PointLine(q, a, b, d, 0.0),
         Src::Circ(c, r) => Eq::OnOffsetCircle(q, c, r, if pt(q).distance(pt(c)) >= rad(x0, r) { d } else { -d }),
     };
     let normal = |k: usize, q: usize, j: usize| match srcs[k] {
@@ -531,6 +534,12 @@ impl System {
             }
             x
         };
+        // side of the line a point is on at the starting positions (0 when on it)
+        let side = |q: usize, a: usize, b: usize| {
+            let d = p(&x0, b) - p(&x0, a);
+            let s = d.perp_dot(p(&x0, q) - p(&x0, a)) / d.length().max(1e-12);
+            if s.abs() > 1e-9 { s.signum() } else { 0.0 }
+        };
         for (i, c) in sk.constraints.iter().enumerate() {
             use Constraint as C;
             let ev = |e: &Expr| e.eval(vals);
@@ -597,12 +606,13 @@ impl System {
                 C::DistanceY(a, b, d) => Eq::Dy(pt(i, *a)?, pt(i, *b)?, ev(d)?),
                 C::PointLineDistance(q, l, d) => {
                     let [a, b] = line(i, *l)?;
-                    Eq::PointLine(pt(i, *q)?, a, b, ev(d)?)
+                    let q = pt(i, *q)?;
+                    Eq::PointLine(q, a, b, ev(d)?, side(q, a, b))
                 }
                 C::LineDistance(l1, l2, d) => {
                     let ([a, b], [c, dd]) = (line(i, *l1)?, line(i, *l2)?);
                     eqs.push(Eq::Parallel([a, b, c, dd]));
-                    eqs.push(Eq::PointLine(c, a, b, ev(d)?));
+                    eqs.push(Eq::PointLine(c, a, b, ev(d)?, side(c, a, b)));
                     continue;
                 }
                 C::Length(l, d) => {
@@ -702,7 +712,10 @@ impl System {
                 Eq::Distance(a, b, v) => r.push(dir(a, b).length() - v),
                 Eq::Dx(a, b, v) => r.push(p(x, b).x - p(x, a).x - v),
                 Eq::Dy(a, b, v) => r.push(p(x, b).y - p(x, a).y - v),
-                Eq::PointLine(q, a, b, v) => r.push(line_dist(q, a, b).abs() - v),
+                Eq::PointLine(q, a, b, v, sg) => {
+                    let s = line_dist(q, a, b);
+                    r.push(if sg == 0.0 { s.abs() } else { sg * s } - v);
+                }
                 Eq::Length(a, b, v) => r.push(dir(a, b).length() - v),
                 Eq::Radius(rr, v) => r.push(rad(x, rr) - v),
                 Eq::RadiusOffset(r1, r2, v) => r.push(rad(x, r2) - rad(x, r1) - v),
@@ -758,7 +771,7 @@ impl System {
             while lambda < 1e12 {
                 let mut damped = a.clone();
                 for k in 0..x.len() {
-                    damped[(k, k)] += lambda * (a[(k, k)] + 1e-6);
+                    damped[(k, k)] += lambda * (a[(k, k)] + 1.0);
                 }
                 let Some(dx) = damped.lu().solve(&(-&g)) else {
                     lambda *= 10.0;
@@ -1078,6 +1091,83 @@ mod tests {
         let rep = s.solve(&vals).unwrap();
         assert!(!rep.converged);
         assert_eq!(rep.status, ConstraintStatus::Conflicting);
+    }
+
+    fn pld_setup(a: DVec2, b: DVec2) -> (Sketch, PointId, EntityId) {
+        let mut s = Sketch::new("pld", Plane::XY);
+        let o = s.add_point(v(0.0, 0.0));
+        let l = s.line(a, b);
+        s.constrain(Constraint::Fix(o, v(0.0, 0.0)));
+        s.constrain(Constraint::Horizontal(l));
+        (s, o, l)
+    }
+
+    fn line_y(s: &Sketch, l: EntityId) -> f64 {
+        let Geom::Line { a, .. } = s.entities[l.0 as usize].geom else { panic!() };
+        s.point(a).y
+    }
+
+    #[test]
+    fn point_line_distance_any_side() {
+        for (a, b) in [
+            (v(10.0, 2.0), v(20.0, 2.0)),
+            (v(-20.0, 2.0), v(-10.0, 2.0)),
+            (v(10.0, -2.0), v(20.0, -2.0)),
+            (v(-20.0, -2.0), v(-10.0, -2.0)),
+            (v(-5.0, 2.0), v(5.0, 2.0)),
+        ] {
+            let side = a.y.signum();
+            let (mut s, o, l) = pld_setup(a, b);
+            s.constrain(Constraint::PointLineDistance(o, l, "d".into()));
+            for d in [5.0, 3.0, 12.0, 0.5, 7.0] {
+                let vals = Values::from([("d".into(), d)]);
+                let rep = s.solve(&vals).unwrap();
+                assert!(rep.converged, "{a:?} d={d}: {rep:?} {:?}", s.points);
+                assert_ne!(rep.status, ConstraintStatus::OverConstrained, "{a:?} d={d}: {rep:?}");
+                assert_ne!(rep.status, ConstraintStatus::Conflicting, "{a:?} d={d}: {rep:?}");
+                assert!((line_y(&s, l) - side * d).abs() < 1e-6, "{a:?} d={d}: y={}", line_y(&s, l));
+            }
+        }
+    }
+
+    #[test]
+    fn point_line_distance_slanted() {
+        for (a, b) in [(v(10.0, 2.0), v(20.0, 9.0)), (v(10.0, -2.0), v(20.0, -9.0)), (v(-20.0, 3.0), v(-10.0, 8.0))] {
+            let mut s = Sketch::new("pld", Plane::XY);
+            let o = s.add_point(v(0.0, 0.0));
+            let l = s.line(a, b);
+            s.constrain(Constraint::Fix(o, v(0.0, 0.0)));
+            s.constrain(Constraint::PointLineDistance(o, l, "d".into()));
+            for d in [4.0, 9.0, 1.0] {
+                let rep = s.solve(&Values::from([("d".into(), d)])).unwrap();
+                assert!(rep.converged && rep.status != ConstraintStatus::OverConstrained, "{a:?} d={d}: {rep:?}");
+                let Geom::Line { a: pa, b: pb } = s.entities[l.0 as usize].geom else { panic!() };
+                let (pa, pb) = (s.point(pa), s.point(pb));
+                let dist = (pb - pa).perp_dot(-pa) / (pb - pa).length();
+                assert!((dist.abs() - d).abs() < 1e-6, "{a:?} d={d}: {dist}");
+            }
+        }
+    }
+
+    #[test]
+    fn line_distance_any_side() {
+        for (a, b, c, e) in [
+            (v(0.0, 0.0), v(10.0, 0.0), v(30.0, 2.0), v(40.0, 2.0)),
+            (v(0.0, 0.0), v(10.0, 0.0), v(30.0, -2.0), v(40.0, -2.0)),
+            (v(0.0, 0.0), v(10.0, 0.0), v(-40.0, 2.0), v(-30.0, 2.0)),
+        ] {
+            let mut s = Sketch::new("ld", Plane::XY);
+            let (l1, l2) = (s.line(a, b), s.line(c, e));
+            s.constrain(Constraint::Fix(PointId(0), a));
+            s.constrain(Constraint::Fix(PointId(1), b));
+            s.constrain(Constraint::LineDistance(l1, l2, "d".into()));
+            for d in [5.0, 3.0, 12.0, 0.5] {
+                let rep = s.solve(&Values::from([("d".into(), d)])).unwrap();
+                assert!(rep.converged && rep.status != ConstraintStatus::OverConstrained, "{c:?} d={d}: {rep:?}");
+                assert!((line_y(&s, l2).abs() - d).abs() < 1e-6, "{c:?} d={d}");
+                assert_eq!(line_y(&s, l2).signum(), c.y.signum());
+            }
+        }
     }
 
     #[test]
