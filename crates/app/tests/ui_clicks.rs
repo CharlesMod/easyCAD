@@ -817,3 +817,32 @@ fn plane_pick_cancels_on_escape_and_right_click() {
     assert!(h.state().plane_pick.is_none(), "right-click cancels");
     assert!(easycad_app::app::Mode::is_model(&h.state().mode));
 }
+
+#[test]
+fn x_key_toggles_construction_in_sketch_mode() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Sel;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    let s = |h: &Harness<'static, EasyCadApp>| match &h.state().mode {
+        Mode::Sketch(s) => (s.construction_mode, s.sketch.entities.iter().filter(|e| e.construction).count(), s.undo.len()),
+        _ => panic!("not in sketch mode"),
+    };
+    // nothing selected: X turns construction mode on, X again off
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::X);
+    assert!(s(&h).0);
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::X);
+    assert!(!s(&h).0);
+    // a selected line: X makes it construction (one undo step)
+    if let Mode::Sketch(sk) = &mut h.state_mut().mode {
+        let e = sk.add_line((glam::DVec2::ZERO, None), (glam::DVec2::new(5.0, 0.0), None));
+        sk.selection = vec![Sel::Entity(e)];
+    }
+    h.run_steps(2);
+    let u0 = s(&h).2;
+    chord(&mut h, egui::Modifiers::NONE, egui::Key::X);
+    assert_eq!(s(&h), (false, 1, u0 + 1));
+}

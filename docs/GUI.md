@@ -151,6 +151,7 @@ Deleted files go to the Drive trash; files deleted locally by sync go to
 | Esc (nothing selected) | leave the active component (up one level) |
 | Ctrl+, | settings |
 | sketch: L R C A F O P T D | tools. The cursor snaps to points, else to tenths of the grid step (faint minor lines show once they are 6 px apart; zoomed out, to the major step); hold Alt to bypass snap |
+| sketch: X, right-click > Toggle construction | with entities selected, flips them between real and construction geometry (one undo step); with nothing selected, switches construction mode for newly drawn geometry (palette button "Construction" does the same). Construction is dashed grey, snappable and dimensionable, never a profile; visible sketches show it as thin dashes in the 3D view |
 | sketch: first click of Line / Rect / Circle / Arc | the value box opens at once (length / W then Tab to H / diameter / radius), showing the live reading with its text selected: type a number or `=expr` to replace it, Enter commits it, a second click commits the mouse value, Esc cancels |
 | sketch: Offset (O) | click a shape: the distance box opens with `wall` selected (the parameter stays linked; 2 if there is none). Ctrl/Shift-click adds or removes shapes; a dashed preview shows the result; Enter applies to all as one undo step. Closed loops and circles grow outward for a positive distance; open chains go away from the centroid of all picked shapes (a negative distance flips all together); empty space or Esc cancels |
 
