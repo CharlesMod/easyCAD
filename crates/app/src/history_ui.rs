@@ -95,7 +95,7 @@ pub fn merged(ids: &[FeatureId], peek: Option<&Peek>) -> Vec<Disp> {
 // ------------------------------------------------------------------ head cursor
 
 fn drag_key() -> Id {
-    Id::new("history_head_drag_preview")
+    Id::NULL.with("history_head_drag_preview")
 }
 
 /// The gap (1..=n) the head is being dragged to, while a drag is going.
@@ -122,7 +122,7 @@ pub fn golden_cursor(
     let (top, bot) = (strip.top(), strip.bottom());
     let x0 = bounds[cur - 1];
     let hit = Rect::from_min_max(pos2(x0 - 5.0, top), pos2(x0 + 5.0, bot));
-    let bar = ui.interact(hit, Id::new("history_head_bar"), Sense::drag());
+    let bar = ui.interact(hit, Id::NULL.with("history_head_bar"), Sense::drag());
     let chip = head_chip;
     let dragging = bar.dragged() || chip.is_some_and(|c| c.dragged());
     let stopped = bar.drag_stopped() || chip.is_some_and(|c| c.drag_stopped());
@@ -157,9 +157,9 @@ pub fn golden_cursor(
         }
     }
     let active = dragging || hovered;
-    let hot = ui.ctx().animate_bool_with_time(Id::new("history_head_hot"), active, 0.12);
+    let hot = ui.ctx().animate_bool_with_time(Id::NULL.with("history_head_hot"), active, 0.12);
     let t = if dragging { 0.06 } else { 0.14 };
-    let x = ui.ctx().animate_value_with_time(Id::new("history_head_x"), bounds[show.clamp(1, n) - 1], t);
+    let x = ui.ctx().animate_value_with_time(Id::NULL.with("history_head_x"), bounds[show.clamp(1, n) - 1], t);
     paint_cursor(ui, x, top, bot, hot, dragging);
     if hovered && !dragging {
         bar.on_hover_text("Drag the golden head to a step to roll back (or forward) · Ctrl+Alt+←/→ nudges it");

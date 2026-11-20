@@ -1528,7 +1528,7 @@ fn history(app: &mut EasyCadApp, ui: &mut Ui) {
                                     if k >= 1 && k <= n {
                                         crate::history_ui::split_mark(ui, bounds[k - 1], strip_rect.top(), strip_rect.bottom(), theme::ACCENT_LINK);
                                         let hit = egui::Rect::from_center_size(egui::pos2(bounds[k - 1], strip_rect.top() + 4.0), vec2(8.0, 8.0));
-                                        ui.interact(hit, egui::Id::new(("split_mark", k)), Sense::hover()).on_hover_text(tip);
+                                        ui.interact(hit, egui::Id::NULL.with("split_mark").with(k), Sense::hover()).on_hover_text(tip);
                                     }
                                 }
                             }
