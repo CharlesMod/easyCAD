@@ -133,6 +133,8 @@ pub struct SketchSession {
     pub fitted: bool,
     pub selection: Vec<Sel>,
     pub hover: Option<Sel>,
+    /// Project tool: index into `projected` of the model edge under the cursor
+    pub project_hover: Option<usize>,
     pub input: Option<String>,
     pub input2: Option<String>,
     pub input_second: bool,
@@ -206,6 +208,7 @@ impl SketchSession {
             fitted: false,
             selection: Vec::new(),
             hover: None,
+            project_hover: None,
             input: None,
             input2: None,
             input_second: false,
@@ -636,6 +639,14 @@ impl SketchSession {
 
     pub fn profile_count(&self) -> usize {
         self.sketch.profiles().profiles.len()
+    }
+
+    /// Index of the projectable model edge under sketch-space point `q`.
+    pub fn project_hit(&self, q: DVec2) -> Option<usize> {
+        let tol = 6.0 / self.scale as f64;
+        self.projected
+            .iter()
+            .position(|pl| pl.windows(2).any(|w| seg_dist(q, w[0], w[1]) < tol))
     }
 
     pub fn status(&self) -> (Color32, String) {
@@ -1928,6 +1939,17 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         s.alt_held = ui.input(|i| i.modifiers.alt);
         s.cursor = s.snap_point(rect, hp).0;
         s.hover = if s.tool == Tool::Dimension { s.pick_dim(rect, hp) } else { s.pick(rect, hp) };
+        let ph = if s.tool == Tool::Project { s.project_hit(s.to_sketch(rect, hp)) } else { None };
+        if ph != s.project_hover {
+            s.project_hover = ph;
+            ui.ctx().request_repaint();
+        }
+        if ph.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            resp.clone().on_hover_text("Click to project edge");
+        }
+    } else if s.project_hover.take().is_some() {
+        ui.ctx().request_repaint();
     }
     // keyboard
     let typing = ui.ctx().text_edit_focused();
@@ -2304,11 +2326,7 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
         },
         Tool::Project => {
             let q = s.to_sketch(rect, hp);
-            let tol = 6.0 / s.scale as f64;
-            let hit = s
-                .projected
-                .iter()
-                .position(|pl| pl.windows(2).any(|w| seg_dist(q, w[0], w[1]) < tol));
+            let hit = s.project_hit(q);
             // exact: lines stay lines, circles facing the plane stay circles (GUI_NEEDS #14)
             if let Some((info, samples)) = hit.and_then(|i| s.projected_src.get(i).cloned().flatten()) {
                 s.push_undo();
@@ -2804,9 +2822,13 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         }
         p.add(egui::Shape::mesh(mesh));
     }
-    for pl in &s.projected {
+    for (i, pl) in s.projected.iter().enumerate() {
         let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
-        p.add(egui::Shape::line(pts, Stroke::new(1.0, proj_col)));
+        if s.tool == Tool::Project && s.project_hover == Some(i) {
+            p.add(egui::Shape::line(pts, Stroke::new(2.4, theme::ORANGE)));
+        } else {
+            p.add(egui::Shape::line(pts, Stroke::new(1.0, proj_col)));
+        }
     }
     for pl in &s.slice_outline {
         let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
@@ -3591,6 +3613,19 @@ mod tests {
         assert_eq!(back.constraints, s.sketch.constraints);
         s.delete_dimension(i);
         assert!(!s.sketch.constraints.iter().any(|c| matches!(c, Constraint::LineDistance(..))));
+    }
+
+    #[test]
+    fn project_hover_hits_edge_and_clears() {
+        let mut s = session();
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        s.tool = Tool::Project;
+        s.projected = vec![vec![DVec2::new(0.0, 0.0), DVec2::new(2.0, 0.0)]];
+        s.project_hover = s.project_hit(DVec2::new(1.0, 0.02));
+        assert_eq!(s.project_hover, Some(0));
+        s.project_hover = s.project_hit(DVec2::new(1.0, 1.0));
+        assert_eq!(s.project_hover, None);
     }
 
     #[test]

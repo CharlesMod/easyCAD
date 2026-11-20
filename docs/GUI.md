@@ -28,7 +28,7 @@ mode a bare number means inches.
 | `ui_process.rs` | PROCESS section: profile, fit allowances, build plate picker + preview, teardrops, calibration. |
 | `ui_viewport.rs` | Viewport input, pick popover, overlays, floating dialogs. |
 | `dialogs/` | Feature dialogs (fillet/chamfer with self-heal report, extrude, revolve, shell, draft, split, boss, rib, pattern, mirror, standoffs, parting joint, export). |
-| `sketch_mode.rs` | 2D sketch editor with tools, constraints, live solver, DXF layers. Offset (O) is the engine's `offset_chain` for every chain (lines, arcs, circles, open or closed; DXF loops with separate end points too) and makes profile geometry. |
+| `sketch_mode.rs` | 2D sketch editor with tools, constraints, live solver, DXF layers. Project tool highlights the model edge under the cursor (orange, pointing-hand cursor, "Click to project edge" tip). Offset (O) is the engine's `offset_chain` for every chain (lines, arcs, circles, open or closed; DXF loops with separate end points too) and makes profile geometry. |
 | `ui_parts.rs` | Parts library, placement on hole edges (a "Modeled threads" checkbox in the placement banner sets `InsertPart.threads`), BOM. |
 | `ui_drawing.rs` | Drawing sheets on the engine's `drawing` module: views (face / iso / custom, Shift+MMB orbit inside a view, "Shows" part bodies / whole assembly / a component / an occurrence, exploded), dimensions, notes, balloons (BOM item numbers in assembly views), BOM table, section views (two clicks for the cutting line, one to place), datums and feature control frames (symbol, ⌀, Ⓜ/Ⓛ, datums in the right panel), SVG / DXF / PDF export. |
 | `adapters.rs` | Workarounds for engine gaps (see `GUI_NEEDS.md`). |
