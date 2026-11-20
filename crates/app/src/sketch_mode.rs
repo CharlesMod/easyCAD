@@ -73,6 +73,17 @@ pub enum Sel {
 }
 
 /// Builds the dimension constraint from the typed expression.
+/// A live Select-tool drag of a point, or of every point of a line/arc/circle.
+#[derive(Clone)]
+pub struct Drag {
+    /// The dragged points with where each started.
+    pub pts: Vec<(PointId, DVec2)>,
+    /// Where the press landed (snapped), so the move is relative to it.
+    pub press: DVec2,
+    /// The sketch before the drag, for Esc.
+    pub before: Sketch,
+}
+
 pub type DimMaker = Box<dyn Fn(Expr) -> Constraint>;
 
 pub struct DxfState {
@@ -119,7 +130,7 @@ pub struct SketchSession {
     pub redo: Vec<(Sketch, Vec<Option<String>>)>,
     pub values: Values,
     pub names: Vec<String>,
-    pub drag: Option<PointId>,
+    pub drag: Option<Drag>,
     pub cursor: DVec2,
     pub projected: Vec<Vec<DVec2>>,
     /// The model edge each projected polyline comes from (exact projection), with
@@ -440,6 +451,73 @@ impl SketchSession {
     /// Drop the snapshot of an edit that did not happen.
     fn pop_undo(&mut self) {
         self.undo.pop();
+    }
+
+    /// Start dragging a pick: a point moves alone; a line, arc or circle moves
+    /// with all its points. One undo step covers the whole drag.
+    pub fn drag_begin(&mut self, x: Sel, press: DVec2) {
+        let ids: Vec<PointId> = match x {
+            Sel::Point(p) => vec![p],
+            Sel::Entity(e) => geom_points(&self.sketch.entities[e.0 as usize].geom),
+        };
+        let ids: Vec<PointId> = ids
+            .into_iter()
+            .filter(|p| self.entity_layer.iter().all(|l| l.is_none()) || !is_fixed(&self.sketch, *p))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.error = None;
+        let pts = ids.iter().map(|p| (*p, self.sketch.point(*p))).collect();
+        self.drag = Some(Drag { pts, press, before: self.sketch.clone() });
+    }
+
+    /// Move the drag to `target` (the pointer, already snapped), keeping every
+    /// constraint: the points are pinned to the target when that is consistent;
+    /// otherwise the solver pulls them to the nearest place the constraints allow.
+    pub fn drag_to(&mut self, target: DVec2) {
+        let Some(d) = self.drag.clone() else { return };
+        let delta = target - d.press;
+        let base = d.before.clone();
+        let mut sk = base.clone();
+        let n0 = sk.constraints.len();
+        for (p, o) in &d.pts {
+            sk.points[p.0 as usize] = *o + delta;
+            sk.constrain(Constraint::Fix(*p, *o + delta));
+        }
+        let mut ok = matches!(sk.solve(&self.values), Ok(r) if r.converged);
+        sk.constraints.truncate(n0);
+        if !ok {
+            // soft: start displaced and let the constraints push the points back
+            sk = base.clone();
+            for (p, o) in &d.pts {
+                sk.points[p.0 as usize] = *o + delta;
+            }
+            ok = matches!(sk.solve(&self.values), Ok(r) if r.converged);
+        }
+        if ok {
+            let moved = d.pts.iter().map(|(p, o)| sk.point(*p).distance(*o)).fold(0.0, f64::max);
+            self.error = (moved < 1e-6 && delta.length() > 1e-6)
+                .then(|| "fully constrained: it can't move".to_string());
+            self.sketch = sk;
+        }
+    }
+
+    pub fn drag_end(&mut self) {
+        if self.drag.take().is_some() {
+            self.resolve();
+        }
+    }
+
+    /// Esc during a drag: back to where it was, and no undo step left behind.
+    pub fn drag_cancel(&mut self) {
+        if let Some(d) = self.drag.take() {
+            self.sketch = d.before;
+            self.pop_undo();
+            self.error = None;
+            self.resolve();
+        }
     }
 
     pub fn push_undo(&mut self) {
@@ -1525,33 +1603,32 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         }
     }
     // pointer
-    if let Some(hp) = resp.interact_pointer_pos() {
-        if resp.drag_started_by(egui::PointerButton::Primary) && s.tool == Tool::Select {
-            if let Some(Sel::Point(pid)) = s.pick(rect, hp) {
-                if s.entity_layer.iter().all(|l| l.is_none()) || !is_fixed(&s.sketch, pid) {
-                    s.push_undo();
-                    s.drag = Some(pid);
-                }
+    if s.drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        s.drag_cancel();
+    }
+    if resp.drag_started_by(egui::PointerButton::Primary) && s.tool == Tool::Select {
+        let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+        if let Some(hp) = origin {
+            if let Some(x) = s.pick(rect, hp) {
+                let press = s.snap_point(rect, hp).0;
+                s.drag_begin(x, press);
             }
         }
-        if let Some(pid) = s.drag {
+    }
+    if s.drag.is_some() {
+        if let Some(hp) = resp.interact_pointer_pos() {
             if resp.dragged_by(egui::PointerButton::Primary) {
-                let q = s.to_sketch(rect, hp);
-                let mut sk = s.sketch.clone();
-                sk.points[pid.0 as usize] = q;
-                sk.constrain(Constraint::Fix(pid, q));
-                if let Ok(r) = sk.solve(&s.values) {
-                    if r.converged {
-                        sk.constraints.pop();
-                        s.sketch = sk;
-                    }
+                let (mut q, hit) = s.snap_point(rect, hp);
+                // snapping onto a point being dragged would chase itself
+                if hit.is_some_and(|h| s.drag.as_ref().is_some_and(|d| d.pts.iter().any(|(p, _)| *p == h))) {
+                    q = s.to_sketch(rect, hp);
                 }
+                s.drag_to(q);
             }
         }
     }
     if resp.drag_stopped() && s.drag.is_some() {
-        s.drag = None;
-        s.resolve();
+        s.drag_end();
     }
     if resp.clicked_by(egui::PointerButton::Primary) {
         if let Some(hp) = resp.interact_pointer_pos() {
@@ -2557,6 +2634,105 @@ mod tests {
     fn session() -> SketchSession {
         let d = DocData::new("t", "test");
         SketchSession::new_on(Plane::XY, &d)
+    }
+
+    fn circle_at(s: &mut SketchSession, c: (f64, f64), r: f64) -> (PointId, EntityId) {
+        let pc = s.sketch.add_point(DVec2::new(c.0, c.1));
+        let e = s.sketch.add_entity(Geom::Circle { center: pc, radius: r }, false);
+        s.entity_layer.resize(s.sketch.entities.len(), None);
+        (pc, e)
+    }
+
+    #[test]
+    fn dimensioned_circle_drags_by_its_centre_and_keeps_its_diameter() {
+        let mut s = session();
+        let (pc, e) = circle_at(&mut s, (0.0, 0.0), 2.0);
+        s.apply_dimension(&[Sel::Entity(e)], "6").unwrap();
+        let undo_before = s.undo.len();
+        s.drag_begin(Sel::Point(pc), DVec2::ZERO);
+        s.drag_to(DVec2::new(5.0, 3.0));
+        s.drag_end();
+        assert!(s.sketch.point(pc).distance(DVec2::new(5.0, 3.0)) < 1e-6);
+        let Geom::Circle { radius, .. } = s.sketch.entities[0].geom else { panic!() };
+        assert!((radius - 3.0).abs() < 1e-6);
+        assert_eq!(s.undo.len(), undo_before + 1, "one undo step per drag");
+        assert!(s.undo());
+        assert!(s.sketch.point(pc).length() < 1e-6);
+    }
+
+    #[test]
+    fn drag_by_circle_body_and_line_body_keep_dimensions() {
+        let mut s = session();
+        let (pc, c) = circle_at(&mut s, (0.0, 0.0), 1.0);
+        s.drag_begin(Sel::Entity(c), DVec2::new(1.0, 0.0));
+        s.drag_to(DVec2::new(3.0, 1.0));
+        s.drag_end();
+        assert!(s.sketch.point(pc).distance(DVec2::new(2.0, 1.0)) < 1e-6);
+        let l = s.add_line((DVec2::new(10.0, 10.0), None), (DVec2::new(14.0, 10.0), None));
+        s.sketch.constrain(Constraint::Length(l, 4.0.into()));
+        let (a, b) = s.line_points(l).unwrap();
+        s.drag_begin(Sel::Entity(l), DVec2::new(12.0, 10.0));
+        s.drag_to(DVec2::new(12.0, 15.0));
+        s.drag_end();
+        assert!((s.sketch.point(a).distance(s.sketch.point(b)) - 4.0).abs() < 1e-6);
+        assert!(s.sketch.point(a).distance(DVec2::new(10.0, 15.0)) < 1e-6);
+    }
+
+    #[test]
+    fn drag_endpoint_of_length_dimensioned_line_rotates_it() {
+        let mut s = session();
+        let l = s.add_line((DVec2::ZERO, None), (DVec2::new(4.0, 0.0), None));
+        s.sketch.constraints.clear(); // drop the inferred horizontal
+        s.sketch.constrain(Constraint::Length(l, 4.0.into()));
+        let (a, b) = s.line_points(l).unwrap();
+        s.sketch.constrain(Constraint::Fix(a, DVec2::ZERO));
+        s.drag_begin(Sel::Point(b), DVec2::new(4.0, 0.0));
+        s.drag_to(DVec2::new(0.0, 9.0)); // beyond reach: pulled onto the circle of radius 4
+        s.drag_end();
+        assert!((s.sketch.point(a).distance(s.sketch.point(b)) - 4.0).abs() < 1e-6);
+        assert!(s.sketch.point(b).y > 3.9, "{:?} {:?}", s.sketch.point(a), s.sketch.point(b));
+    }
+
+    #[test]
+    fn fully_constrained_drag_does_not_move_and_esc_restores() {
+        let mut s = session();
+        let l = fixed_line(&mut s, (0.0, 0.0), (5.0, 0.0));
+        let (a, _) = s.line_points(l).unwrap();
+        let undo_before = s.undo.len();
+        s.drag_begin(Sel::Point(a), DVec2::ZERO);
+        s.drag_to(DVec2::new(2.0, 2.0));
+        assert!(s.error.as_deref().is_some_and(|e| e.contains("fully constrained")));
+        assert!(s.sketch.point(a).length() < 1e-6);
+        s.drag_cancel();
+        assert_eq!(s.undo.len(), undo_before, "cancel leaves no undo step");
+        let (pc, _) = circle_at(&mut s, (20.0, 20.0), 1.0);
+        s.drag_begin(Sel::Point(pc), DVec2::new(20.0, 20.0));
+        s.drag_to(DVec2::new(25.0, 25.0));
+        s.drag_cancel();
+        assert!(s.sketch.point(pc).distance(DVec2::new(20.0, 20.0)) < 1e-6);
+    }
+
+    #[test]
+    fn drag_target_snaps_to_grid_tenths_and_points() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        let (pc, _) = circle_at(&mut s, (0.0, 0.0), 1.0);
+        let other = s.add_line((DVec2::new(3.0, 3.0), None), (DVec2::new(4.0, 3.0), None));
+        let _ = other;
+        let (t, _) = s.snap_point(rect, s.to_screen(rect, DVec2::new(1.23, 0.47)));
+        s.drag_begin(Sel::Point(pc), DVec2::ZERO);
+        s.drag_to(t);
+        s.drag_end();
+        let c = s.sketch.point(pc);
+        assert!((c.x - 1.2).abs() < 1e-9 && (c.y - 0.5).abs() < 1e-9, "{c:?}");
+        let (t, hit) = s.snap_point(rect, s.to_screen(rect, DVec2::new(3.02, 3.01)));
+        assert!(hit.is_some());
+        s.drag_begin(Sel::Point(pc), c);
+        s.drag_to(t);
+        s.drag_end();
+        assert!(s.sketch.point(pc).distance(DVec2::new(3.0, 3.0)) < 1e-9);
     }
 
     #[test]
