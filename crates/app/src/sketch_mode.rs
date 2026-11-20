@@ -968,20 +968,136 @@ impl SketchSession {
     }
 
     fn snap_point(&self, rect: Rect, p: Pos2) -> (DVec2, Option<PointId>) {
-        if self.snap && !self.alt_held {
-            if let Some(Sel::Point(pid)) = self.pick(rect, p) {
-                return (self.sketch.point(pid), Some(pid));
-            }
-            let q = self.to_sketch(rect, p);
-            let g = snap_step(self.scale);
-            return (
-                DVec2::new((q.x / g).round() * g, (q.y / g).round() * g),
-                None,
-            );
+        let (q, pid, _) = self.snap_full(rect, p);
+        (q, pid)
+    }
+
+    /// Snap priority within `SNAP_PX`: existing points (ends, centres), line
+    /// midpoints, then on-curve (projected geometry first on a tie), then the grid.
+    /// While a circle/arc radius is being set, a circumference of the same centre
+    /// wins (so a copy of an existing circle is exact). Returns the position, the
+    /// point it landed on and what it snapped to ("end", "center", "mid",
+    /// "radius", "on line", "on circle", "on arc"); `None` label = grid.
+    fn snap_full(&self, rect: Rect, p: Pos2) -> (DVec2, Option<PointId>, Option<&'static str>) {
+        let q = self.to_sketch(rect, p);
+        if !self.snap || self.alt_held {
+            return (q, None, None);
         }
-        (self.to_sketch(rect, p), None)
+        let tol = SNAP_PX as f64 / self.scale as f64;
+        let sk = &self.sketch;
+        // 1. points: ends and centres, then line midpoints
+        type Cand = (f64, DVec2, Option<PointId>, &'static str);
+        let mut cands: Vec<Cand> = Vec::new();
+        fn offer(c: &mut Vec<Cand>, tol: f64, d: f64, pos: DVec2, pid: Option<PointId>, l: &'static str) {
+            if d < tol {
+                c.push((d, pos, pid, l));
+            }
+        }
+        let nearest = |v: &[Cand]| v.iter().copied().min_by(|a, b| a.0.total_cmp(&b.0));
+        for e in &sk.entities {
+            match e.geom {
+                Geom::Line { a, b } => {
+                    for id in [a, b] {
+                        offer(&mut cands, tol, sk.point(id).distance(q), sk.point(id), Some(id), "end");
+                    }
+                }
+                Geom::Arc { center, start, end } => {
+                    offer(&mut cands, tol, sk.point(center).distance(q), sk.point(center), Some(center), "center");
+                    for id in [start, end] {
+                        offer(&mut cands, tol, sk.point(id).distance(q), sk.point(id), Some(id), "end");
+                    }
+                }
+                Geom::Circle { center, .. } => {
+                    offer(&mut cands, tol, sk.point(center).distance(q), sk.point(center), Some(center), "center");
+                }
+            }
+        }
+        if let Some((_, pos, pid, l)) = nearest(&cands) {
+            return (pos, pid, Some(l));
+        }
+        for e in &sk.entities {
+            if let Geom::Line { a, b } = e.geom {
+                let m = (sk.point(a) + sk.point(b)) / 2.0;
+                offer(&mut cands, tol, m.distance(q), m, None, "mid");
+            }
+        }
+        if let Some((_, pos, pid, l)) = nearest(&cands) {
+            return (pos, pid, Some(l));
+        }
+        // radius phase of a circle/arc: the circumference of a circle with this centre
+        if matches!(self.tool, Tool::Circle | Tool::Arc) && self.clicks.len() == 1 {
+            let c = self.clicks[0].0;
+            let dist = c.distance(q);
+            for e in &sk.entities {
+                let r = match e.geom {
+                    Geom::Circle { center, radius } if sk.point(center).distance(c) < 1e-9 => radius,
+                    Geom::Arc { center, start, .. } if sk.point(center).distance(c) < 1e-9 => {
+                        sk.point(start).distance(c)
+                    }
+                    _ => continue,
+                };
+                if (dist - r).abs() < tol && dist > 1e-9 {
+                    cands.push(((dist - r).abs(), c + (q - c) / dist * r, None, "radius"));
+                }
+            }
+            if let Some((_, pos, pid, l)) = nearest(&cands) {
+                return (pos, pid, Some(l));
+            }
+        }
+        // 2. on curve; projected geometry wins a near tie
+        let mut on: Option<(f64, DVec2, &'static str)> = None;
+        for e in &sk.entities {
+            let (pos, label) = match e.geom {
+                Geom::Line { a, b } => {
+                    let (pa, pb) = (sk.point(a), sk.point(b));
+                    let d = pb - pa;
+                    let l2 = d.length_squared();
+                    if l2 < 1e-18 {
+                        continue;
+                    }
+                    (pa + d * ((q - pa).dot(d) / l2).clamp(0.0, 1.0), "on line")
+                }
+                Geom::Circle { center, radius } => {
+                    let c = sk.point(center);
+                    let d = q - c;
+                    if d.length() < 1e-9 {
+                        continue;
+                    }
+                    (c + d.normalize() * radius, "on circle")
+                }
+                Geom::Arc { center, start, end } => {
+                    let (c, st, en) = (sk.point(center), sk.point(start), sk.point(end));
+                    let r = st.distance(c);
+                    let d = q - c;
+                    if d.length() < 1e-9 {
+                        continue;
+                    }
+                    let tau = std::f64::consts::TAU;
+                    let a0 = (st - c).to_angle();
+                    let sweep = ((en - c).to_angle() - a0).rem_euclid(tau);
+                    if (d.to_angle() - a0).rem_euclid(tau) > sweep {
+                        continue;
+                    }
+                    (c + d.normalize() * r, "on arc")
+                }
+            };
+            let dd = pos.distance(q);
+            let slack = if e.projected { 1.0 / self.scale as f64 } else { 0.0 };
+            if dd < tol && on.is_none_or(|b| dd - slack < b.0) {
+                on = Some((dd - slack, pos, label));
+            }
+        }
+        if let Some((_, pos, l)) = on {
+            return (pos, None, Some(l));
+        }
+        // 3. grid
+        let g = snap_step(self.scale);
+        (DVec2::new((q.x / g).round() * g, (q.y / g).round() * g), None, None)
     }
 }
+
+/// How close (screen px) the cursor must be to geometry to snap to it.
+const SNAP_PX: f32 = 9.0;
 
 /// Minor (tenth) grid lines are drawn, and snapped to, from this on-screen spacing.
 const MINOR_MIN_PX: f32 = 6.0;
@@ -2463,10 +2579,11 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     }
     // tool previews
     if let Some(cur) = ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)) {
-        let (q, snapped) = s.snap_point(rect, cur);
+        let (q, _, snap_label) = s.snap_full(rect, cur);
         let pv = Stroke::new(1.2, theme::ACCENT);
-        if snapped.is_some() {
+        if let Some(l) = snap_label {
             p.circle_stroke(to(q), 6.0, Stroke::new(1.2, theme::ORANGE));
+            p.text(to(q) + vec2(9.0, -13.0), egui::Align2::LEFT_BOTTOM, l, theme::mono(10.0), theme::ORANGE);
         } else if s.snap && !s.alt_held && s.tool != Tool::Select {
             // snapped to the grid: a small cross on the node
             let c = to(q);
@@ -2560,6 +2677,43 @@ mod tests {
     fn session() -> SketchSession {
         let d = DocData::new("t", "test");
         SketchSession::new_on(Plane::XY, &d)
+    }
+
+    #[test]
+    fn snap_prefers_geometry_over_grid() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        let at = |s: &SketchSession, x: f64, y: f64| s.to_screen(rect, DVec2::new(x, y));
+        // a projected circle (centre off the grid) and a projected line
+        let c = s.sketch.add_point(DVec2::new(3.37, 2.0));
+        let circ = s.sketch.add_entity(Geom::Circle { center: c, radius: 1.5 }, false);
+        s.sketch.entities[circ.0 as usize].projected = true;
+        let (a, b) = (s.sketch.add_point(DVec2::new(-5.0, 0.37)), s.sketch.add_point(DVec2::new(-1.0, 0.37)));
+        let l = s.sketch.add_entity(Geom::Line { a, b }, false);
+        s.sketch.entities[l.0 as usize].projected = true;
+        // centre beats the nearby grid node (3.4, 2.0)
+        let (q, pid, lab) = s.snap_full(rect, at(&s, 3.40, 2.02));
+        assert_eq!((q, pid, lab), (DVec2::new(3.37, 2.0), Some(c), Some("center")));
+        // on-line beats grid: y locks to the line, x is free
+        let (q, pid, lab) = s.snap_full(rect, at(&s, -3.13, 0.40));
+        assert!(pid.is_none() && lab == Some("on line"));
+        assert!((q.y - 0.37).abs() < 1e-9 && (q.x + 3.13).abs() < 0.02, "{q:?}");
+        // on-circle
+        let (q, _, lab) = s.snap_full(rect, at(&s, 3.37 + 1.53, 2.0));
+        assert_eq!(lab, Some("on circle"));
+        assert!((q.distance(DVec2::new(3.37, 2.0)) - 1.5).abs() < 1e-9);
+        // radius phase: centre on the projected circle's centre, cursor near circumference
+        s.tool = Tool::Circle;
+        s.clicks = vec![(DVec2::new(3.37, 2.0), Some(c))];
+        let (q, _, lab) = s.snap_full(rect, at(&s, 3.37 + 1.0, 2.0 + 1.1));
+        assert_eq!(lab, Some("radius"));
+        assert!((q.distance(DVec2::new(3.37, 2.0)) - 1.5).abs() < 1e-12);
+        // Alt bypasses everything
+        s.alt_held = true;
+        let (q, pid, lab) = s.snap_full(rect, at(&s, 3.40, 2.02));
+        assert!(pid.is_none() && lab.is_none() && (q.x - 3.40).abs() < 0.02);
     }
 
     #[test]
