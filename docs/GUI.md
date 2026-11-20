@@ -69,6 +69,12 @@ becomes the master. Halves are named after their bodies ("Base (in context)" los
 its suffix; a name already used gets " (lower)" / " (upper)"). Root imports (the
 sample's reference PCB) move into the master and are hidden with it.
 
+## Drag arrow (Extrude distance, offset planes)
+
+While an Extrude dialog (new or edit), or the Construct tool / datum dialog with an offset plane, is open, an accent-coloured arrow (`drag_arrow.rs`) is drawn over the 3D view. Extrude: at the profile's bounding-box centre on the sketch plane, offset by the current distance along the extrude direction (Flip-aware; a symmetric extrude marks the far face, so the arrow moves half as far as the value). Offset plane: on the preview plane at the picked point, along the offset direction (Flip-aware). Hover highlights it and shows a grab cursor.
+
+Dragging moves along the arrow axis (closest point of the mouse ray to the axis), and the value is rounded to a multiple of 1 mm, Shift 10 mm, Ctrl 0.1 mm (modifiers apply live). Steps are millimetres even when the document displays inches. The field shows the number (replacing any expression), the preview updates while dragging, and on release the field is focused with its text selected; Enter commits as usual. Esc during a drag restores the old text. Extrude cannot go below 0.1 mm; offset planes may go negative. Orbit/pan use the middle/right buttons, so a left drag on the arrow never navigates.
+
 ## Idle cost
 
 The app draws only when something asks: input, a worker or sync result, an

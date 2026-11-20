@@ -1099,3 +1099,129 @@ fn hiding_a_construction_plane_removes_it_from_the_scene() {
     easycad_app::datum_ui::set_visible(h.state_mut(), fid, true);
     assert_eq!(shown(&h), 1);
 }
+
+// ---------------------------------------------------------------- the drag arrow
+
+fn arrow_text(h: &Harness<'static, EasyCadApp>) -> String {
+    match h.state().dialog.as_ref().map(|d| &d.body) {
+        Some(easycad_app::dialogs::Body::Extrude(e)) => e.distance.text.clone(),
+        Some(easycad_app::dialogs::Body::Datum(dd)) => dd.fields[0].text.clone(),
+        _ => panic!("no dialog with a distance"),
+    }
+}
+
+/// Press on the arrow shaft and pull `px` pixels along it (negative: against it).
+fn arrow_drag(h: &mut Harness<'static, EasyCadApp>, mods: egui::Modifiers, px: f32) {
+    let spec = easycad_app::drag_arrow::spec(h.state()).expect("arrow spec");
+    let tail = screen_of(h, spec.at(spec.value).as_vec3());
+    let head = screen_of(h, (spec.at(spec.value) + spec.dir * 40.0).as_vec3());
+    let sd = (head - tail).normalized();
+    let a = tail + sd * 20.0;
+    h.event(egui::Event::ModifiersChanged(mods));
+    h.hover_at(a);
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: mods });
+    h.step();
+    for i in 1..=12 {
+        h.event(egui::Event::PointerMoved(a + sd * px * (i as f32 / 12.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: a + sd * px, button: egui::PointerButton::Primary, pressed: false, modifiers: mods });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(3);
+}
+
+fn open_extrude(h: &mut Harness<'static, EasyCadApp>) {
+    h.state_mut().open_dialog(easycad_app::dialogs::DialogKind::Extrude);
+    h.run_steps(3);
+    settle(h);
+}
+
+fn mult_of(v: f64, step: f64) -> bool {
+    let q = v / step;
+    (q - q.round()).abs() < 1e-6
+}
+
+#[test]
+fn extrude_arrow_plain_drag_changes_by_whole_mm() {
+    let _g = serial();
+    let mut h = harness(box_doc());
+    open_extrude(&mut h);
+    let v0: f64 = arrow_text(&h).parse().unwrap();
+    arrow_drag(&mut h, egui::Modifiers::NONE, 43.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(v != v0 && mult_of(v, 1.0), "{v0} -> {v}");
+    // the dialog stays open and the preview was asked for
+    assert!(h.state().dialog.is_some() && h.state().arrow_drag.is_none());
+}
+
+#[test]
+fn extrude_arrow_shift_and_ctrl_steps() {
+    let _g = serial();
+    let mut h = harness(box_doc());
+    open_extrude(&mut h);
+    arrow_drag(&mut h, egui::Modifiers::SHIFT, 300.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(mult_of(v, 10.0) && v > 20.0, "shift: {v}");
+    arrow_drag(&mut h, egui::Modifiers::CTRL, -37.0);
+    let w = arrow_text(&h).parse::<f64>().unwrap();
+    assert!(mult_of(w, 0.1) && w < v, "ctrl: {w}");
+    // never below zero
+    arrow_drag(&mut h, egui::Modifiers::SHIFT, -4000.0);
+    assert!(arrow_text(&h).parse::<f64>().unwrap() > 0.0);
+}
+
+#[test]
+fn extrude_arrow_esc_cancels_the_drag() {
+    let _g = serial();
+    let mut h = harness(box_doc());
+    open_extrude(&mut h);
+    let t0 = arrow_text(&h);
+    let spec = easycad_app::drag_arrow::spec(h.state()).unwrap();
+    let tail = screen_of(&h, spec.at(spec.value).as_vec3());
+    let head = screen_of(&h, (spec.at(spec.value) + spec.dir * 40.0).as_vec3());
+    let sd = (head - tail).normalized();
+    let a = tail + sd * 20.0;
+    h.hover_at(a);
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for i in 1..=8 {
+        h.event(egui::Event::PointerMoved(a + sd * 8.0 * i as f32));
+        h.step();
+    }
+    assert_ne!(arrow_text(&h), t0, "the drag changed the value");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(arrow_text(&h), t0);
+    assert!(h.state().arrow_drag.is_none());
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(2);
+}
+
+#[test]
+fn offset_plane_arrow_steps_in_the_construct_tool() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    top_view(&mut h);
+    h.key_press(egui::Key::Q);
+    h.run_steps(3);
+    click_w(&mut h, glam::Vec3::new(15.0, 12.0, 0.0));
+    settle(&mut h);
+    // the arrow is along Z; look from the side so a pull moves it on screen
+    h.state_mut().camera.rot = easycad_app::camera::look_rot(glam::Vec3::Y, glam::Vec3::Z);
+    h.run_steps(3);
+    arrow_drag(&mut h, egui::Modifiers::NONE, -35.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(v != 10.0 && mult_of(v, 1.0), "plain: {v}");
+    arrow_drag(&mut h, egui::Modifiers::SHIFT, -50.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(mult_of(v, 10.0), "shift: {v}");
+    arrow_drag(&mut h, egui::Modifiers::CTRL, 21.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(mult_of(v, 0.1), "ctrl: {v}");
+    // Enter still commits what the arrow set
+    press_enter(&mut h);
+    assert_eq!(datum_kinds(&h).len(), 1);
+}

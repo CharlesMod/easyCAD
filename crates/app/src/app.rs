@@ -1335,7 +1335,8 @@ impl EasyCadApp {
             return;
         }
         if self.dialog.is_some() {
-            if pressed(Key::Escape) {
+            // Esc during an arrow drag cancels the drag (the viewport takes the key), not the dialog
+            if self.arrow_drag.is_none() && pressed(Key::Escape) {
                 self.close_dialog(false);
             } else if pressed(Key::Enter) {
                 self.close_dialog(true);
