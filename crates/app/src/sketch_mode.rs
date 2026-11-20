@@ -135,6 +135,9 @@ pub struct SketchSession {
     pub hover: Option<Sel>,
     /// Project tool: index into `projected` of the model edge under the cursor
     pub project_hover: Option<usize>,
+    /// Project tool: index into `projected_faces` of the model face under the cursor
+    /// (only when no edge is within tolerance)
+    pub project_hover_face: Option<usize>,
     pub input: Option<String>,
     pub input2: Option<String>,
     pub input_second: bool,
@@ -181,6 +184,8 @@ pub struct SketchSession {
     /// The model edge each projected polyline comes from (exact projection), with
     /// its 3D samples.
     pub projected_src: Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
+    /// The model faces seen in the sketch plane (empty in slice mode).
+    pub projected_faces: Vec<ProjFace>,
     /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
     /// sketch coordinates; `projected` then holds the kept half's edges only.
     pub slice_caps: Vec<[DVec2; 3]>,
@@ -242,6 +247,8 @@ impl SketchSession {
             cursor: DVec2::ZERO,
             projected: Vec::new(),
             projected_src: Vec::new(),
+            projected_faces: Vec::new(),
+            project_hover_face: None,
             slice_caps: Vec::new(),
             slice_outline: Vec::new(),
             projected_slice: None,
@@ -650,6 +657,88 @@ impl SketchSession {
         self.projected
             .iter()
             .position(|pl| pl.windows(2).any(|w| seg_dist(q, w[0], w[1]) < tol))
+    }
+
+    /// The model face under `q` (nearest to the viewer when faces overlap); callers
+    /// try `project_hit` first so edges win within their tolerance.
+    pub fn project_face_hit(&self, q: DVec2) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, f) in self.projected_faces.iter().enumerate() {
+            for t in &f.tris {
+                if in_tri(q, t.0) && best.is_none_or(|(_, d)| t.1 > d) {
+                    best = Some((i, t.1));
+                }
+            }
+        }
+        best.map(|b| b.0)
+    }
+
+    /// Is the model edge `i` already in the sketch as a projected entity?
+    pub fn edge_projected(&self, i: usize) -> bool {
+        let Some(pl) = self.projected.get(i) else { return true };
+        let tol = 1e-4_f64.max(1e-3 / self.scale.max(1.0) as f64);
+        let pt = |p: PointId| self.sketch.points[p.0 as usize];
+        let near = |q: DVec2| {
+            self.sketch.entities.iter().filter(|e| e.projected).any(|e| match e.geom {
+                Geom::Line { a, b } => seg_dist(q, pt(a), pt(b)) < tol,
+                Geom::Circle { center, radius } => (q.distance(pt(center)) - radius).abs() < tol,
+                Geom::Arc { center, start, end } => {
+                    let (c, s) = (pt(center), pt(start));
+                    (q.distance(c) - s.distance(c)).abs() < tol && on_arc(q, c, s, pt(end))
+                }
+            })
+        };
+        pl.iter().all(|q| near(*q))
+    }
+
+    /// The edges of face `f` still to project (not yet in the sketch).
+    pub fn face_missing(&self, f: usize) -> Vec<usize> {
+        self.projected_faces.get(f).map_or_else(Vec::new, |f| {
+            f.edges.iter().copied().filter(|&e| !self.edge_projected(e)).collect()
+        })
+    }
+
+    /// Project the model edges `idx` into the sketch as one undo step; skips ones
+    /// already there. Returns how many edges added geometry.
+    pub fn project_edges_now(&mut self, idx: &[usize]) -> usize {
+        let todo: Vec<usize> = idx.iter().copied().filter(|&i| !self.edge_projected(i)).collect();
+        if todo.is_empty() {
+            return 0;
+        }
+        self.push_undo();
+        let mut done = 0;
+        for i in todo {
+            let n0 = self.sketch.entities.len();
+            if let Some((info, samples)) = self.projected_src.get(i).cloned().flatten() {
+                // exact: lines stay lines, circles facing the plane stay circles
+                self.sketch.project_edge(&info, Some(&samples), false);
+            } else if let Some(pl) = self.projected.get(i).cloned() {
+                let first = self.sketch.points.len() as u32;
+                let mut prev = None;
+                for pt in &pl {
+                    let id = self.sketch.add_point(*pt);
+                    if let Some(a) = prev {
+                        let e = self.add_entity(Geom::Line { a, b: id }, false);
+                        self.sketch.entities[e.0 as usize].projected = true;
+                    }
+                    prev = Some(id);
+                }
+                for i in first..self.sketch.points.len() as u32 {
+                    let v = self.sketch.points[i as usize];
+                    self.sketch.constrain(Constraint::Fix(PointId(i), v));
+                }
+            }
+            if self.sketch.entities.len() > n0 {
+                done += 1;
+            }
+        }
+        if done == 0 {
+            self.pop_undo();
+        } else {
+            self.entity_layer.resize(self.sketch.entities.len(), None);
+            self.resolve();
+        }
+        done
     }
 
     pub fn status(&self) -> (Color32, String) {
@@ -1712,12 +1801,14 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
         if let Some(m) = &model {
             if s.slice {
                 let (proj, caps, outline) = slice_model(m, &s.sketch.plane);
+                s.projected_faces.clear();
                 s.projected_src = vec![None; proj.len()];
                 s.projected = proj;
                 s.slice_caps = caps;
                 s.slice_outline = outline;
             } else {
                 let (proj, src) = project_edges(m, &s.sketch.plane);
+                s.projected_faces = project_faces(m, &s.sketch.plane, &proj);
                 s.projected = proj;
                 s.projected_src = src;
                 s.slice_caps.clear();
@@ -1842,6 +1933,75 @@ fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Projected {
         }
     }
     (v, src)
+}
+
+/// A model face seen in the sketch plane: its boundary edges (indices into
+/// `SketchSession::projected`) and its triangles with a depth along the plane
+/// normal (larger = nearer the viewer), for the hover tint and picking.
+#[derive(Clone, Debug, Default)]
+pub struct ProjFace {
+    pub edges: Vec<usize>,
+    pub tris: Vec<([DVec2; 3], f64)>,
+}
+
+fn in_tri(q: DVec2, t: [DVec2; 3]) -> bool {
+    let s = |a: DVec2, b: DVec2| (b - a).perp_dot(q - a);
+    let (d1, d2, d3) = (s(t[0], t[1]), s(t[1], t[2]), s(t[2], t[0]));
+    !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+}
+
+/// The faces of every body in sketch coordinates. Faces that are edge-on to the
+/// plane (no area) or have no visible boundary are left out. `proj` is the output
+/// of `project_edges` (same iteration order, so the edge indices line up).
+fn project_faces(m: &crate::worker::Output, plane: &Plane, proj: &[Vec<DVec2>]) -> Vec<ProjFace> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for b in &m.bodies {
+        let Some(mesh) = &b.mesh else { continue };
+        let mut faces: std::collections::BTreeMap<u32, ProjFace> = Default::default();
+        for (k, tri) in mesh.indices.iter().enumerate() {
+            let Some(&fid) = mesh.tri_face.get(k) else { continue };
+            let p3 = tri.map(|i| {
+                let p = mesh.positions[i as usize];
+                glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+            });
+            let t = [plane.to_local(p3[0]), plane.to_local(p3[1]), plane.to_local(p3[2])];
+            if (t[1] - t[0]).perp_dot(t[2] - t[0]).abs() < 1e-9 {
+                continue;
+            }
+            let depth = ((p3[0] + p3[1] + p3[2]) / 3.0 - plane.origin).dot(plane.normal);
+            faces.entry(fid).or_default().tris.push((t, depth));
+        }
+        for (fid, mut f) in faces {
+            for (k, e) in mesh.edges.iter().enumerate() {
+                let on_face = b.edges.get(e.edge as usize).is_some_and(|i| i.faces.contains(&fid));
+                let pl = &proj[base + k];
+                let len: f64 = pl.windows(2).map(|w| w[0].distance(w[1])).sum();
+                if on_face && len > 1e-6 {
+                    f.edges.push(base + k);
+                }
+            }
+            if !f.edges.is_empty() {
+                out.push(f);
+            }
+        }
+        base += mesh.edges.len();
+    }
+    out
+}
+
+/// The Project tool's hover tooltip for the current hover.
+pub fn project_tip(s: &SketchSession) -> String {
+    if let Some(i) = s.project_hover {
+        if s.edge_projected(i) { "Already projected".into() } else { "Click to project edge".into() }
+    } else if let Some(f) = s.project_hover_face {
+        match s.face_missing(f).len() {
+            0 => "Already projected".into(),
+            n => format!("Click to project face outline ({n} edge{})", if n == 1 { "" } else { "s" }),
+        }
+    } else {
+        String::new()
+    }
 }
 
 fn left_panel(s: &mut SketchSession, ui: &mut Ui) {
@@ -2093,16 +2253,22 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         s.shift_held = ui.input(|i| i.modifiers.shift);
         s.cursor = s.snap_point(rect, hp).0;
         s.hover = if s.tool == Tool::Dimension { s.pick_dim(rect, hp) } else { s.pick(rect, hp) };
-        let ph = if s.tool == Tool::Project { s.project_hit(s.to_sketch(rect, hp)) } else { None };
-        if ph != s.project_hover {
+        let hq = s.to_sketch(rect, hp);
+        let ph = if s.tool == Tool::Project { s.project_hit(hq) } else { None };
+        let pf = if s.tool == Tool::Project && ph.is_none() { s.project_face_hit(hq) } else { None };
+        if ph != s.project_hover || pf != s.project_hover_face {
             s.project_hover = ph;
+            s.project_hover_face = pf;
             ui.ctx().request_repaint();
         }
-        if ph.is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            resp.clone().on_hover_text("Click to project edge");
+        if let Some(i) = ph {
+            ui.ctx().set_cursor_icon(if s.edge_projected(i) { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::PointingHand });
+            resp.clone().on_hover_text(project_tip(s));
+        } else if let Some(pf) = pf {
+            ui.ctx().set_cursor_icon(if s.face_missing(pf).is_empty() { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::PointingHand });
+            resp.clone().on_hover_text(project_tip(s));
         }
-    } else if s.project_hover.take().is_some() {
+    } else if s.project_hover.take().is_some() | s.project_hover_face.take().is_some() {
         ui.ctx().request_repaint();
     }
     // keyboard
@@ -2480,33 +2646,12 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
         },
         Tool::Project => {
             let q = s.to_sketch(rect, hp);
-            let hit = s.project_hit(q);
-            // exact: lines stay lines, circles facing the plane stay circles (GUI_NEEDS #14)
-            if let Some((info, samples)) = hit.and_then(|i| s.projected_src.get(i).cloned().flatten()) {
-                s.push_undo();
-                if s.sketch.project_edge(&info, Some(&samples), false).is_empty() {
-                    s.pop_undo();
-                } else {
-                    s.entity_layer.resize(s.sketch.entities.len(), None);
-                    s.resolve();
-                }
-            } else if let Some(pl) = hit.and_then(|i| s.projected.get(i).cloned()) {
-                s.push_undo();
-                let first = s.sketch.points.len() as u32;
-                let mut prev = None;
-                for pt in &pl {
-                    let id = s.sketch.add_point(*pt);
-                    if let Some(a) = prev {
-                        let e = s.add_entity(Geom::Line { a, b: id }, false);
-                        s.sketch.entities[e.0 as usize].projected = true;
-                    }
-                    prev = Some(id);
-                }
-                for i in first..s.sketch.points.len() as u32 {
-                    let v = s.sketch.points[i as usize];
-                    s.sketch.constrain(Constraint::Fix(PointId(i), v));
-                }
-                s.resolve();
+            // edges win over faces; one undo step either way, duplicates skipped
+            if let Some(i) = s.project_hit(q) {
+                s.project_edges_now(&[i]);
+            } else if let Some(f) = s.project_face_hit(q) {
+                let edges = s.projected_faces[f].edges.clone();
+                s.project_edges_now(&edges);
             }
         }
         Tool::Trim => {
@@ -2976,10 +3121,30 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         }
         p.add(egui::Shape::mesh(mesh));
     }
+    // hovered face (Project tool): translucent tint, boundary drawn orange below
+    let face_edges: Vec<usize> = match (s.tool == Tool::Project, s.project_hover_face.and_then(|f| s.projected_faces.get(f))) {
+        (true, Some(f)) => {
+            let done = s.face_missing(s.project_hover_face.unwrap()).is_empty();
+            let col = if done { Color32::from_rgba_unmultiplied(160, 166, 175, 30) } else { Color32::from_rgba_unmultiplied(240, 136, 62, 46) };
+            let mut mesh = egui::Mesh::default();
+            for t in &f.tris {
+                let i = mesh.vertices.len() as u32;
+                for q in &t.0 {
+                    mesh.colored_vertex(to(*q), col);
+                }
+                mesh.add_triangle(i, i + 1, i + 2);
+            }
+            p.add(egui::Shape::mesh(mesh));
+            f.edges.clone()
+        }
+        _ => Vec::new(),
+    };
+    let hov_dim = |i: usize| s.edge_projected(i);
     for (i, pl) in s.projected.iter().enumerate() {
         let pts: Vec<Pos2> = pl.iter().map(|q| to(*q)).collect();
-        if s.tool == Tool::Project && s.project_hover == Some(i) {
-            p.add(egui::Shape::line(pts, Stroke::new(2.4, theme::ORANGE)));
+        if s.tool == Tool::Project && (s.project_hover == Some(i) || face_edges.contains(&i)) {
+            let col = if hov_dim(i) { Color32::from_rgb(150, 156, 165) } else { theme::ORANGE };
+            p.add(egui::Shape::line(pts, Stroke::new(2.4, col)));
         } else {
             p.add(egui::Shape::line(pts, Stroke::new(1.0, proj_col)));
         }
@@ -3798,6 +3963,57 @@ mod tests {
         assert_eq!(s.project_hover, Some(0));
         s.project_hover = s.project_hit(DVec2::new(1.0, 1.0));
         assert_eq!(s.project_hover, None);
+    }
+
+    /// A unit square face (edges 0..4) beside an unrelated edge 4.
+    fn face_session() -> SketchSession {
+        let mut s = session();
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        s.tool = Tool::Project;
+        let c = [DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0), DVec2::new(1.0, 1.0), DVec2::new(0.0, 1.0)];
+        s.projected = (0..4).map(|i| vec![c[i], c[(i + 1) % 4]]).collect();
+        s.projected.push(vec![DVec2::new(3.0, 0.0), DVec2::new(4.0, 0.0)]);
+        s.projected_src = vec![None; 5];
+        s.projected_faces = vec![ProjFace { edges: vec![0, 1, 2, 3], tris: vec![([c[0], c[1], c[2]], 0.0), ([c[0], c[2], c[3]], 0.0)] }];
+        s
+    }
+
+    #[test]
+    fn project_face_hover_and_edge_priority() {
+        let s = face_session();
+        assert_eq!(s.project_face_hit(DVec2::new(0.5, 0.5)), Some(0));
+        assert_eq!(s.project_face_hit(DVec2::new(2.0, 0.5)), None);
+        // near an edge the edge wins (callers test project_hit first)
+        assert_eq!(s.project_hit(DVec2::new(0.5, 0.02)), Some(0));
+        assert_eq!(s.project_hit(DVec2::new(0.5, 0.5)), None);
+    }
+
+    #[test]
+    fn project_face_counts_and_tooltip() {
+        let mut s = face_session();
+        s.project_hover_face = Some(0);
+        assert_eq!(project_tip(&s), "Click to project face outline (4 edges)");
+        assert_eq!(s.project_edges_now(&[0, 1, 2, 3]), 4);
+        assert_eq!(s.sketch.entities.iter().filter(|e| e.projected).count(), 4);
+        assert_eq!(project_tip(&s), "Already projected");
+        s.undo();
+        assert!(s.sketch.entities.is_empty(), "one undo step removes the whole face");
+    }
+
+    #[test]
+    fn project_dedupe_and_partial_face() {
+        let mut s = face_session();
+        s.project_hover = Some(0);
+        assert_eq!(project_tip(&s), "Click to project edge");
+        assert_eq!(s.project_edges_now(&[0]), 1);
+        assert_eq!(s.project_edges_now(&[0]), 0, "second click adds nothing");
+        assert_eq!(s.sketch.entities.len(), 1);
+        assert_eq!(project_tip(&s), "Already projected");
+        // the face now only misses three edges
+        assert_eq!(s.face_missing(0), vec![1, 2, 3]);
+        assert_eq!(s.project_edges_now(&[0, 1, 2, 3]), 3);
+        assert_eq!(s.sketch.entities.len(), 4);
     }
 
     #[test]
