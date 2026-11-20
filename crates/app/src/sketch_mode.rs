@@ -143,6 +143,8 @@ pub struct SketchSession {
     pub input_live: bool,
     /// Alt is held: snapping is off while it is.
     pub alt_held: bool,
+    /// Shift forces the H/V lock while drawing a line.
+    pub shift_held: bool,
     /// Construction mode (X with nothing selected): new lines, rectangles, circles
     /// and arcs are made as construction geometry.
     pub construction_mode: bool,
@@ -225,6 +227,7 @@ impl SketchSession {
             input_fresh: false,
             input_live: false,
             alt_held: false,
+            shift_held: false,
             construction_mode: false,
             slice: false,
             undo: Vec::new(),
@@ -1323,9 +1326,142 @@ impl SketchSession {
     /// `snap_full` for a sketch position, ignoring the entities in `skip` (the ones
     /// being moved must not snap to themselves).
     pub fn snap_at(&self, q: DVec2, skip: &[EntityId]) -> (DVec2, Option<PointId>, Option<&'static str>) {
-        if !self.snap || self.alt_held {
-            return (q, None, None);
+        let (p, pid, l, _) = self.snap_guided(q, skip);
+        (p, pid, l)
+    }
+
+    /// Start point of the line being drawn, if the H/V lock applies to this tool.
+    fn line_anchor(&self) -> Option<DVec2> {
+        match (self.tool, self.clicks.as_slice()) {
+            (Tool::Line, [a]) => Some(a.0),
+            _ => None,
         }
+    }
+
+    /// Which axis through `a` the cursor `q` is locked to: `Some(true)` horizontal,
+    /// `Some(false)` vertical. Within 8 px (or about 4 degrees, whichever is wider) of
+    /// the axis line; Shift forces the nearer axis.
+    fn hv_axis(&self, a: DVec2, q: DVec2) -> Option<bool> {
+        let d = q - a;
+        let tol = (HV_LOCK_PX as f64 / self.scale as f64).max(d.length() * HV_LOCK_TAN);
+        if d.length() < 1.0 / self.scale as f64 {
+            return None;
+        }
+        let horiz = d.y.abs() <= d.x.abs();
+        if self.shift_held {
+            return Some(horiz);
+        }
+        let off = if horiz { d.y.abs() } else { d.x.abs() };
+        (off <= tol).then_some(horiz)
+    }
+
+    /// `snap_at` plus the guides to draw: the locked axis (origin, horizontal?) and the
+    /// points whose x / y the result is aligned with.
+    pub fn snap_guided(
+        &self,
+        q: DVec2,
+        skip: &[EntityId],
+    ) -> (DVec2, Option<PointId>, Option<&'static str>, SnapGuides) {
+        let mut g = SnapGuides::default();
+        if !self.snap || self.alt_held {
+            return (q, None, None, g);
+        }
+        let sk = &self.sketch;
+        let tol = SNAP_PX as f64 / self.scale as f64;
+        let pts: Vec<DVec2> = sk
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !skip.contains(&EntityId(*i as u32)))
+            .flat_map(|(_, e)| match e.geom {
+                Geom::Line { a, b } => vec![sk.point(a), sk.point(b)],
+                Geom::Arc { center, start, end } => vec![sk.point(center), sk.point(start), sk.point(end)],
+                Geom::Circle { center, .. } => vec![sk.point(center)],
+            })
+            .collect();
+        // H/V lock from the start point of the line being drawn
+        if let Some(a) = self.line_anchor() {
+            if let Some(horiz) = self.hv_axis(a, q) {
+                g.axis = Some((a, horiz));
+                let proj = if horiz { DVec2::new(q.x, a.y) } else { DVec2::new(a.x, q.y) };
+                // a real point close to the cursor still wins (closing shapes); one on
+                // the axis beats one off it
+                let tight = HV_POINT_PX as f64 / self.scale as f64;
+                let on_axis = 0.5 / self.scale as f64;
+                let mut best: Option<(bool, f64, DVec2)> = None;
+                for &p in pts.iter().chain(std::iter::once(&DVec2::ZERO)) {
+                    let d = p.distance(q);
+                    let off = if horiz { (p.y - a.y).abs() } else { (p.x - a.x).abs() };
+                    if d < tight || off <= on_axis && d < tol {
+                        let key = (off > on_axis, d);
+                        if best.is_none_or(|b| key < (b.0, b.1)) {
+                            best = Some((key.0, key.1, p));
+                        }
+                    }
+                }
+                if let Some((_, _, p)) = best {
+                    let label = if p == DVec2::ZERO { "origin" } else { "end" };
+                    let pid = sk.points.iter().position(|v| v.distance(p) < 1e-12).map(|i| PointId(i as u32));
+                    let pid = if label == "end" { pid } else { None };
+                    // on the axis, the end lands exactly on it
+                    return (p, pid, Some(label), g);
+                }
+                // along the axis only: aligned points, then grid lines / round lengths
+                let (t, pa) = if horiz { (proj.x, a.x) } else { (proj.y, a.y) };
+                let step = snap_step(self.scale);
+                let mut cand: Option<(f64, f64)> = None; // (dist, coordinate)
+                for &p in &pts {
+                    let c = if horiz { p.x } else { p.y };
+                    if (c - t).abs() < tol && cand.is_none_or(|b| (c - t).abs() < b.0) {
+                        cand = Some(((c - t).abs(), c));
+                        g.ax = Some(p);
+                    }
+                }
+                if cand.is_none() {
+                    let grid = (t / step).round() * step;
+                    let len = pa + ((t - pa) / step).round() * step;
+                    let c = if (grid - t).abs() <= (len - t).abs() { grid } else { len };
+                    cand = Some(((c - t).abs(), c));
+                }
+                let c = cand.unwrap().1;
+                let end = if horiz { DVec2::new(c, a.y) } else { DVec2::new(a.x, c) };
+                return (end, None, Some(if horiz { "H" } else { "V" }), g);
+            }
+        }
+        let (mut pos, pid, label) = self.snap_core(q, skip);
+        // alignment with other points' x / y (below every real snap, only while drawing)
+        if label.is_none()
+            && matches!(self.tool, Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc)
+            && !pts.is_empty()
+        {
+            let mut bx: Option<(f64, DVec2)> = None;
+            let mut by: Option<(f64, DVec2)> = None;
+            for &p in &pts {
+                let (dx, dy) = ((p.x - q.x).abs(), (p.y - q.y).abs());
+                if dx < tol && bx.is_none_or(|b| dx < b.0) {
+                    bx = Some((dx, p));
+                }
+                if dy < tol && by.is_none_or(|b| dy < b.0) {
+                    by = Some((dy, p));
+                }
+            }
+            if let Some((_, p)) = bx {
+                pos.x = p.x;
+                g.ax = Some(p);
+            }
+            if let Some((_, p)) = by {
+                pos.y = p.y;
+                g.ay = Some(p);
+            }
+            if g.ax.is_some() || g.ay.is_some() {
+                let l = if g.ax.is_some() && g.ay.is_some() { "align" } else if g.ax.is_some() { "align x" } else { "align y" };
+                return (pos, None, Some(l), g);
+            }
+        }
+        (pos, pid, label, g)
+    }
+
+    fn snap_core(&self, q: DVec2, skip: &[EntityId]) -> (DVec2, Option<PointId>, Option<&'static str>) {
         let tol = SNAP_PX as f64 / self.scale as f64;
         let sk = &self.sketch;
         // 1. points: ends and centres, then line midpoints
@@ -1454,6 +1590,23 @@ impl SketchSession {
 
 /// How close (screen px) the cursor must be to geometry to snap to it.
 const SNAP_PX: f32 = 9.0;
+
+/// H/V lock while drawing a line: cursor within this many px of the axis through the
+/// start point, or within `HV_LOCK_TAN` (about 4 degrees) of it, whichever is wider.
+const HV_LOCK_PX: f32 = 8.0;
+const HV_LOCK_TAN: f64 = 0.0699;
+/// While locked, a real point this close (px) to the cursor still wins.
+const HV_POINT_PX: f32 = 5.0;
+
+/// What the last snap aligned to, for drawing guides.
+#[derive(Default, Clone, Copy)]
+pub struct SnapGuides {
+    /// Locked axis: its origin (the line's start point) and whether it is horizontal.
+    pub axis: Option<(DVec2, bool)>,
+    /// A point whose x the result lines up with / a point whose y it lines up with.
+    pub ax: Option<DVec2>,
+    pub ay: Option<DVec2>,
+}
 
 /// Minor (tenth) grid lines are drawn, and snapped to, from this on-screen spacing.
 const MINOR_MIN_PX: f32 = 6.0;
@@ -1926,6 +2079,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             s.center += before - after;
         }
         s.alt_held = ui.input(|i| i.modifiers.alt);
+        s.shift_held = ui.input(|i| i.modifiers.shift);
         s.cursor = s.snap_point(rect, hp).0;
         s.hover = if s.tool == Tool::Dimension { s.pick_dim(rect, hp) } else { s.pick(rect, hp) };
     }
@@ -3144,8 +3298,26 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
     }
     // tool previews
     if let Some(cur) = ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)) {
-        let (q, _, snap_label) = s.snap_full(rect, cur);
+        let (q, _, snap_label, guides) = s.snap_guided(s.to_sketch(rect, cur), &[]);
         let pv = Stroke::new(1.2, theme::ACCENT);
+        // H/V lock: a dashed axis guide through the start point
+        if let Some((o, horiz)) = guides.axis {
+            let gs = Stroke::new(1.0, theme::ORANGE.gamma_multiply(0.7));
+            let (a, b) = if horiz {
+                (pos2(rect.left(), to(o).y), pos2(rect.right(), to(o).y))
+            } else {
+                (pos2(to(o).x, rect.top()), pos2(to(o).x, rect.bottom()))
+            };
+            p.add(egui::Shape::dashed_line(&[a, b], gs, 6.0, 4.0));
+        }
+        // alignment with other points: dotted guides
+        let dot = Stroke::new(1.0, theme::ORANGE.gamma_multiply(0.6));
+        if let Some(o) = guides.ax {
+            p.add(egui::Shape::dotted_line(&[to(o), to(q)], dot.color, 4.0, 1.0));
+        }
+        if let Some(o) = guides.ay {
+            p.add(egui::Shape::dotted_line(&[to(o), to(q)], dot.color, 4.0, 1.0));
+        }
         if let Some(l) = snap_label {
             p.circle_stroke(to(q), 6.0, Stroke::new(1.2, theme::ORANGE));
             p.text(to(q) + vec2(9.0, -13.0), egui::Align2::LEFT_BOTTOM, l, theme::mono(10.0), theme::ORANGE);
@@ -3628,6 +3800,56 @@ mod tests {
         s.alt_held = true;
         let (q, pid, lab) = s.snap_full(rect, at(&s, 3.40, 2.02));
         assert!(pid.is_none() && lab.is_none() && (q.x - 3.40).abs() < 0.02);
+    }
+
+    #[test]
+    fn line_locks_horizontal_and_vertical_over_nearby_snaps() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        let at = |s: &SketchSession, x: f64, y: f64| s.to_screen(rect, DVec2::new(x, y));
+        s.tool = Tool::Line;
+        s.clicks = vec![(DVec2::new(3.37, 1.91), None)];
+        // cursor 4 px above the axis, grid node (5.0, 2.0) is nearby but off the axis
+        let (q, pid, lab) = s.snap_full(rect, at(&s, 5.0, 1.95));
+        assert_eq!(q.y, 1.91, "{q:?}");
+        assert!(pid.is_none() && lab == Some("H"));
+        // x runs along the axis on the grid / round length
+        assert!((q.x - 5.0).abs() < 1e-9 || ((q.x - 3.37) * 10.0).round() / 10.0 - (q.x - 3.37) < 1e-9, "{q:?}");
+        // below the axis too, and a vertical one
+        assert_eq!(s.snap_full(rect, at(&s, 6.1, 1.87)).0.y, 1.91);
+        let (q, _, lab) = s.snap_full(rect, at(&s, 3.40, 4.02));
+        assert_eq!((q.x, lab), (3.37, Some("V")));
+        // far from both axes: no lock
+        let (q, _, lab) = s.snap_full(rect, at(&s, 5.0, 3.0));
+        assert!(lab != Some("H") && lab != Some("V") && q.y != 1.91, "{q:?}");
+        // an existing endpoint within 5 px still wins, even off the axis
+        let (a, b) = (s.sketch.add_point(DVec2::new(6.0, 2.03)), s.sketch.add_point(DVec2::new(6.0, 5.0)));
+        s.sketch.add_entity(Geom::Line { a, b }, false);
+        let (q, pid, lab) = s.snap_full(rect, at(&s, 6.0, 1.99));
+        assert_eq!((q, pid, lab), (DVec2::new(6.0, 2.03), Some(a), Some("end")));
+        // a point whose x lines up gives the stop along the axis, never leaving it
+        let (q, pid, _) = s.snap_full(rect, at(&s, 6.02, 1.95));
+        assert!(pid.is_none() && q == DVec2::new(6.0, 1.91), "{q:?}");
+        // Alt disables the lock
+        s.alt_held = true;
+        let (q, _, lab) = s.snap_full(rect, at(&s, 5.0, 1.95));
+        assert!(lab.is_none() && (q.y - 1.95).abs() < 0.02);
+    }
+
+    #[test]
+    fn alignment_with_other_points_snaps_x_or_y() {
+        let mut s = session();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        s.center = DVec2::ZERO;
+        s.scale = 100.0;
+        s.tool = Tool::Rect;
+        let (a, b) = (s.sketch.add_point(DVec2::new(2.034, 1.0)), s.sketch.add_point(DVec2::new(2.034, 3.0)));
+        s.sketch.add_entity(Geom::Line { a, b }, false);
+        let (q, _, lab) = s.snap_full(rect, s.to_screen(rect, DVec2::new(2.034 + 0.04, 7.0)));
+        assert_eq!(lab, Some("align x"));
+        assert_eq!(q.x, 2.034);
     }
 
     #[test]
