@@ -1632,3 +1632,40 @@ fn m_key_opens_move_gizmo_esc_restores_and_ctrl_z_undoes() {
     chord(&mut h, egui::Modifiers::COMMAND, egui::Key::Z);
     assert_eq!(start(&h).1, glam::DVec2::ZERO, "Ctrl+Z undoes the move");
 }
+
+#[test]
+fn line_after_an_angled_one_locks_exactly_horizontal() {
+    let _g = serial();
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    use easycad_model::sketch::Geom;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Line;
+    }
+    let p = egui::PointerButton::Primary;
+    click_at(&mut h, egui::pos2(700.0, 450.0), p);
+    h.run_steps(3);
+    // an angled first line, ending off the grid
+    click_at(&mut h, egui::pos2(823.0, 391.0), p);
+    h.run_steps(3);
+    // the second ends a few px off the horizontal through that end
+    click_at(&mut h, egui::pos2(950.0, 394.0), p);
+    h.run_steps(3);
+    let Mode::Sketch(s) = &h.state().mode else { panic!() };
+    let ys: Vec<(f64, f64)> = s
+        .sketch
+        .entities
+        .iter()
+        .filter_map(|e| match e.geom {
+            Geom::Line { a, b } => Some((s.sketch.point(a).y, s.sketch.point(b).y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ys.len(), 2, "{ys:?}");
+    assert_eq!(ys[1].0, ys[1].1, "second line exactly horizontal: {ys:?}");
+    assert_ne!(ys[0].0, ys[0].1, "first stays angled");
+}
