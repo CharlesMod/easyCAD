@@ -95,16 +95,54 @@ fn triangulate(poly: &[DVec2]) -> Vec<[usize; 3]> {
     out
 }
 
-/// The sketch as a mesh in world coordinates: `edges` = its non-construction
-/// entities, triangles = the closed profiles without holes.
+/// Dash and gap length (model units) of construction lines in the 3D view.
+const CONSTRUCTION_DASH: f64 = 2.0;
+
+/// The "on" pieces of a polyline cut into dashes of `len` with gaps of `len`.
+fn dashes(pts: &[DVec2], len: f64) -> Vec<Vec<DVec2>> {
+    let mut out = Vec::new();
+    let mut cur: Vec<DVec2> = Vec::new();
+    let mut on = true;
+    let mut left = len;
+    if let Some(p0) = pts.first() {
+        cur.push(*p0);
+    }
+    for w in pts.windows(2) {
+        let (mut a, b) = (w[0], w[1]);
+        loop {
+            let d = a.distance(b);
+            if d <= left {
+                left -= d;
+                if on {
+                    cur.push(b);
+                }
+                break;
+            }
+            let q = a + (b - a) * (left / d);
+            if on {
+                cur.push(q);
+                out.push(std::mem::take(&mut cur));
+            } else {
+                cur = vec![q];
+            }
+            on = !on;
+            a = q;
+            left = len;
+        }
+    }
+    if on && cur.len() > 1 {
+        out.push(cur);
+    }
+    out
+}
+
+/// The sketch as a mesh in world coordinates: `edges` = its entities (construction
+/// ones dashed), triangles = the closed profiles without holes.
 pub fn sketch_mesh(sk: &Sketch) -> Mesh {
     let pl = &sk.plane;
     let w = |p: DVec2| pl.to_world(p).as_vec3().to_array();
     let mut m = Mesh::default();
     for (i, e) in sk.entities.iter().enumerate() {
-        if e.construction {
-            continue;
-        }
         let pts: Vec<DVec2> = match e.geom {
             Geom::Line { a, b } => vec![sk.point(a), sk.point(b)],
             Geom::Circle { center, radius } => arc_points(sk.point(center), 0.0, std::f64::consts::TAU, radius),
@@ -114,7 +152,14 @@ pub fn sketch_mesh(sk: &Sketch) -> Mesh {
                 arc_points(c, (s - c).to_angle(), ccw_sweep((s - c).to_angle(), (t - c).to_angle()), (s - c).length())
             }
         };
-        m.edges.push(EdgePolyline { edge: i as u32, points: pts.into_iter().map(w).collect() });
+        if e.construction {
+            // the renderer has no dash style: cut the polyline into short pieces
+            for d in dashes(&pts, CONSTRUCTION_DASH) {
+                m.edges.push(EdgePolyline { edge: i as u32, points: d.into_iter().map(w).collect() });
+            }
+        } else {
+            m.edges.push(EdgePolyline { edge: i as u32, points: pts.into_iter().map(w).collect() });
+        }
     }
     let n = pl.normal.as_vec3().to_array();
     for prof in sk.profiles().profiles.iter().filter(|p| p.holes.is_empty()) {
@@ -190,4 +235,24 @@ pub fn set_visible(app: &mut EasyCadApp, id: SketchId, visible: bool) {
         d.set_sketch_visible(id, Some(visible));
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+
+    #[test]
+    fn construction_is_dashed_in_the_mesh_and_never_filled() {
+        let mut sk = Sketch::new("s", easycad_model::geom::Plane::XY);
+        sk.rect(DVec2::ZERO, DVec2::new(10.0, 10.0));
+        let solid = sketch_mesh(&sk);
+        assert_eq!(solid.edges.len(), 4);
+        assert!(!solid.indices.is_empty());
+        for i in 0..4 {
+            sk.set_construction(easycad_model::sketch::EntityId(i), true);
+        }
+        let m = sketch_mesh(&sk);
+        assert!(m.edges.len() > 4, "dashed into pieces");
+        assert!(m.indices.is_empty(), "construction forms no profile");
+    }
 }

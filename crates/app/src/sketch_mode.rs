@@ -35,6 +35,8 @@ pub enum Tool {
     Dimension,
 }
 
+const CONSTRUCTION_HINT: &str = "Construction lines: with entities selected, toggles them; with nothing selected, new geometry is drawn as construction (dashed, never a profile)";
+
 pub const TOOLS: [(Tool, &str, &str); 9] = [
     (Tool::Line, "Line", "L"),
     (Tool::Rect, "Rectangle", "R"),
@@ -101,6 +103,9 @@ pub struct SketchSession {
     pub input_live: bool,
     /// Alt is held: snapping is off while it is.
     pub alt_held: bool,
+    /// Construction mode (X with nothing selected): new lines, rectangles, circles
+    /// and arcs are made as construction geometry.
+    pub construction_mode: bool,
     pub dim_target: Option<Vec<Sel>>,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
@@ -162,6 +167,7 @@ impl SketchSession {
             input_fresh: false,
             input_live: false,
             alt_held: false,
+            construction_mode: false,
             slice: false,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -585,7 +591,32 @@ impl SketchSession {
 
     fn add_entity(&mut self, g: Geom, construction: bool) -> EntityId {
         self.entity_layer.push(None);
-        self.sketch.add_entity(g, construction)
+        self.sketch.add_entity(g, construction || self.construction_mode)
+    }
+
+    /// Flip the construction flag of the selected entities (one undo step): all
+    /// become construction, or, when they all already are, all become real
+    /// geometry. False when no entity is selected.
+    pub fn toggle_construction_selection(&mut self) -> bool {
+        let es = self.selected_entities();
+        if es.is_empty() {
+            return false;
+        }
+        let on = !es.iter().all(|e| self.sketch.entities[e.0 as usize].construction);
+        self.push_undo();
+        for e in es {
+            self.sketch.set_construction(e, on);
+        }
+        self.resolve();
+        true
+    }
+
+    /// The X key / Construction button: toggle the selection, or with nothing
+    /// selected the construction mode for new geometry.
+    pub fn toggle_construction(&mut self) {
+        if !self.toggle_construction_selection() {
+            self.construction_mode = !self.construction_mode;
+        }
     }
 
     fn point_at(&mut self, p: DVec2, snapped: Option<PointId>) -> PointId {
@@ -1294,6 +1325,17 @@ fn right_panel(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 }
             }
         });
+    let on = s.construction_mode;
+    let label = if on { "Construction: on" } else { "Construction" };
+    let r = ui.add_sized(
+        vec2(ui.available_width(), 28.0),
+        egui::Button::new(RichText::new(format!("{label}   X")).size(12.0))
+            .fill(if on { theme::ACCENT_BG } else { Color32::TRANSPARENT })
+            .stroke(Stroke::new(1.0, if on { theme::ACCENT } else { theme::BORDER_INPUT })),
+    );
+    if r.on_hover_text(CONSTRUCTION_HINT).clicked() {
+        s.toggle_construction();
+    }
     theme::section_label(ui, "Constraints");
     let mut err = None;
     egui::Grid::new("constraints")
@@ -1419,6 +1461,9 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
                 }
             }
         });
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::X)) && s.input.is_none() {
+            s.toggle_construction();
+        }
         // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y are dispatched once, by `EasyCadApp::shortcuts`
         // (sketch history first, then the document's).
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -1518,14 +1563,32 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             );
         }
     }
-    if resp.clicked_by(egui::PointerButton::Secondary) {
+    if resp.secondary_clicked() {
         s.clicks.clear();
         s.cancel_input();
+        // right-click on an entity not yet selected selects it for the menu
+        if let Some(Sel::Entity(e)) = s.hover {
+            if !s.selection.contains(&Sel::Entity(e)) {
+                s.selection = vec![Sel::Entity(e)];
+            }
+        }
     }
+    resp.context_menu(|ui| {
+        let any = !s.selected_entities().is_empty();
+        if ui.add_enabled(any, egui::Button::new("Toggle construction")).clicked() {
+            s.toggle_construction_selection();
+            ui.close();
+        }
+    });
 
     draw(s, ui, rect, &p);
     // tool hint
-    let hint = s.tool.hint();
+    let hint_s = if s.construction_mode {
+        format!("{} · construction on (X)", s.tool.hint())
+    } else {
+        s.tool.hint().to_string()
+    };
+    let hint = hint_s.as_str();
     let hr = Rect::from_min_size(
         pos2(rect.left() + 12.0, rect.bottom() - 44.0),
         vec2(8.0 * hint.len() as f32 + 20.0, 30.0),
@@ -2658,5 +2721,55 @@ mod tests {
         s.apply_dimension(&[Sel::Entity(e)], "=wall * 4").unwrap();
         let (pa, pb) = s.line_points(e).unwrap();
         assert!((s.sketch.point(pa).distance(s.sketch.point(pb)) - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn construction_toggle_selection_undo_and_profiles() {
+        let mut s = session();
+        let rect = s.sketch.rect(DVec2::ZERO, DVec2::new(10.0, 5.0));
+        s.entity_layer.resize(s.sketch.entities.len(), None);
+        s.resolve();
+        assert_eq!(s.sketch.profiles().profiles.len(), 1);
+        // nothing selected: X flips the mode, not any entity
+        s.toggle_construction();
+        assert!(s.construction_mode && s.sketch.entities.iter().all(|e| !e.construction));
+        s.toggle_construction();
+        assert!(!s.construction_mode);
+        // selected: all four go construction in one undo step, and the profile is gone
+        s.selection = rect.iter().map(|e| Sel::Entity(*e)).collect();
+        let undo_before = s.undo.len();
+        s.toggle_construction();
+        assert_eq!(s.undo.len(), undo_before + 1);
+        assert!(s.sketch.entities.iter().all(|e| e.construction));
+        assert!(!s.construction_mode);
+        assert!(s.sketch.profiles().profiles.is_empty(), "construction never forms a profile");
+        // construction geometry stays snappable by its points
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
+        s.alt_held = false;
+        let at = s.to_screen(r, DVec2::new(10.0, 5.0));
+        assert!(s.snap_point(r, at).1.is_some());
+        // undo restores the profile; redo drops it again
+        assert!(s.undo());
+        assert!(s.sketch.entities.iter().all(|e| !e.construction));
+        assert_eq!(s.sketch.profiles().profiles.len(), 1);
+        assert!(s.redo());
+        assert!(s.sketch.entities.iter().all(|e| e.construction));
+        // toggling again (all construction) turns them back
+        s.selection = rect.iter().map(|e| Sel::Entity(*e)).collect();
+        s.toggle_construction();
+        assert!(s.sketch.entities.iter().all(|e| !e.construction));
+    }
+
+    #[test]
+    fn construction_mode_makes_new_geometry_construction() {
+        let mut s = session();
+        s.construction_mode = true;
+        let l = s.add_line((DVec2::ZERO, None), (DVec2::new(5.0, 0.0), None));
+        let c = s.add_entity(Geom::Circle { center: s.line_points(l).unwrap().0, radius: 2.0 }, false);
+        assert!(s.sketch.entities[l.0 as usize].construction);
+        assert!(s.sketch.entities[c.0 as usize].construction);
+        s.construction_mode = false;
+        let l2 = s.add_line((DVec2::ZERO, None), (DVec2::new(0.0, 5.0), None));
+        assert!(!s.sketch.entities[l2.0 as usize].construction);
     }
 }
