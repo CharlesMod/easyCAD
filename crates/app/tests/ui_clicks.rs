@@ -1772,3 +1772,72 @@ fn double_click_on_the_dimension_line_edits_inline() {
     let ok = cs.iter().any(|c| matches!(c, Constraint::DistanceX(_, _, e) if e.0.trim() == "77"));
     assert!(ok, "{cs:?}");
 }
+
+// ---- angle between two lines / lone length (Fusion style) --------------------
+
+/// A chain of two lines A-B-C drawn with the Line tool (they share B), then the
+/// Dimension tool.
+fn two_lines_dimension_tool() -> Harness<'static, EasyCadApp> {
+    use easycad_app::app::Mode;
+    use easycad_app::sketch_mode::Tool;
+    let mut h = harness(easycad_app::sample::sensor_node());
+    h.state_mut().recovery_offer.clear();
+    h.state_mut().start_sketch_on(easycad_model::geom::Plane::XY, None);
+    h.run_steps(3);
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.tool = Tool::Line;
+    }
+    h.run_steps(2);
+    for p in [egui::pos2(700.0, 500.0), egui::pos2(700.0, 300.0), egui::pos2(850.0, 400.0)] {
+        hover_click(&mut h, p);
+    }
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.cancel_input();
+        s.clicks.clear();
+        s.tool = Tool::Dimension;
+    }
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn click_line_then_line_then_placement_makes_an_angle_with_inline_field() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let mut h = two_lines_dimension_tool();
+    hover_click(&mut h, egui::pos2(700.0, 330.0)); // first line (clear of its midpoint and the origin)
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none() && !cs.iter().any(|c| c.dim_expr().is_some()), "a lone pick waits");
+    hover_click(&mut h, egui::pos2(812.0, 375.0)); // second line
+    match &h.state().mode {
+        easycad_app::app::Mode::Sketch(s) => assert!(s.dim_pending, "two lines wait for the angle placement click"),
+        _ => panic!(),
+    }
+    hover_click(&mut h, egui::pos2(740.0, 360.0)); // inside the angle
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_some(), "the inline field opens");
+    h.event(egui::Event::Text("45".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (input, _, cs) = sk_state(&h);
+    assert!(input.is_none());
+    assert!(cs.iter().any(|c| matches!(c, Constraint::AngleRays(..))), "{cs:?}");
+}
+
+#[test]
+fn click_line_then_empty_space_makes_a_length() {
+    let _g = serial();
+    use easycad_model::sketch::Constraint;
+    let mut h = two_lines_dimension_tool();
+    hover_click(&mut h, egui::pos2(700.0, 330.0));
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_none());
+    hover_click(&mut h, egui::pos2(500.0, 600.0)); // empty space
+    let (input, _, _) = sk_state(&h);
+    assert!(input.is_some(), "the inline length field opens");
+    h.event(egui::Event::Text("40".into()));
+    h.run_steps(3);
+    press_enter(&mut h);
+    let (_, _, cs) = sk_state(&h);
+    assert!(cs.iter().any(|c| matches!(c, Constraint::Length(..))), "{cs:?}");
+}

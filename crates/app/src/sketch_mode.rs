@@ -14,7 +14,7 @@ use easycad_model::sketch::{
     profiles_from_segments, Constraint, ConstraintStatus, EntityId, Geom, PointId, Sketch,
     SolveReport,
 };
-use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Color32, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use glam::DVec2;
 
 use crate::app::EasyCadApp;
@@ -64,6 +64,48 @@ impl Tool {
             Tool::Dimension => "Dimension · pick points / centres / midpoints / lines / circles (two, or one), place, then type",
         }
     }
+}
+
+/// Which of the four angles two crossing lines make was picked, as the rays
+/// `r1` (of the first line) and `r2` (of the second) around the crossing `p`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AngleChoice {
+    /// The stored constraint lists the second line first (the angle runs CCW).
+    pub swap: bool,
+    pub rev1: bool,
+    pub rev2: bool,
+    /// The angle between the two rays, 0..180 degrees.
+    pub deg: f64,
+    pub p: DVec2,
+    pub r1: DVec2,
+    pub r2: DVec2,
+}
+
+/// Where two infinite lines (a-b and c-d) cross.
+pub fn line_cross(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<DVec2> {
+    let (u, w) = (b - a, d - c);
+    let den = u.perp_dot(w);
+    if den.abs() <= 1e-9 * u.length() * w.length() || den == 0.0 {
+        return None;
+    }
+    Some(a + u * ((c - a).perp_dot(w) / den))
+}
+
+/// The angle a cursor at `q` picks between lines a-b and c-d: the quadrant around
+/// their crossing that holds the cursor (so the angle, its supplement or the
+/// opposite pair, as in Fusion). `None` for parallel lines.
+pub fn angle_choice(a: DVec2, b: DVec2, c: DVec2, d: DVec2, q: DVec2) -> Option<AngleChoice> {
+    let p = line_cross(a, b, c, d)?;
+    let (u, w) = ((b - a).normalize(), (d - c).normalize());
+    let den = u.perp_dot(w);
+    let v = q - p;
+    let alpha = v.perp_dot(w) / den;
+    let beta = u.perp_dot(v) / den;
+    let (rev1, rev2) = (alpha < 0.0, beta < 0.0);
+    let r1 = if rev1 { -u } else { u };
+    let r2 = if rev2 { -w } else { w };
+    let deg = r1.perp_dot(r2).abs().atan2(r1.dot(r2)).to_degrees();
+    Some(AngleChoice { swap: r1.perp_dot(r2) < 0.0, rev1, rev2, deg, p, r1, r2 })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -164,6 +206,10 @@ pub struct SketchSession {
     pub dim_label_pos: std::cell::Cell<Option<Pos2>>,
     /// Why the inline dimension field's text was refused (shown under it).
     pub input_err: Option<String>,
+    /// Line pair being dimensioned as an angle: the quadrant the placement click chose.
+    pub dim_rays: Option<AngleChoice>,
+    /// Screen radius of the angle arc picked by the placement click.
+    pub dim_arc_r: f32,
     pub dxf: Option<DxfState>,
     /// Layer of each entity (DXF-imported geometry), parallel to `sketch.entities`.
     pub entity_layer: Vec<Option<String>>,
@@ -226,6 +272,8 @@ impl SketchSession {
             dim_segs: Default::default(),
             dim_label_pos: Default::default(),
             input_err: None,
+            dim_rays: None,
+            dim_arc_r: 60.0,
             dxf: None,
             entity_layer: vec![None; n],
             report: None,
@@ -452,6 +500,7 @@ impl SketchSession {
         self.dim_pending = false;
         self.edit_dim = None;
         self.input_err = None;
+        self.dim_rays = None;
         match self.tool {
             Tool::Line | Tool::Rect | Tool::Circle | Tool::Arc => {
                 self.clicks.clear();
@@ -1112,6 +1161,17 @@ impl SketchSession {
                         if parallel {
                             let dist = (u.perp_dot(s.point(c) - s.point(a)) / u.length().max(1e-12)).abs();
                             Some((dist, Box::new(move |x| Constraint::LineDistance(e1, e2, x))))
+                        } else if let Some(ch) = self.dim_rays {
+                            Some((
+                                ch.deg,
+                                Box::new(move |x| {
+                                    if ch.swap {
+                                        Constraint::AngleRays(e2, ch.rev2, e1, ch.rev1, x)
+                                    } else {
+                                        Constraint::AngleRays(e1, ch.rev1, e2, ch.rev2, x)
+                                    }
+                                }),
+                            ))
                         } else {
                             let ang = u.perp_dot(w).atan2(u.dot(w)).to_degrees();
                             Some((ang, Box::new(move |x| Constraint::Angle(e1, e2, x))))
@@ -1149,7 +1209,34 @@ impl SketchSession {
 
     /// True when the pick set is a pair of points (centres, ends, midpoints): the
     /// dimension then waits for a placement click that picks its orientation.
+    /// The four end points of two crossing (non-parallel) lines picked as a pair.
+    pub fn line_pair(&self, sel: &[Sel]) -> Option<[DVec2; 4]> {
+        let [Sel::Entity(e1), Sel::Entity(e2)] = sel else { return None };
+        if e1 == e2 {
+            return None;
+        }
+        let (Geom::Line { a, b }, Geom::Line { a: c, b: d }) =
+            (self.sketch.entities[e1.0 as usize].geom, self.sketch.entities[e2.0 as usize].geom)
+        else {
+            return None;
+        };
+        let (pa, pb, pc, pd) = (self.sketch.point(a), self.sketch.point(b), self.sketch.point(c), self.sketch.point(d));
+        let (u, w) = (pb - pa, pd - pc);
+        let parallel = u.perp_dot(w).abs() <= 1e-4 * u.length() * w.length()
+            || self.sketch.constraints.iter().any(|k| {
+                matches!(k, Constraint::Parallel(p, q) if (*p, *q) == (*e1, *e2) || (*p, *q) == (*e2, *e1))
+            });
+        if parallel {
+            None
+        } else {
+            Some([pa, pb, pc, pd])
+        }
+    }
+
     pub fn dim_needs_placement(&self, sel: &[Sel]) -> bool {
+        if self.line_pair(sel).is_some() {
+            return true; // an angle: the cursor's quadrant picks which one
+        }
         let pt = |x: &Sel| match *x {
             Sel::Point(_) | Sel::Mid(_) | Sel::Origin => true,
             Sel::Entity(e) => !matches!(self.sketch.entities[e.0 as usize].geom, Geom::Line { .. }),
@@ -1519,6 +1606,7 @@ pub fn constraint_entities(c: &Constraint) -> Vec<EntityId> {
     use Constraint::*;
     match c {
         Horizontal(e) | Vertical(e) | Length(e, _) | Radius(e, _) | Diameter(e, _) => vec![*e],
+        AngleRays(a, _, b, _, _) => vec![*a, *b],
         Parallel(a, b) | Perpendicular(a, b) | Tangent(a, b) | Equal(a, b) | Angle(a, b, _) => {
             vec![*a, *b]
         }
@@ -2372,6 +2460,16 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 // the placement click: the cursor's side picks the orientation
                 if let Some(t) = s.dim_target.clone() {
                     let q = s.to_sketch(rect, hp);
+                    if let Some([a, b, c, d]) = s.line_pair(&t) {
+                        // two lines: the quadrant around their crossing picks the angle
+                        if let Some(ch) = angle_choice(a, b, c, d, q) {
+                            s.dim_arc_r = hp.distance(s.to_screen(rect, ch.p)).clamp(30.0, 260.0);
+                            s.dim_rays = Some(ch);
+                            s.dim_pending = false;
+                            s.open_input(fmt(ch.deg), false);
+                            return;
+                        }
+                    }
                     let pts = s.dim_anchor_points(&t);
                     if let Some((a, b)) = pts {
                         s.dim_orient = dim_orient(a, b, q);
@@ -2393,7 +2491,21 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
             } else if s.input.is_some() {
                 s.cancel_input();
             }
-            if let Some(x) = s.pick_dim(rect, hp) {
+            let picked = s.pick_dim(rect, hp);
+            let single = match s.dim_target.as_deref() {
+                Some([Sel::Entity(e)]) => Some(*e),
+                _ => None,
+            };
+            if let Some(e0) = single {
+                // a lone shape is placed by a click on empty space (or on itself)
+                if picked.is_none() || picked == Some(Sel::Entity(e0)) {
+                    if let Some((v, _)) = s.dim_target.as_ref().and_then(|t| s.dimension_for(t)) {
+                        s.open_input(fmt(v.abs()), false);
+                        return;
+                    }
+                }
+            }
+            if let Some(x) = picked {
                 let mut t = s.dim_target.take().unwrap_or_default();
                 if t.len() >= 2 {
                     t.clear();
@@ -2401,13 +2513,10 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 if t.is_empty() {
                     s.dim_toggle = false;
                     s.dim_orient = DimOrient::Aligned;
+                    s.dim_rays = None;
                 }
                 t.push(x);
-                let complete = match t.as_slice() {
-                    [Sel::Entity(_)] => !additive,
-                    [_] => false,
-                    _ => true,
-                };
+                let complete = !matches!(t.as_slice(), [_]);
                 if complete && s.dimension_for(&t).is_some() {
                     if s.dim_needs_placement(&t) {
                         s.dim_pending = true;
@@ -2473,6 +2582,7 @@ fn commit_dim_input(s: &mut SketchSession) -> Result<(), String> {
     s.edit_dim = None;
     s.dim_target = None;
     s.dim_pending = false;
+    s.dim_rays = None;
     s.error = None;
     Ok(())
 }
@@ -3076,15 +3186,56 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     p.add(egui::Shape::line(pl, Stroke::new(2.6, theme::ACCENT)));
                 }
             }
+            // a lone shape picked: its live reading follows the cursor until placed
+            if t.len() == 1 && s.input.is_none() {
+                if let (Some((v, _)), Some(cur)) = (
+                    s.dimension_for(t),
+                    ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)),
+                ) {
+                    p.text(
+                        cur + vec2(16.0, -14.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        crate::units::len(v.abs()),
+                        theme::mono(12.0),
+                        theme::ACCENT,
+                    );
+                }
+            }
+            // two lines: the angle previews as an arc in the quadrant the cursor is in
+            if s.dim_pending {
+                if let (Some([a, b, c, d]), Some(cur)) = (
+                    s.line_pair(t),
+                    ui.ctx().pointer_hover_pos().filter(|q| rect.contains(*q)),
+                ) {
+                    if let Some(ch) = angle_choice(a, b, c, d, s.to_sketch(rect, cur)) {
+                        let c0 = to(ch.p);
+                        let r = cur.distance(c0).clamp(30.0, 260.0);
+                        let (mid, _) = draw_angle_arc(p, c0, to(ch.p + ch.r1) - c0, to(ch.p + ch.r2) - c0, r);
+                        p.text(
+                            mid + (mid - c0).normalized() * 6.0,
+                            egui::Align2::CENTER_CENTER,
+                            format!("{:.1}\u{b0}", ch.deg),
+                            theme::mono(11.0),
+                            theme::TEXT_MUTED,
+                        );
+                    }
+                }
+            }
             // the inline field of a new dimension sits on its label spot
             if s.input.is_some() && !s.dim_pending && s.edit_dim.is_none() {
-                let spot = match s.dim_anchor_points(t) {
+                let spot = if let (Some(ch), Some(_)) = (s.dim_rays, s.line_pair(t)) {
+                    let c0 = to(ch.p);
+                    Some(draw_angle_arc(p, c0, to(ch.p + ch.r1) - c0, to(ch.p + ch.r2) - c0, s.dim_arc_r).0)
+                } else {
+                    None
+                };
+                let spot = spot.or(match s.dim_anchor_points(t) {
                     Some((a, b)) => Some(draw_dim_line(p, to(a), to(b), s.dim_orient, 28.0)),
                     None => match t.first() {
                         Some(Sel::Entity(e)) => entity_mid(&s.sketch, *e).map(|m| to(m) + vec2(0.0, 18.0)),
                         _ => None,
                     },
-                };
+                });
                 s.dim_label_pos.set(spot);
             }
             // placing: the cursor's side picks horizontal / vertical / aligned
@@ -3217,6 +3368,22 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
                     )
                 }
                 Constraint::Angle(_, e, x) => (x, entity_mid(&s.sketch, *e).map(|m| (m, *e)), "∠"),
+                Constraint::AngleRays(l1, r1, l2, r2, x) => {
+                    let (Geom::Line { a, b }, Geom::Line { a: c2, b: d2 }) =
+                        (s.sketch.entities[l1.0 as usize].geom, s.sketch.entities[l2.0 as usize].geom)
+                    else {
+                        continue;
+                    };
+                    let (pa, pb, pc, pd) = (s.sketch.point(a), s.sketch.point(b), s.sketch.point(c2), s.sketch.point(d2));
+                    let Some(cr) = line_cross(pa, pb, pc, pd) else { continue };
+                    let (u, w) = ((pb - pa).normalize(), (pd - pc).normalize());
+                    let (ru, rw) = (if *r1 { -u } else { u }, if *r2 { -w } else { w });
+                    let c0 = to(cr);
+                    let (mid, segs) = draw_angle_arc(p, c0, to(cr + ru) - c0, to(cr + rw) - c0, 60.0);
+                    s.dim_segs.borrow_mut().extend(segs.into_iter().map(|g| (g, ci)));
+                    at_override = Some(mid);
+                    (x, Some((cr, EntityId(u32::MAX))), "∠")
+                }
                 _ => continue,
             };
             let Some((m, e)) = anchor else { continue };
@@ -3388,6 +3555,47 @@ fn entity_mid(s: &Sketch, e: EntityId) -> Option<DVec2> {
             pts.get(pts.len() / 2).copied()
         }
     }
+}
+
+/// An angle arc of radius `r` px around `c` from screen direction `d1` to `d2`
+/// (the short way), with arrows at both ends. Returns the arc's middle point and
+/// its segments (for clicking).
+fn draw_angle_arc(p: &egui::Painter, c: Pos2, d1: Vec2, d2: Vec2, r: f32) -> (Pos2, Vec<[Pos2; 2]>) {
+    let st = Stroke::new(1.0, theme::TEXT_DIM);
+    let (a1, a2) = (d1.y.atan2(d1.x), d2.y.atan2(d2.x));
+    let mut delta = a2 - a1;
+    while delta > std::f32::consts::PI {
+        delta -= std::f32::consts::TAU;
+    }
+    while delta < -std::f32::consts::PI {
+        delta += std::f32::consts::TAU;
+    }
+    let at = |t: f32| c + vec2((a1 + delta * t).cos(), (a1 + delta * t).sin()) * r;
+    let pts: Vec<Pos2> = (0..=24).map(|i| at(i as f32 / 24.0)).collect();
+    let mut segs: Vec<[Pos2; 2]> = pts.windows(2).map(|w| [w[0], w[1]]).collect();
+    for sg in &segs {
+        p.line_segment(*sg, st);
+    }
+    // the rays out to the arc and a little past it
+    for d in [d1, d2] {
+        let d = d.normalized();
+        if !d.x.is_nan() {
+            p.line_segment([c + d * (r * 0.5), c + d * (r + 6.0)], st);
+        }
+    }
+    // arrows along the arc at both ends
+    if r * delta.abs() > 16.0 {
+        for (t, sgn) in [(0.0f32, 1.0f32), (1.0, -1.0)] {
+            let tip = at(t);
+            let ang = a1 + delta * t;
+            let tangent = vec2(-ang.sin(), ang.cos()) * delta.signum() * sgn;
+            let n = vec2(tangent.y, -tangent.x);
+            p.line_segment([tip, tip + tangent * 7.0 + n * 2.5], st);
+            p.line_segment([tip, tip + tangent * 7.0 - n * 2.5], st);
+            segs.push([tip, tip + tangent * 7.0]);
+        }
+    }
+    (at(0.5), segs)
 }
 
 /// Clickable segments of a dimension line: the line itself and the extension
@@ -4028,5 +4236,65 @@ mod tests {
         s.construction_mode = false;
         let l2 = s.add_line((DVec2::ZERO, None), (DVec2::new(0.0, 5.0), None));
         assert!(!s.sketch.entities[l2.0 as usize].construction);
+    }
+
+    #[test]
+    fn angle_quadrant_picks_the_angle_its_supplement_or_the_opposite_pair() {
+        // an upright line and one at 30 degrees, crossing at the origin
+        let (a, b) = (DVec2::new(0.0, -5.0), DVec2::new(0.0, 5.0));
+        let w = DVec2::from_angle(30f64.to_radians());
+        let (c, d) = (-w * 5.0, w * 5.0);
+        let at = |q: (f64, f64)| angle_choice(a, b, c, d, DVec2::new(q.0, q.1)).unwrap().deg;
+        // up-right between the lines: 60; right-below: its supplement 120;
+        // up-left: 120; down-left: the opposite pair of the 60
+        assert!((at((1.0, 3.0)) - 60.0).abs() < 1e-9);
+        assert!((at((5.0, 1.0)) - 120.0).abs() < 1e-9);
+        assert!((at((-1.0, 3.0)) - 120.0).abs() < 1e-9);
+        assert!((at((-1.0, -3.0)) - 60.0).abs() < 1e-9);
+        // parallel lines have no crossing
+        assert!(angle_choice(a, b, a + DVec2::X, b + DVec2::X, DVec2::ONE).is_none());
+        // lines that only cross when extended
+        let ch = angle_choice(DVec2::new(0.0, 2.0), DVec2::new(0.0, 5.0), DVec2::new(3.0, 3.0), DVec2::new(6.0, 4.0), DVec2::new(1.0, 20.0)).unwrap();
+        assert!(ch.p.length() < 1e-9 || (ch.p.x.abs() < 1e-9));
+    }
+
+    #[test]
+    fn peace_sign_branch_angle_solves_to_the_chosen_side() {
+        let mut s = session();
+        // the upright, fixed; a branch from its foot, free to turn about it
+        let up = fixed_line(&mut s, (0.0, 0.0), (0.0, 10.0));
+        let br = s.add_line((DVec2::ZERO, None), (DVec2::new(5.0, -2.0), None));
+        let (u0, _) = s.line_points(up).unwrap();
+        let (b0, b1) = s.line_points(br).unwrap();
+        s.sketch.constrain(Constraint::Coincident(u0, b0));
+        s.sketch.constrain(Constraint::Length(br, "8".into()));
+        s.resolve();
+        // the cursor to the right of the upright, below the branch: the up-ray
+        // and the branch ray enclose the (111.8 degree) angle
+        let pts = s.line_pair(&[Sel::Entity(up), Sel::Entity(br)]).unwrap();
+        let ch = angle_choice(pts[0], pts[1], pts[2], pts[3], DVec2::new(5.0, 2.0)).unwrap();
+        assert!(ch.swap && ch.deg > 100.0 && ch.deg < 130.0, "{ch:?}");
+        s.dim_rays = Some(ch);
+        let undo_before = s.undo.len();
+        s.apply_dimension(&[Sel::Entity(up), Sel::Entity(br)], "135").unwrap();
+        assert_eq!(s.undo.len(), undo_before + 1, "one undo step");
+        assert!(matches!(s.sketch.constraints.last(), Some(Constraint::AngleRays(..))));
+        let d = s.sketch.point(b1) - s.sketch.point(b0);
+        assert!((d.y.atan2(d.x).to_degrees() + 45.0).abs() < 1e-4, "branch at -45: {d:?}");
+        // the opposite side of the upright: the branch swings the other way
+        let mut s2 = session();
+        let up = fixed_line(&mut s2, (0.0, 0.0), (0.0, 10.0));
+        let br = s2.add_line((DVec2::ZERO, None), (DVec2::new(-5.0, -2.0), None));
+        let (u0, _) = s2.line_points(up).unwrap();
+        let (b0, b1) = s2.line_points(br).unwrap();
+        s2.sketch.constrain(Constraint::Coincident(u0, b0));
+        s2.sketch.constrain(Constraint::Length(br, "8".into()));
+        s2.resolve();
+        let pts = s2.line_pair(&[Sel::Entity(up), Sel::Entity(br)]).unwrap();
+        let ch = angle_choice(pts[0], pts[1], pts[2], pts[3], DVec2::new(-5.0, 2.0)).unwrap();
+        s2.dim_rays = Some(ch);
+        s2.apply_dimension(&[Sel::Entity(up), Sel::Entity(br)], "135").unwrap();
+        let d = s2.sketch.point(b1) - s2.sketch.point(b0);
+        assert!((d.y.atan2(d.x).to_degrees() - 225.0 + 360.0).rem_euclid(360.0) < 1e-3 || (d.y.atan2(d.x).to_degrees() + 135.0).abs() < 1e-4, "{d:?}");
     }
 }
