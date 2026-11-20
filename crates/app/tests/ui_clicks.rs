@@ -1345,7 +1345,8 @@ mod hist {
         settle(&mut h);
         assert_eq!(nfeat(&h), 1);
         assert_eq!(h.state().doc.data.branch, "Try 1");
-        h.get_by_label("main  2").click();
+        let p = row_label(&h, "main").center();
+        click_at(&mut h, p, egui::PointerButton::Primary);
         settle(&mut h);
         assert_eq!(nfeat(&h), 2, "clicking the tab switches back");
         assert_eq!(h.state().doc.data.branch, "main");
@@ -1353,6 +1354,140 @@ mod hist {
         apply_branch(h.state_mut(), BranchAct::BackToSplit);
         settle(&mut h);
         assert_eq!(h.state().rollback(), Some(1), "back to the split rolls the head to it");
+    }
+
+    fn row_label(h: &Harness<'static, EasyCadApp>, name: &str) -> egui::Rect {
+        h.state().hist_row_rects.iter().find(|(n, _)| n == name).map(|(_, r)| *r).unwrap_or_else(|| panic!("no row {name}"))
+    }
+
+    fn drag(h: &mut Harness<'static, EasyCadApp>, from: egui::Pos2, to: egui::Pos2) {
+        h.hover_at(from);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        for i in 1..=10 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 10.0)));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(3);
+    }
+
+    #[test]
+    fn rewind_to_gap_zero_is_an_empty_model() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let mut h = harness(doc);
+        let from = chip(&h, HistItem::Feature(b)).center();
+        let to = egui::pos2(chip(&h, HistItem::Feature(a)).left() - 3.0, from.y);
+        drag(&mut h, from, to);
+        settle(&mut h);
+        assert_eq!(h.state().rollback(), Some(0), "the head went before the first feature");
+        assert_eq!(h.state().head_feature(), None);
+        let m = h.state().model.as_ref().unwrap();
+        assert!(m.result.report(a).is_none() && m.result.report(b).is_none(), "nothing is computed");
+        assert_eq!(m.bodies.iter().filter(|b| !b.body.reference).count(), 0, "an empty model");
+        assert!(easycad_app::ui_main::status_text(h.state()).contains("start"), "status says so");
+        h.state_mut().undo();
+        assert_eq!(h.state().rollback(), None, "one undo step");
+        // Ctrl+Alt+arrows reach gap 0 too
+        for _ in 0..2 {
+            h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::ArrowLeft);
+            h.run_steps(3);
+        }
+        assert_eq!(h.state().rollback(), Some(0));
+    }
+
+    #[test]
+    fn rewind_to_just_after_a_sketch_keeps_the_sketch_live() {
+        let _g = serial();
+        let (doc, _s, a, b) = two_blocks();
+        let s2 = doc.data.sketches[1].id;
+        let mut h = harness(doc);
+        assert!(!h.state().view().sketch_visible(s2), "consumed: hidden at first");
+        let r = chip(&h, HistItem::Sketch(s2));
+        click_at(&mut h, r.center(), egui::PointerButton::Secondary);
+        h.get_by_label("Roll back to here").click();
+        settle(&mut h);
+        assert_eq!(h.state().rollback(), Some(1), "its extrude and everything later is rolled back");
+        let m = h.state().model.as_ref().unwrap();
+        assert!(m.result.report(a).is_some(), "the first extrude is live");
+        assert!(m.result.report(b).is_none(), "the second is rolled back");
+        assert!(h.state().view().sketch(s2).is_some());
+        assert!(h.state().view().sketch_visible(s2), "the sketch stays visible");
+        // the head cursor sits right of the sketch chip, and the chip is still drawn live
+        assert!(chip(&h, HistItem::Sketch(s2)).right() < chip(&h, HistItem::Feature(b)).left());
+        // double-click edits it
+        let p = chip(&h, HistItem::Sketch(s2)).center();
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        click_at(&mut h, p, egui::PointerButton::Primary);
+        assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    }
+
+    #[test]
+    fn a_branch_grows_the_panel_and_discarding_it_shrinks_it_back() {
+        use easycad_app::history_ui::{apply_branch, BranchAct};
+        let _g = serial();
+        let (doc, _s, _a, _b) = two_blocks();
+        let mut h = harness(doc);
+        let h1 = h.state().hist_view.height;
+        assert_eq!(h1, easycad_app::history_tree::BASE_H, "one trunk: the base height");
+        assert!(h.state().hist_row_rects.is_empty() || h.state().hist_row_rects.len() == 1);
+        apply_branch(h.state_mut(), BranchAct::Here(1));
+        settle(&mut h);
+        assert!(h.state().hist_view.height > h1, "taller with two rows");
+        assert_eq!(h.state().hist_row_rects.len(), 2, "two rows render");
+        let (live, stored) = (row_label(&h, "Try 1"), row_label(&h, "main"));
+        assert!(stored.top() > live.top(), "the stored branch is a row below the trunk");
+        save(&mut h, "history_tree");
+        apply_branch(h.state_mut(), BranchAct::Discard("main".into()));
+        settle(&mut h);
+        assert_eq!(h.state().hist_view.height, h1, "shrinks back to the single trunk");
+    }
+
+    #[test]
+    fn dragging_empty_space_pans_and_leaves_the_head_alone() {
+        let _g = serial();
+        let (doc, _s, _a, b) = two_blocks();
+        let mut h = harness(doc);
+        let c = chip(&h, HistItem::Feature(b));
+        let before = h.state().hist_view.pan;
+        let from = egui::pos2(c.right() + 200.0, c.center().y);
+        drag(&mut h, from, from + egui::vec2(-60.0, 7.0));
+        let after = h.state().hist_view.pan;
+        assert!((after.x - before.x + 60.0).abs() < 1.5 && (after.y - before.y - 7.0).abs() < 1.5, "{before:?} -> {after:?}");
+        assert_eq!(h.state().rollback(), None, "the head did not move");
+        assert!((chip(&h, HistItem::Feature(b)).left() - (c.left() - 60.0)).abs() < 1.5, "the chips moved with the pan");
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_clamped_and_fit_recentres() {
+        let _g = serial();
+        let (doc, _s, _a, b) = two_blocks();
+        let mut h = harness(doc);
+        let c = chip(&h, HistItem::Feature(b));
+        let p = egui::pos2(c.right() + 100.0, c.center().y);
+        h.hover_at(p);
+        h.step();
+        for _ in 0..30 {
+            h.event_modifiers(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 80.0), modifiers: egui::Modifiers::COMMAND, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown }, egui::Modifiers::COMMAND);
+            h.step();
+        }
+        let z = h.state().hist_view.zoom;
+        assert!(z > 1.5 && z <= easycad_app::history_tree::Z_MAX + 1e-4, "zoomed in and clamped: {z}");
+        // plain wheel scrolls sideways
+        let px = h.state().hist_view.pan.x;
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -40.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown });
+        h.run_steps(3);
+        assert!(h.state().hist_view.pan.x < px, "wheel scrolls horizontally");
+        drag(&mut h, p, p + egui::vec2(0.0, 5.0));
+        h.get_by_label("Fit").click();
+        h.run_steps(3);
+        let v = h.state().hist_view.clone();
+        assert_eq!(v.zoom, 1.0);
+        assert_eq!(v.pan.y, 0.0);
+        let hc = chip(&h, HistItem::Feature(b));
+        assert!((hc.right() + 3.0 - 700.0 - 12.0).abs() < 140.0, "head is about centred: {hc:?}");
     }
 
     #[test]

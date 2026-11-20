@@ -30,6 +30,12 @@ pub struct Settings {
     /// Restart into a newly installed build, keeping the session (see reload.rs).
     #[serde(default = "yes")]
     pub auto_reload: bool,
+    /// Height the user dragged the history panel to, and the number of branch
+    /// rows it was set for (a new branch count goes back to the automatic height).
+    #[serde(default)]
+    pub history_height: Option<f32>,
+    #[serde(default)]
+    pub history_rows: usize,
 }
 
 fn yes() -> bool {

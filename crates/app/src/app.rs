@@ -123,6 +123,9 @@ pub struct EasyCadApp {
     pub hist_rects: Vec<(crate::hist_sel::HistItem, egui::Rect)>,
     /// The toolbar button (Undo/Redo) the pointer is over: the history strip previews its diff.
     pub hist_peek: Option<crate::history_ui::HistPeek>,
+    pub hist_view: crate::history_tree::HistView,
+    /// Screen rects of the branch row labels (name, rect) drawn last frame.
+    pub hist_row_rects: Vec<(String, egui::Rect)>,
     /// The diff the history strip last previewed (undo/redo hover or branch tab hover).
     pub hist_diff: Option<easycad_model::branch::HistDiff>,
     /// History chips selected by click (Del deletes them).
@@ -255,6 +258,8 @@ impl EasyCadApp {
             hist_sel: Vec::new(),
             hist_rects: Vec::new(),
             hist_peek: None,
+            hist_row_rects: Vec::new(),
+            hist_view: crate::history_tree::HistView::from_settings(&crate::settings::Settings::load()),
             hist_diff: None,
             delete_ask: None,
             plane_pick: None,

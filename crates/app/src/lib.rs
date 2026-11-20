@@ -18,6 +18,7 @@ pub mod construct;
 pub mod datum_ui;
 pub mod hist_sel;
 pub mod history_ui;
+pub mod history_tree;
 pub mod drag_arrow;
 pub mod plane_pick;
 pub mod sketch_mode;
