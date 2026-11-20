@@ -109,6 +109,8 @@ pub struct EasyCadApp {
     pub dialog_card_w: f32,
     /// A viewport handle / slider is being dragged (coarse previews).
     pub dragging: bool,
+    /// A drag on the extrude / offset-plane arrow in progress.
+    pub arrow_drag: Option<crate::drag_arrow::ArrowDrag>,
     pub now: f64,
     pub quit: bool,
     /// `EASYCAD_STATE_FILE` JSON dump for the E2E scripts.
@@ -234,6 +236,7 @@ impl EasyCadApp {
             show_build_plate: false,
             dialog_card_w: 390.0,
             dragging: false,
+            arrow_drag: None,
             now: 0.0,
             quit: false,
             state_dump: crate::e2e_state::StateDump::from_env(),

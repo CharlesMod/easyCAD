@@ -326,6 +326,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
 
     // ------------------------------------------------ move gizmo (over the image)
     let gizmo_owns = crate::ui_gizmo::gizmo(app, ui, rect, &resp);
+    let gizmo_owns = crate::drag_arrow::arrow(app, ui, rect, &resp) || gizmo_owns;
 
     // ------------------------------------------------ click selection
     if resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {

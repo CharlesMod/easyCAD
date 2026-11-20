@@ -100,6 +100,8 @@ impl DialogKind {
 pub struct Field {
     pub text: String,
     pub fit: Option<Fit>,
+    /// Take the focus with the text selected on the next draw (after an arrow drag).
+    pub select: bool,
 }
 
 impl Field {
@@ -107,18 +109,21 @@ impl Field {
         Field {
             text: s.into(),
             fit: None,
+            select: false,
         }
     }
     pub fn with_fit(s: impl Into<String>, fit: Fit) -> Self {
         Field {
             text: s.into(),
             fit: Some(fit),
+            select: false,
         }
     }
     pub fn from_expr(e: &Expr, default_fit: Option<Fit>) -> Self {
         Field {
             text: e.0.clone(),
             fit: e.1.or(default_fit),
+            select: false,
         }
     }
     /// Expression for the feature. A fit equal to the engine default is not stored.
@@ -141,8 +146,22 @@ impl Field {
                     egui::vec2(w + if self.fit.is_some() { 82.0 } else { 0.0 }, 28.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
+                        if self.select {
+                            ui.memory_mut(|m| m.request_focus(id));
+                        }
                         let o = expr_field(ui, id, &mut self.text, w, env, self.fit.as_mut());
                         changed = o.changed || o.fit_changed;
+                        if self.select {
+                            self.select = false;
+                            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                                let n = self.text.chars().count();
+                                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    egui::text::CCursor::new(n),
+                                )));
+                                st.store(ui.ctx(), id);
+                            }
+                        }
                     },
                 );
             });
