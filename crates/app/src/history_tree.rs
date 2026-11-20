@@ -488,10 +488,9 @@ fn body(app: &mut EasyCadApp, ui: &mut Ui) {
         }
         // wheel: Ctrl+wheel zooms about the pointer, plain wheel scrolls sideways
         let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| canvas.contains(*p));
-        if hover.is_some() {
+        if let Some(p) = hover {
             let (zd, sc) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
             if (zd - 1.0).abs() > 1e-4 {
-                let p = hover.unwrap();
                 let nz = (v.zoom * zd).clamp(Z_MIN, Z_MAX);
                 let world = (p - canvas.min - v.pan) / v.zoom;
                 v.pan = p - canvas.min - world * nz;
