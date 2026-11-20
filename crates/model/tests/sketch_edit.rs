@@ -368,3 +368,37 @@ fn filleted_offset_solves() {
         assert!(areas(&s).iter().any(|a| (a - want).abs() < 1e-4), "r = {r}: {:?} vs {want}", areas(&s));
     }
 }
+
+#[test]
+fn projected_circle_and_rectangle_are_profiles() {
+    use easycad_model::geom::Plane as P;
+    use easycad_model::occt::Shape;
+    use easycad_model::regen::profile_face;
+    // a plate with a Ø6 hole: project the hole's top circle and extrude it whole
+    let b = Shape::make_box(DVec3::ZERO, DVec3::new(20.0, 10.0, 5.0)).unwrap();
+    let b = b.cut(&Shape::cylinder(DVec3::new(10.0, 5.0, -1.0), DVec3::Z, 3.0, 10.0).unwrap()).unwrap();
+    let edges = b.edges().unwrap();
+    let mut s = Sketch::new("Top", P::XY.offset(5.0));
+    let circ = edges.iter().find(|e| e.circle.is_some() && e.closed).unwrap();
+    let made = s.project_edge(circ, None, false);
+    assert_eq!(made.len(), 1);
+    assert!(matches!(s.entities[made[0].0 as usize].geom, Geom::Circle { radius, .. } if (radius - 3.0).abs() < 1e-9));
+    assert!(s.entities[made[0].0 as usize].projected && !s.entities[made[0].0 as usize].construction);
+    let pr = s.profiles();
+    assert_eq!(pr.profiles.len(), 1, "the projected circle is a closed profile");
+    let solid = profile_face(&s.plane, &pr.profiles[0]).unwrap().extrude(DVec3::new(0.0, 0.0, 4.0)).unwrap();
+    let want = PI * 9.0 * 4.0;
+    assert!((solid.volume().unwrap() - want).abs() < 1e-3 * want, "{}", solid.volume().unwrap());
+    // X (construction) takes it out of the profiles
+    s.set_construction(made[0], true);
+    assert!(s.profiles().profiles.is_empty());
+
+    // the top face's outline projects as lines sharing corners: one closed profile
+    let plain = Shape::make_box(DVec3::ZERO, DVec3::new(20.0, 10.0, 5.0)).unwrap();
+    let mut r = Sketch::new("Top", P::XY.offset(5.0));
+    for e in plain.edges().unwrap().iter().filter(|e| e.start.z > 4.9 && e.end.z > 4.9) {
+        r.project_edge(e, None, false);
+    }
+    assert_eq!(r.profiles().profiles.len(), 1);
+    assert!(r.points.len() <= 4 + 4, "corners are shared: {}", r.points.len());
+}

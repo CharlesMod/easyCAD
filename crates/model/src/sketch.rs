@@ -27,6 +27,10 @@ pub struct Entity {
     pub geom: Geom,
     #[serde(default)]
     pub construction: bool,
+    /// Brought in from a model edge (Project tool): drawn in its own colour; it is a
+    /// normal profile entity unless also marked construction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub projected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,7 +137,7 @@ impl Sketch {
     }
 
     pub fn add_entity(&mut self, geom: Geom, construction: bool) -> EntityId {
-        self.entities.push(Entity { geom, construction });
+        self.entities.push(Entity { geom, construction, projected: false });
         EntityId(self.entities.len() as u32 - 1)
     }
 

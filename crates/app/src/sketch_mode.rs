@@ -59,7 +59,7 @@ impl Tool {
             Tool::Arc => "Arc · click center, start, then end (CCW)",
             Tool::Fillet => "Sketch fillet · pick a corner · type radius",
             Tool::Offset => "Offset · pick a loop · type distance (=clearance + wall)",
-            Tool::Project => "Project · pick body edges (grey) to bring them in",
+            Tool::Project => "Project · pick body edges (grey) to bring them in as profile geometry (X makes them construction)",
             Tool::Trim => "Trim · hover a segment to preview, click to cut",
             Tool::Dimension => "Dimension · pick one or two entities, then type",
         }
@@ -1789,7 +1789,7 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
             // exact: lines stay lines, circles facing the plane stay circles (GUI_NEEDS #14)
             if let Some((info, samples)) = hit.and_then(|i| s.projected_src.get(i).cloned().flatten()) {
                 s.push_undo();
-                if s.sketch.project_edge(&info, Some(&samples), true).is_empty() {
+                if s.sketch.project_edge(&info, Some(&samples), false).is_empty() {
                     s.pop_undo();
                 } else {
                     s.entity_layer.resize(s.sketch.entities.len(), None);
@@ -1802,7 +1802,8 @@ fn click_tool(s: &mut SketchSession, rect: Rect, hp: Pos2, additive: bool) {
                 for pt in &pl {
                     let id = s.sketch.add_point(*pt);
                     if let Some(a) = prev {
-                        s.add_entity(Geom::Line { a, b: id }, true);
+                        let e = s.add_entity(Geom::Line { a, b: id }, false);
+                        s.sketch.entities[e.0 as usize].projected = true;
                     }
                     prev = Some(id);
                 }
@@ -2265,6 +2266,8 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
             }
         } else if e.construction {
             theme::hex(0x7d848e)
+        } else if e.projected {
+            theme::PURPLE
         } else {
             theme::TEXT
         };

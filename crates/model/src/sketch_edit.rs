@@ -678,10 +678,26 @@ impl Sketch {
     /// a fixed polyline through `samples` (e.g. the mesh edge polyline) or start,
     /// middle and end. Edges seen end-on add nothing.
     pub fn project_edge(&mut self, e: &occt::EdgeInfo, samples: Option<&[DVec3]>, construction: bool) -> Vec<EntityId> {
+        let n0 = self.entities.len();
+        let made = self.project_edge_inner(e, samples, construction);
+        for i in n0..self.entities.len() {
+            self.entities[i].projected = true;
+        }
+        made
+    }
+
+    fn project_edge_inner(&mut self, e: &occt::EdgeInfo, samples: Option<&[DVec3]>, construction: bool) -> Vec<EntityId> {
         let pl = self.plane;
         let n = pl.normal.normalize_or_zero();
         let to2 = |p: DVec3| pl.to_local(p);
         let fixed = |sk: &mut Sketch, q: DVec2| {
+            // reuse an already fixed point at the same spot so projected loops share corners
+            if let Some(i) = (0..sk.points.len()).find(|&i| {
+                sk.points[i].distance(q) < 1e-9
+                    && sk.constraints.iter().any(|c| matches!(c, Constraint::Fix(p, _) if p.0 as usize == i))
+            }) {
+                return PointId(i as u32);
+            }
             let id = sk.add_point(q);
             sk.constrain(Constraint::Fix(id, q));
             id
