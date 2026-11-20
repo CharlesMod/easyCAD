@@ -2084,3 +2084,61 @@ mod regions {
         }
     }
 }
+
+#[test]
+fn dialog_sketch_is_drawn_while_extrude_dialog_is_open() {
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::geom::Plane;
+    use easycad_model::sketch::Sketch;
+    let _serial = serial();
+    let mut doc = easycad_app::sample::sensor_node();
+    let mut s = Sketch::new("S", Plane::XY);
+    s.rect(glam::DVec2::ZERO, glam::DVec2::new(40.0, 20.0));
+    let sid = doc.add_sketch(s);
+    let fid = doc.add_feature(
+        "Block",
+        FeatureKind::Extrude {
+            sketch: sid,
+            profiles: ProfileSel::All,
+            distance: 5.0.into(),
+            symmetric: false,
+            reverse: false,
+            draft_deg: 0.0.into(),
+            op: BoolOp::NewBody,
+            target: None,
+        },
+    );
+    let mut h = harness(doc);
+    h.run_steps(3);
+    assert!(!has(h.state(), sid), "consumed sketch hidden");
+    // edit the extrude from history: its sketch shows, whatever its stored visibility
+    h.state_mut().edit_feature(fid);
+    h.run_steps(3);
+    assert!(
+        has(h.state(), sid),
+        "sketch drawn while its extrude is edited"
+    );
+    assert!(easycad_app::sketch_view::dialog_sketches(h.state()).contains(&sid));
+    h.state_mut().close_dialog(false);
+    h.run_steps(3);
+    assert!(!has(h.state(), sid), "hidden again after Cancel");
+    // an explicitly hidden sketch still shows for a new extrude, and the flag is untouched
+    easycad_app::sketch_view::set_visible(h.state_mut(), sid, false);
+    h.state_mut()
+        .open_dialog(easycad_app::dialogs::DialogKind::Extrude);
+    h.run_steps(3);
+    assert!(has(h.state(), sid), "new extrude shows its sketch");
+    h.state_mut().close_dialog(false);
+    h.run_steps(3);
+    assert!(!has(h.state(), sid));
+    assert_eq!(
+        h.state()
+            .view()
+            .sketches
+            .iter()
+            .find(|e| e.id == sid)
+            .unwrap()
+            .visible,
+        Some(false)
+    );
+}

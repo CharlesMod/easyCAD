@@ -276,15 +276,22 @@ fn cached(doc_id: &str, id: SketchId, sk: &Sketch) -> Arc<Mesh> {
     })
 }
 
+/// Sketches an open Extrude/Revolve dialog is using: drawn whatever their stored
+/// visibility (and above the preview body), so their curves and regions can be seen and picked.
+pub fn dialog_sketches(app: &EasyCadApp) -> Vec<SketchId> {
+    app.dialog.as_ref().and_then(|d| d.region_target()).map(|(id, _)| id).into_iter().collect()
+}
+
 /// The sketches the 3D view draws now: finished, visible, and not the one being edited.
 pub fn draw_list(app: &EasyCadApp) -> Vec<(SketchId, Arc<Mesh>)> {
     if matches!(app.mode, Mode::Sketch(_)) {
         return Vec::new();
     }
     let view = app.view();
+    let forced = dialog_sketches(app);
     view.sketches
         .iter()
-        .filter(|e| view.sketch_visible(e.id))
+        .filter(|e| forced.contains(&e.id) || view.sketch_visible(e.id))
         .filter(|e| !e.sketch.entities.is_empty())
         .map(|e| (e.id, cached(&app.doc.data.doc_id, e.id, &e.sketch)))
         .collect()

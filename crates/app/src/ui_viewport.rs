@@ -598,6 +598,7 @@ fn build_frame(
 ) -> Frame3D {
     let size = Vec2::new(rect.width(), rect.height());
     let cam = &app.camera;
+    let forced = crate::sketch_view::dialog_sketches(app);
     let mut bodies = Vec::new();
     let explode = explode_offset(app, shown);
     // overhang heat map: the build direction in the view frame, the critical angle
@@ -631,7 +632,7 @@ fn build_frame(
                 color,
                 translucent: b.body.reference && color[3] < 1.0,
                 colors,
-                model: glam::Mat4::from_translation(offset),
+                model: glam::Mat4::from_translation(offset), top: false,
             });
         }
     }
@@ -644,7 +645,7 @@ fn build_frame(
                 color: [0.90, 0.20, 0.16, 1.0],
                 translucent: false,
                 colors: None,
-                model: to_mat4(to_view),
+                model: to_mat4(to_view), top: false,
             });
         }
     }
@@ -655,7 +656,7 @@ fn build_frame(
             color: srgba(theme::ORANGE_SOFT),
             translucent: false,
             colors: None,
-            model: to_mat4(*xf),
+            model: to_mat4(*xf), top: false,
         });
     }
     // assemblies: the other occurrences (dimmed while a component is being edited)
@@ -687,7 +688,7 @@ fn build_frame(
             color,
             translucent: (b.reference && color[3] < 1.0) || dim || tinted,
             colors,
-            model: to_mat4(crate::ui_assembly::display_xf(app, c)),
+            model: to_mat4(crate::ui_assembly::display_xf(app, c)), top: false,
         });
     }
     let mut highlights = Vec::new();
@@ -809,6 +810,7 @@ fn build_frame(
                 translucent: false,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
+                top: forced.contains(&id),
             })
             // origin-plane squares of the plane pick; `translucent` = hovered (stronger fill)
             .chain(crate::plane_pick::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
@@ -817,6 +819,7 @@ fn build_frame(
                 translucent: hot,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
+                top: false,
             }))
             // construction planes: translucent squares with a border; `translucent` = hovered / picked
             .chain(crate::datum_ui::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
@@ -825,6 +828,7 @@ fn build_frame(
                 translucent: hot,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
+                top: false,
             }))
             .collect(),
         grid,

@@ -40,6 +40,8 @@ pub struct DrawBody {
     pub colors: Option<Arc<Vec<[f32; 3]>>>,
     /// Model matrix: mesh frame -> view frame (placed instances, explode, drags).
     pub model: Mat4,
+    /// Sketch only: draw over everything, ignoring depth (the sketch an open dialog uses).
+    pub top: bool,
 }
 
 #[derive(Clone)]
@@ -143,6 +145,7 @@ pub struct ViewportGpu {
     blend: wgpu::RenderPipeline,
     xray: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    lines_top: wgpu::RenderPipeline,
     grid: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
@@ -431,6 +434,16 @@ impl ViewportGpu {
             C::LessEqual,
             none,
         );
+        let lines_top = make(
+            "edges top",
+            "vs_line",
+            "fs_flat",
+            &line_vb,
+            T::LineList,
+            false,
+            C::Always,
+            none,
+        );
         let grid = make(
             "grid",
             "vs_grid",
@@ -523,6 +536,7 @@ impl ViewportGpu {
             blend,
             xray,
             lines,
+            lines_top,
             grid,
             blit,
             blit_layout,
@@ -803,6 +817,7 @@ impl ViewportGpu {
             Blend,
             Xray,
             Lines,
+            LinesTop,
             Grid,
         }
         let mut list: Vec<(P, MeshKey, What, DrawUniform)> = Vec::new();
@@ -871,9 +886,9 @@ impl ViewportGpu {
                 let mut c = b.color;
                 // `translucent` marks the hovered plane of the plane pick
                 c[3] = if b.translucent { 0.40 } else { crate::sketch_view::FILL_ALPHA };
-                list.push((P::Blend, k, What::All, ub(b, c, 0.0)));
+                list.push((if b.top { P::Xray } else { P::Blend }, k, What::All, ub(b, c, 0.0)));
             }
-            list.push((P::Lines, k, What::Edges, ub(b, b.color, 0.0)));
+            list.push((if b.top { P::LinesTop } else { P::Lines }, k, What::Edges, ub(b, b.color, 0.0)));
         }
         for h in &f.highlights {
             if let Some((hk, g)) = self.any_key(&h.mesh).and_then(|k| Some((k, self.meshes.get(&k)?))) {
@@ -946,6 +961,7 @@ impl ViewportGpu {
                 P::Blend => &self.blend,
                 P::Xray => &self.xray,
                 P::Lines => &self.lines,
+                P::LinesTop => &self.lines_top,
                 P::Grid => &self.grid,
             };
             pass.set_pipeline(pipe);
