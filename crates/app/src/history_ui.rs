@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use easycad_model::branch::{history_diff, HeadAt, HistDiff};
 use easycad_model::document::DocData;
 use easycad_model::feature::{Feature, FeatureId, SketchId};
-use egui::{pos2, vec2, Color32, CornerRadius, Id, Rect, RichText, Sense, Stroke, Ui};
+use egui::{pos2, Color32, CornerRadius, Id, Rect, Sense, Stroke, Ui};
 
 use crate::app::EasyCadApp;
 use crate::theme;
@@ -103,25 +103,26 @@ pub fn drag_preview(ui: &Ui) -> Option<usize> {
     ui.data(|d| d.get_temp::<usize>(drag_key()))
 }
 
-/// The golden head cursor. `bounds[k-1]` is the x of the gap after feature k.
-/// Pressing and dragging it, its grip, or the head chip itself (`head_chip`)
-/// moves the head to the nearest gap (live preview through `drag_preview`);
-/// returns the new head position (1..=n) when the drag is released on another gap.
+/// The golden head cursor. `gaps[k]` is the world x of gap k (0..=n); `tf` maps it to
+/// the screen. Pressing and dragging it, its grip, or the head chip itself
+/// (`head_chip`) moves the head to the nearest gap (live preview through
+/// `drag_preview`); returns the new gap when the drag is released on another one.
 pub fn golden_cursor(
     ui: &mut Ui,
-    bounds: &[f32],
+    gaps: &[f32],
+    tf: &dyn Fn(f32) -> f32,
     strip: Rect,
     marker: usize,
     head_chip: Option<&egui::Response>,
 ) -> Option<usize> {
-    let n = bounds.len();
+    let n = gaps.len().saturating_sub(1);
     if n == 0 {
         return None;
     }
-    let cur = marker.clamp(1, n);
+    let cur = marker.min(n);
     let (top, bot) = (strip.top(), strip.bottom());
-    let x0 = bounds[cur - 1];
-    let hit = Rect::from_min_max(pos2(x0 - 5.0, top), pos2(x0 + 5.0, bot));
+    let x0 = tf(gaps[cur]);
+    let hit = Rect::from_min_max(pos2(x0 - 5.0, top), pos2(x0 + 5.0, bot)).intersect(strip);
     let bar = ui.interact(hit, Id::NULL.with("history_head_bar"), Sense::drag());
     let chip = head_chip;
     let dragging = bar.dragged() || chip.is_some_and(|c| c.dragged());
@@ -131,10 +132,10 @@ pub fn golden_cursor(
     if dragging || stopped {
         if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
             let mut best = (f32::MAX, cur);
-            for (k, x) in bounds.iter().enumerate() {
-                let d = (x - p.x).abs();
+            for (k, x) in gaps.iter().enumerate() {
+                let d = (tf(*x) - p.x).abs();
                 if d < best.0 {
-                    best = (d, k + 1);
+                    best = (d, k);
                 }
             }
             show = best.1;
@@ -159,8 +160,12 @@ pub fn golden_cursor(
     let active = dragging || hovered;
     let hot = ui.ctx().animate_bool_with_time(Id::NULL.with("history_head_hot"), active, 0.12);
     let t = if dragging { 0.06 } else { 0.14 };
-    let x = ui.ctx().animate_value_with_time(Id::NULL.with("history_head_x"), bounds[show.clamp(1, n) - 1], t);
-    paint_cursor(ui, x, top, bot, hot, dragging);
+    // animate in world x so panning and zooming never detach it from the chips
+    let wx = ui.ctx().animate_value_with_time(Id::NULL.with("history_head_x"), gaps[show.min(n)], t);
+    let x = tf(wx);
+    if x > strip.left() - 10.0 && x < strip.right() + 10.0 {
+        paint_cursor(ui, x, top, bot, hot, dragging);
+    }
     if hovered && !dragging {
         bar.on_hover_text("Drag the golden head to a step to roll back (or forward) · Ctrl+Alt+←/→ nudges it");
     }
@@ -239,7 +244,7 @@ pub fn split_mark(ui: &Ui, x: f32, top: f32, bot: f32, col: Color32) {
     ));
 }
 
-// ------------------------------------------------------------------ branch strip
+// ------------------------------------------------------------------ branch actions
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BranchAct {
@@ -248,86 +253,6 @@ pub enum BranchAct {
     BackToSplit,
     Keep,
     Discard(String),
-}
-
-/// The branch tabs above the timeline. Returns the action chosen and the index (in
-/// `doc.data.branches`) of the stored branch tab the pointer is over.
-pub fn branch_strip(app: &EasyCadApp, ui: &mut Ui) -> (Option<BranchAct>, Option<usize>) {
-    let d = &app.doc.data;
-    let mut act = None;
-    let mut hov = None;
-    let root = app.active.is_empty();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        ui.label(RichText::new("BRANCH").size(10.5).color(theme::TEXT_LABEL));
-        let cur = format!("{}  {}", d.branch, d.features.len());
-        ui.add(
-            egui::Button::new(RichText::new(cur).size(11.0).color(theme::TEXT))
-                .fill(theme::ACCENT_BG)
-                .stroke(Stroke::new(1.0, theme::ACCENT))
-                .corner_radius(9)
-                .min_size(vec2(0.0, 18.0)),
-        )
-        .on_hover_text(match &d.branch_parent {
-            Some(p) => format!("You are on \"{}\" (started from \"{p}\" after {} features)", d.branch, d.branch_split),
-            None => format!("You are on \"{}\"", d.branch),
-        });
-        for (i, b) in d.branches.iter().enumerate() {
-            let r = ui.add(
-                egui::Button::new(RichText::new(format!("{}  {}", b.name, b.data.features.len())).size(11.0).color(theme::TEXT_MUTED))
-                    .fill(theme::CARD)
-                    .stroke(Stroke::new(1.0, theme::hex(0x33373e)))
-                    .corner_radius(9)
-                    .min_size(vec2(0.0, 18.0)),
-            );
-            if r.hovered() {
-                hov = Some(i);
-            }
-            let r = r.on_hover_text(format!("Click to switch to \"{}\" · hover shows what would change", b.name));
-            if r.clicked() {
-                act = Some(BranchAct::Switch(b.name.clone()));
-            }
-            r.context_menu(|ui| {
-                if ui.button("Switch to this branch").clicked() {
-                    act = Some(BranchAct::Switch(b.name.clone()));
-                    ui.close();
-                }
-                if ui.button("Discard this branch").clicked() {
-                    act = Some(BranchAct::Discard(b.name.clone()));
-                    ui.close();
-                }
-            });
-        }
-        let n = d.features.len();
-        let here = ui
-            .add_enabled(root, egui::Button::new(RichText::new("+ Branch here").size(11.0)).corner_radius(9).min_size(vec2(0.0, 18.0)))
-            .on_hover_text("Save this history and continue on a new branch from the head, to try an idea. Right-click a step to branch there")
-            .on_disabled_hover_text("Branches apply to the whole document: leave the component first");
-        if here.clicked() {
-            act = Some(BranchAct::Here(app.rollback().unwrap_or(n)));
-        }
-        if d.branch_parent.is_some()
-            && ui
-                .add_enabled(root, egui::Button::new(RichText::new("Back to split").size(11.0)).corner_radius(9).min_size(vec2(0.0, 18.0)))
-                .on_hover_text("Return to the parent branch with the head at the step this one started from")
-                .clicked()
-        {
-            act = Some(BranchAct::BackToSplit);
-        }
-        if !d.branches.is_empty() {
-            ui.menu_button(RichText::new("···").size(11.0), |ui| {
-                if ui.button("Keep this branch (delete the others)").clicked() {
-                    act = Some(BranchAct::Keep);
-                    ui.close();
-                }
-                if ui.button("Discard this branch").clicked() {
-                    act = Some(BranchAct::Discard(d.branch.clone()));
-                    ui.close();
-                }
-            });
-        }
-    });
-    (act, hov)
 }
 
 /// Apply a branch action to the document; the caller regenerates afterwards.

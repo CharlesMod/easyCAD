@@ -246,11 +246,25 @@ impl DocData {
         self.features.iter().any(|f| f.kind.sketch() == Some(id))
     }
 
+    /// Index of the first feature that builds from this sketch.
+    pub fn first_consumer(&self, id: SketchId) -> Option<usize> {
+        self.features.iter().position(|f| f.kind.sketch() == Some(id))
+    }
+
+    /// The rollback marker that puts the history head right after sketch `id`:
+    /// the sketch's first consuming feature (and all later ones) is rolled
+    /// back, the sketch itself stays live. `None` (roll forward) when nothing
+    /// consumes it, since it then sits after every feature.
+    pub fn rollback_after_sketch(&self, id: SketchId) -> Option<usize> {
+        self.first_consumer(id)
+    }
+
     /// Whether the sketch is drawn in the 3D view: the user's choice if any,
     /// else visible until a feature consumes it.
     pub fn sketch_visible(&self, id: SketchId) -> bool {
         match self.sketches.iter().find(|s| s.id == id) {
-            Some(e) => e.visible.unwrap_or_else(|| !self.sketch_consumed(id)),
+            // consumed means by a feature that is still live (not rolled back)
+            Some(e) => e.visible.unwrap_or_else(|| !self.first_consumer(id).is_some_and(|i| i < self.head_pos())),
             None => false,
         }
     }
@@ -605,6 +619,12 @@ impl Document {
     pub fn add_feature(&mut self, name: &str, kind: FeatureKind) -> FeatureId {
         let label = format!("{} {name}", kind.label());
         self.edit(&label, |d| Ok::<_, DocError>(d.add_feature(name, kind))).unwrap()
+    }
+
+    /// Put the history head right after sketch `id` (one undo step).
+    pub fn roll_back_to_sketch(&mut self, id: SketchId) {
+        let at = self.data.rollback_after_sketch(id);
+        self.set_rollback(at);
     }
 
     /// Move the history rollback marker (undoable): `Some(n)` computes only the
