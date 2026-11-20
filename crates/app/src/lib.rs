@@ -19,6 +19,7 @@ pub mod datum_ui;
 pub mod drag_arrow;
 pub mod plane_pick;
 pub mod sketch_mode;
+pub mod sketch_move;
 pub mod sketch_view;
 pub mod smoke;
 pub mod theme;

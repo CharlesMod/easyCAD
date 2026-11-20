@@ -120,6 +120,8 @@ pub struct SketchSession {
     pub values: Values,
     pub names: Vec<String>,
     pub drag: Option<PointId>,
+    /// The Move gizmo (M): see `sketch_move`.
+    pub mv: Option<crate::sketch_move::MoveState>,
     pub cursor: DVec2,
     pub projected: Vec<Vec<DVec2>>,
     /// The model edge each projected polyline comes from (exact projection), with
@@ -174,6 +176,7 @@ impl SketchSession {
             values,
             names,
             drag: None,
+            mv: None,
             cursor: DVec2::ZERO,
             projected: Vec::new(),
             projected_src: Vec::new(),
@@ -438,7 +441,7 @@ impl SketchSession {
     }
 
     /// Drop the snapshot of an edit that did not happen.
-    fn pop_undo(&mut self) {
+    pub(crate) fn pop_undo(&mut self) {
         self.undo.pop();
     }
 
@@ -454,6 +457,10 @@ impl SketchSession {
 
     /// Step back one sketch edit; false when this session has nothing to undo.
     pub fn undo(&mut self) -> bool {
+        if self.mv.is_some() {
+            self.cancel_move();
+            return true;
+        }
         let Some((s, l)) = self.undo.pop() else { return false };
         let cur = (std::mem::replace(&mut self.sketch, s), std::mem::replace(&mut self.entity_layer, l));
         self.redo.push(cur);
@@ -979,7 +986,12 @@ impl SketchSession {
     /// point it landed on and what it snapped to ("end", "center", "mid",
     /// "radius", "on line", "on circle", "on arc"); `None` label = grid.
     fn snap_full(&self, rect: Rect, p: Pos2) -> (DVec2, Option<PointId>, Option<&'static str>) {
-        let q = self.to_sketch(rect, p);
+        self.snap_at(self.to_sketch(rect, p), &[])
+    }
+
+    /// `snap_full` for a sketch position, ignoring the entities in `skip` (the ones
+    /// being moved must not snap to themselves).
+    pub fn snap_at(&self, q: DVec2, skip: &[EntityId]) -> (DVec2, Option<PointId>, Option<&'static str>) {
         if !self.snap || self.alt_held {
             return (q, None, None);
         }
@@ -994,7 +1006,10 @@ impl SketchSession {
             }
         }
         let nearest = |v: &[Cand]| v.iter().copied().min_by(|a, b| a.0.total_cmp(&b.0));
-        for e in &sk.entities {
+        for (ei, e) in sk.entities.iter().enumerate() {
+            if skip.contains(&EntityId(ei as u32)) {
+                continue;
+            }
             match e.geom {
                 Geom::Line { a, b } => {
                     for id in [a, b] {
@@ -1015,7 +1030,10 @@ impl SketchSession {
         if let Some((_, pos, pid, l)) = nearest(&cands) {
             return (pos, pid, Some(l));
         }
-        for e in &sk.entities {
+        for (ei, e) in sk.entities.iter().enumerate() {
+            if skip.contains(&EntityId(ei as u32)) {
+                continue;
+            }
             if let Geom::Line { a, b } = e.geom {
                 let m = (sk.point(a) + sk.point(b)) / 2.0;
                 offer(&mut cands, tol, m.distance(q), m, None, "mid");
@@ -1028,7 +1046,10 @@ impl SketchSession {
         if matches!(self.tool, Tool::Circle | Tool::Arc) && self.clicks.len() == 1 {
             let c = self.clicks[0].0;
             let dist = c.distance(q);
-            for e in &sk.entities {
+            for (ei, e) in sk.entities.iter().enumerate() {
+            if skip.contains(&EntityId(ei as u32)) {
+                continue;
+            }
                 let r = match e.geom {
                     Geom::Circle { center, radius } if sk.point(center).distance(c) < 1e-9 => radius,
                     Geom::Arc { center, start, .. } if sk.point(center).distance(c) < 1e-9 => {
@@ -1046,7 +1067,10 @@ impl SketchSession {
         }
         // 2. on curve; projected geometry wins a near tie
         let mut on: Option<(f64, DVec2, &'static str)> = None;
-        for e in &sk.entities {
+        for (ei, e) in sk.entities.iter().enumerate() {
+            if skip.contains(&EntityId(ei as u32)) {
+                continue;
+            }
             let (pos, label) = match e.geom {
                 Geom::Line { a, b } => {
                     let (pa, pb) = (sk.point(a), sk.point(b));
@@ -1260,6 +1284,7 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
         )
         .show(ui, |ui| {
             if right_panel(s, ui) {
+                s.commit_move();
                 finish = true;
             }
         });
@@ -1452,6 +1477,14 @@ fn right_panel(s: &mut SketchSession, ui: &mut Ui) -> bool {
     if r.on_hover_text(CONSTRUCTION_HINT).clicked() {
         s.toggle_construction();
     }
+    let can_move = s.mv.is_none() && (!s.selected_entities().is_empty());
+    if ui
+        .add_enabled(can_move, egui::Button::new(RichText::new("Move selection   M").size(12.0)).stroke(Stroke::new(1.0, theme::BORDER_INPUT)))
+        .on_hover_text("Move the selected lines/arcs/circles: drag the X or Y arrow, or the square; type dX / dY and press Enter")
+        .clicked()
+    {
+        s.begin_move();
+    }
     theme::section_label(ui, "Constraints");
     let mut err = None;
     egui::Grid::new("constraints")
@@ -1580,10 +1613,19 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::X)) && s.input.is_none() {
             s.toggle_construction();
         }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) && s.input.is_none() {
+            if s.mv.is_some() {
+                s.commit_move();
+            } else {
+                s.begin_move();
+            }
+        }
         // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y are dispatched once, by `EasyCadApp::shortcuts`
         // (sketch history first, then the document's).
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            if s.input.is_some() {
+            if s.mv.is_some() {
+                s.cancel_move();
+            } else if s.input.is_some() {
                 s.cancel_input();
             } else if !s.clicks.is_empty() {
                 s.clicks.clear();
@@ -1641,7 +1683,8 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         }
     }
     // pointer
-    if let Some(hp) = resp.interact_pointer_pos() {
+    let moving = crate::sketch_move::interact(s, ui, rect, &resp);
+    if let (false, Some(hp)) = (moving, resp.interact_pointer_pos()) {
         if resp.drag_started_by(egui::PointerButton::Primary) && s.tool == Tool::Select {
             if let Some(Sel::Point(pid)) = s.pick(rect, hp) {
                 if s.entity_layer.iter().all(|l| l.is_none()) || !is_fixed(&s.sketch, pid) {
@@ -1669,7 +1712,7 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
         s.drag = None;
         s.resolve();
     }
-    if resp.clicked_by(egui::PointerButton::Primary) {
+    if resp.clicked_by(egui::PointerButton::Primary) && !moving {
         if let Some(hp) = resp.interact_pointer_pos() {
             click(
                 s,
@@ -1695,9 +1738,15 @@ fn canvas(s: &mut SketchSession, ui: &mut Ui) -> bool {
             s.toggle_construction_selection();
             ui.close();
         }
+        if ui.add_enabled(any, egui::Button::new("Move   M")).clicked() {
+            s.begin_move();
+            ui.close();
+        }
     });
 
     draw(s, ui, rect, &p);
+    crate::sketch_move::paint(s, &p, rect);
+    crate::sketch_move::value_box(s, ui, rect);
     // tool hint
     let hint_s = if s.construction_mode {
         format!("{} · construction on (X)", s.tool.hint())
