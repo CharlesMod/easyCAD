@@ -349,7 +349,8 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
             app.open_sketch(Some(s));
         }
     }
-    if !opened && resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {
+    let region_owns = !gizmo_owns && !picking && crate::region_pick::interact(app, &resp, rect);
+    if !opened && !region_owns && resp.clicked_by(egui::PointerButton::Primary) && !gizmo_owns && !picking {
         let hit = if free { resp.interact_pointer_pos().and_then(|p| sketch_under(app, p)) } else { None };
         if let Some(s) = hit {
             app.hist_click(crate::hist_sel::HistItem::Sketch(s), mods.command || mods.shift);
@@ -362,6 +363,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         }
     }
 
+    crate::region_pick::paint(app, &painter, rect, hover);
     crate::plane_pick::paint_labels(app, &painter, rect);
     crate::datum_ui::paint(app, &painter, rect);
 

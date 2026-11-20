@@ -280,6 +280,11 @@ impl Sketch {
     pub fn profiles(&self) -> SketchProfiles {
         profiles_from_segments(&self.segments(), CHAIN_TOL)
     }
+
+    /// The bounded faces of the arrangement of all non-construction curves.
+    pub fn regions(&self) -> Vec<crate::regions::Region> {
+        crate::regions::regions_from_segments(&self.segments(), CHAIN_TOL)
+    }
 }
 
 pub const CHAIN_TOL: f64 = 1e-4;
@@ -834,7 +839,7 @@ impl System {
 // ---------------------------------------------------------------------------
 // Profile extraction
 
-fn seg_ends(s: &Segment2) -> Option<(DVec2, DVec2)> {
+pub(crate) fn seg_ends(s: &Segment2) -> Option<(DVec2, DVec2)> {
     match *s {
         Segment2::Line { a, b } => Some((a, b)),
         Segment2::Arc { start, end, .. } => Some((start, end)),

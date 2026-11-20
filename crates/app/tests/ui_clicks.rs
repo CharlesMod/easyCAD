@@ -2013,3 +2013,74 @@ fn click_line_then_empty_space_makes_a_length() {
     let (_, _, cs) = sk_state(&h);
     assert!(cs.iter().any(|c| matches!(c, Constraint::Length(..))), "{cs:?}");
 }
+
+// ------------------------------------------------------------ region picking
+
+mod regions {
+    use super::*;
+    use easycad_model::feature::ProfileSel;
+    use easycad_model::sketch::Sketch;
+    use glam::DVec2;
+
+    fn ring_doc() -> easycad_model::document::Document {
+        let mut doc = easycad_model::document::Document::new("ring");
+        let mut s = Sketch::new("Ring", easycad_model::geom::Plane::XY);
+        s.circle(DVec2::ZERO, 9.8);
+        s.circle(DVec2::ZERO, 11.4);
+        for a in [0.0f64, 120.0, 240.0] {
+            let d = DVec2::new(a.to_radians().cos(), a.to_radians().sin());
+            s.line(d * 9.0, d * 13.0);
+        }
+        doc.add_sketch(s);
+        doc
+    }
+
+    fn sel(h: &Harness<'static, EasyCadApp>) -> ProfileSel {
+        h.state().dialog.as_ref().and_then(|d| d.region_target()).map(|(_, s)| s.clone()).expect("extrude dialog open")
+    }
+
+    #[test]
+    fn click_regions_of_a_ring_toggles_them_in_the_extrude_dialog() {
+        let _g = serial();
+        let mut h = harness(ring_doc());
+        top_view(&mut h);
+        open_extrude(&mut h);
+        assert_eq!(sel(&h), ProfileSel::All, "default is All");
+        let sk = h.state().doc.data.sketches[0].sketch.clone();
+        let regions = sk.regions();
+        assert_eq!(regions.len(), 4, "disc + three ring sectors");
+        let sectors: Vec<_> = regions.iter().filter(|r| r.filled).collect();
+        assert_eq!(sectors.len(), 3);
+        fn at(h: &Harness<'static, EasyCadApp>, p: DVec2) -> egui::Pos2 {
+            screen_of(h, glam::Vec3::new(p.x as f32, p.y as f32, 0.0))
+        }
+        // click one sector: All -> the other two
+        let p0 = at(&h, sectors[0].sample);
+        hover_click(&mut h, p0);
+        match sel(&h) {
+            ProfileSel::Containing(v) => assert_eq!(v.len(), 2),
+            o => panic!("{o:?}"),
+        }
+        // click it again: back to three
+        hover_click(&mut h, p0);
+        match sel(&h) {
+            ProfileSel::Containing(v) => assert_eq!(v.len(), 3),
+            o => panic!("{o:?}"),
+        }
+        // the disc is not part of All but can be picked
+        let disc = regions.iter().find(|r| !r.filled).unwrap();
+        let pd = at(&h, disc.sample + DVec2::new(4.0, 3.0)); // not the centre: the drag arrow sits there
+        hover_click(&mut h, pd);
+        match sel(&h) {
+            ProfileSel::Containing(v) => assert_eq!(v.len(), 4),
+            o => panic!("{o:?}"),
+        }
+        // OK writes the explicit regions
+        click_ok(&mut h);
+        let f = h.state().doc.data.features.last().unwrap().clone();
+        match f.kind {
+            easycad_model::feature::FeatureKind::Extrude { profiles: ProfileSel::Containing(v), .. } => assert_eq!(v.len(), 4),
+            o => panic!("{o:?}"),
+        }
+    }
+}
