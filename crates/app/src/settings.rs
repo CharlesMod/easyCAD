@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default)]
     pub last_profile: Option<String>,
+    /// The left side pane (browser; sketch tools) closed to its rail.
+    #[serde(default)]
+    pub left_pane_collapsed: bool,
+    /// The right side pane (Parameters; sketch properties) closed to its rail.
+    #[serde(default)]
+    pub right_pane_collapsed: bool,
     /// Display lengths in inches.
     #[serde(default)]
     pub inch: bool,

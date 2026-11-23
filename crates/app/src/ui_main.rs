@@ -19,6 +19,7 @@ fn bar_frame(fill: Color32) -> Frame {
 
 pub fn show(app: &mut EasyCadApp, ui: &mut Ui) {
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::GROUND);
+    crate::panes::shortcuts(app, ui.ctx());
     title_bar(app, ui);
     match &app.mode {
         Mode::Model => model_screen(app, ui),
@@ -86,35 +87,54 @@ fn model_screen(app: &mut EasyCadApp, ui: &mut Ui) {
     if !in_dialog {
         history(app, ui);
     }
-    if in_dialog && !app.browser_open {
-        egui::Panel::left("browser_strip")
-            .exact_size(52.0)
-            .resizable(false)
-            .frame(Frame::new().fill(theme::PANEL))
-            .show(ui, |ui| {
-                ui.add_space(10.0);
-                ui.vertical_centered(|ui| {
-                    if widgets::icon_button(ui, Icon::Menu, 36.0, "Expand browser", true).clicked()
-                    {
-                        app.browser_open = true;
-                    }
-                });
-            });
-    } else {
-        egui::Panel::left("browser")
-            .default_size(250.0)
-            .min_size(220.0)
-            .max_size(300.0)
-            .frame(Frame::new().fill(theme::PANEL))
-            .show(ui, |ui| browser(app, ui));
-    }
-    egui::Panel::right("params")
-        .default_size(if in_dialog { 280.0 } else { 300.0 })
-        .min_size(260.0)
-        .max_size(340.0)
-        .frame(Frame::new().fill(theme::PANEL))
-        .show(ui, |ui| params_panel(app, ui));
-    egui::CentralPanel::no_frame().show(ui, |ui| crate::ui_viewport::viewport(app, ui));
+    // side panes fold to rails (crate::panes); the viewport takes what they free
+    use crate::panes::{self, Pane, Side};
+    let was = panes::left_open(app);
+    let mut open = was;
+    panes::show(
+        ui,
+        Pane {
+            id: "browser",
+            side: Side::Left,
+            name: "browser",
+            default: 250.0,
+            min: 220.0,
+            max: 300.0,
+            frame: Frame::new().fill(theme::PANEL),
+        },
+        &mut open,
+        |ui| browser(app, ui),
+    );
+    panes::sync(app, Side::Left, was, open);
+    let was = panes::right_open(app);
+    let mut open = was;
+    panes::show(
+        ui,
+        Pane {
+            id: "params",
+            side: Side::Right,
+            name: "parameters",
+            default: if in_dialog { 280.0 } else { 300.0 },
+            min: 260.0,
+            max: 340.0,
+            frame: Frame::new().fill(theme::PANEL),
+        },
+        &mut open,
+        |ui| params_panel(app, ui),
+    );
+    panes::sync(app, Side::Right, was, open);
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        crate::ui_viewport::viewport(app, ui);
+        let rect = app.viewport_rect;
+        for (side, name, open) in [
+            (Side::Left, "browser", panes::left_open(app)),
+            (Side::Right, "parameters", panes::right_open(app)),
+        ] {
+            if open && panes::edge_tab(ui, rect, side, name) {
+                panes::set(app, side, false);
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------- title bar
@@ -625,7 +645,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         if app.dialog.is_some() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("«").on_hover_text("Collapse").clicked() {
-                    app.browser_open = false;
+                    crate::panes::set(app, crate::panes::Side::Left, false);
                 }
             });
         }

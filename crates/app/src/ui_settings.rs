@@ -275,6 +275,8 @@ pub fn shortcuts(app: &EasyCadApp) -> Vec<(&'static str, Vec<(String, &'static s
                 s("Home", "home view"),
                 s("Alt+arrows, PgUp/Dn", "15° steps about X / Y / Z"),
                 s("1 / 2 / 3", "shaded / + edges / wireframe"),
+                s("Ctrl+[ / Ctrl+]", "hide / show the left / right pane"),
+                s("Ctrl+\\", "hide both panes (again: show them)"),
             ],
         ),
         (
