@@ -601,7 +601,18 @@ fn build_frame(
                 translucent: b.body.reference,
                 colors,
                 model: glam::Mat4::from_translation(offset) * to_mat4(app.tween_body(b.body.id)),
+                edges_only: false,
             });
+            if let Some(whole) = shown.cut_away.get(&b.body.id) {
+                bodies.push(DrawBody {
+                    mesh: whole.clone(),
+                    color,
+                    translucent: false,
+                    colors: None,
+                    model: glam::Mat4::from_translation(offset) * to_mat4(app.tween_body(b.body.id)),
+                    edges_only: true,
+                });
+            }
         }
     }
     // interference overlap solids (world -> view frame)
@@ -614,6 +625,7 @@ fn build_frame(
                 translucent: false,
                 colors: None,
                 model: to_mat4(to_view),
+                edges_only: false,
             });
         }
     }
@@ -625,6 +637,7 @@ fn build_frame(
             translucent: false,
             colors: None,
             model: to_mat4(*xf),
+            edges_only: false,
         });
     }
     // assemblies: the other occurrences (dimmed while a component is being edited)
@@ -651,12 +664,17 @@ fn build_frame(
             color[3] = if b.reference { 0.12 } else { 0.3 };
         }
         let tinted = color[3] < 1.0 && !b.reference && !dim;
+        let model = to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c));
+        if let Some(whole) = shown.cut_away.get(&c.key) {
+            bodies.push(DrawBody { mesh: whole.clone(), color, translucent: false, colors: None, model, edges_only: true });
+        }
         bodies.push(DrawBody {
             mesh: m.clone(),
             color,
             translucent: b.reference || dim || tinted,
             colors,
-            model: to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c)),
+            model,
+            edges_only: false,
         });
     }
     let mut highlights = Vec::new();
