@@ -478,9 +478,10 @@ impl Shape {
         }
     }
     /// Largest wall thickness below `thickness` that shells with `open_faces`
-    /// (bisection to about 1/64 of `thickness` with the fast half of the ladder, ~5 s
-    /// budget, rounded down to 0.01 mm and itself shelled), or `None` when none was
-    /// found. Only worth calling after a failure.
+    /// (bisection to about 1/64 of `thickness` with the fast, uncapped half of the
+    /// ladder, rounded down to 0.01 mm and itself shelled; no clock involved, so the
+    /// answer is the same on a busy machine), or `None` when none was found. Only
+    /// worth calling after a failure: up to ten shells.
     pub fn shell_max_thickness(&self, open_faces: &[u32], thickness: f64, outward: bool) -> Option<f64> {
         let off = if outward { thickness.abs() } else { -thickness.abs() };
         let t = raw::shell_max_thickness(self.r(), open_faces, off, 6).ok()?;

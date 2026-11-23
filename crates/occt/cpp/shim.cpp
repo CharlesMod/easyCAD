@@ -970,10 +970,12 @@ private:
 TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfShape &closing, double offset,
                               uint32_t &strategy, std::string &why, uint32_t max_steps = 99,
                               double budget_s = 12.0) {
-  // the default try runs unbounded (as before); every fallback shares `budget_s`,
-  // and none gets more than 6 s. The caps are generous on purpose: a result must not
-  // depend on how busy the machine is, so only pathological tries (a sharp-join
-  // offset grinding 10-20 s before failing) are ever cut.
+  // Tries 0-2 (default, complete intersection, loose tolerance) run unbounded, so a
+  // shell they build is the same however busy the machine is (a wall-clock cap made
+  // the cart test flaky under load). Only the slow tries, healed and sharp joins (a
+  // sharp-join offset can grind 10-20 s before failing), share `budget_s`, at most
+  // 6 s each. OCCT polls progress only between stages (~1000 polls for a 7 ms or a
+  // 4 s try alike), so a poll-count budget cannot replace the clock.
   GProp_GProps vp, ap, op;
   BRepGProp::VolumeProperties(input, vp);
   BRepGProp::SurfaceProperties(input, ap);
@@ -991,11 +993,12 @@ TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfSh
     const ThickTry &tr = kThickTries[k];
     auto t0 = std::chrono::steady_clock::now();
     const double left = budget_s - std::chrono::duration<double>(t0 - ladder_t0).count();
-    if (k > 0 && left <= 0.05) {
+    const bool capped = k >= 3;
+    if (capped && left <= 0.05) {
       out_of_time = true;
       break;
     }
-    Handle(DeadlineProgress) deadline = new DeadlineProgress(k == 0 ? 1e9 : std::min(left, 6.0));
+    Handle(DeadlineProgress) deadline = new DeadlineProgress(capped ? std::min(left, 6.0) : 1e9);
     std::string w;
     try {
       OCC_CATCH_SIGNALS
@@ -1281,40 +1284,46 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
 // tolerance), `iters` steps. 0 when even |offset| / 2^iters fails.
 double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t iters) {
   requireShape(s, "shell_max_thickness");
-  TopoDS_Shape copy = privateCopy(s.s);
-  auto m = mapOf(copy, TopAbs_FACE);
-  TopTools_ListOfShape closing;
-  for (uint32_t i : faces) {
-    if (i >= static_cast<uint32_t>(m.Extent())) fail("shell: face index out of range");
-    closing.Append(m.FindKey(static_cast<int>(i) + 1));
+  std::vector<int> idx;
+  {
+    auto m = mapOf(s.s, TopAbs_FACE);
+    for (uint32_t i : faces) {
+      if (i >= static_cast<uint32_t>(m.Extent())) fail("shell: face index out of range");
+      idx.push_back(static_cast<int>(i) + 1);
+    }
   }
-  if (closing.IsEmpty()) return 0.0;
-  TopoDS_Shape input = simplify(copy);
+  if (idx.empty()) return 0.0;
   double lo = 0.0, hi = std::abs(offset);
   const double sign = offset < 0 ? -1.0 : 1.0;
-  // an error path: about 5 s in all (each failed try at a big wall is slow)
-  auto t0 = std::chrono::steady_clock::now();
-  auto left = [&] { return 5.0 - std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
-  // `budget` < 0: the ladder's own (load-independent) caps, for the confirmation
-  auto works = [&](double t, double budget) {
+  // OCCT's offset is not deterministic just below its limit: on the cart, the same
+  // call at 9.7-10.3 mm succeeds about one time in four, depending on where the
+  // copy's shapes land in memory (single-threaded too). So a thickness counts as
+  // workable only when three fresh copies all shell, which keeps the answer in the
+  // stable range. Tries 0-2 only: they run uncapped, so machine load plays no part.
+  auto once = [&](double t) {
+    TopoDS_Shape copy = privateCopy(s.s);
+    auto m = mapOf(copy, TopAbs_FACE);
+    TopTools_ListOfShape closing;
+    for (int i : idx) closing.Append(m.FindKey(i));
     uint32_t st = 0;
     std::string why;
     try {
-      return !thickSolidLadder(input, closing, sign * t, st, why, 3, budget < 0 ? 12.0 : std::max(0.1, budget)).IsNull();
+      return !thickSolidLadder(simplify(copy), closing, sign * t, st, why, 3).IsNull();
     } catch (const Standard_Failure &) {
     } catch (const std::exception &) {
     }
     return false;
   };
-  for (uint32_t k = 0; k < iters && left() > 0; ++k) {
+  auto works = [&](double t) { return once(t) && once(t) && once(t); };
+  for (uint32_t k = 0; k < iters && hi - lo > 0.01; ++k) {
     double mid = 0.5 * (lo + hi);
-    (works(mid, left()) ? lo : hi) = mid;
+    (works(mid) ? lo : hi) = mid;
   }
-  // failure is not monotone near the limit: report a value that was itself shelled
-  // with the ladder's normal caps (rounded down to 0.01 mm; backing off 5 % at a time)
+  // failure is not monotone near the limit either: report a value that was itself
+  // shelled (rounded down to 0.01 mm; backing off 5 % at a time)
   double t = std::floor(lo * 100.0) / 100.0;
   for (int k = 0; k < 4 && t > 0; ++k) {
-    if (works(t, -1.0)) return t;
+    if (works(t)) return t;
     t = std::floor(t * 95.0) / 100.0;
   }
   return 0.0;
