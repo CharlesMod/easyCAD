@@ -179,3 +179,50 @@ fn side_open_under_tangent_fillet_is_really_hollow() {
     let v = s.volume().unwrap();
     assert!(v > 2800.0 && v < 3600.0, "{v}");
 }
+
+#[test]
+#[ignore]
+/// How often the same shell fails at each thickness (TS=9.5,10 N=4 T=6). Showed
+/// OCCT's offset succeeding about one time in four at 9.7–10.3 mm on the cart,
+/// single-threaded too.
+fn probe_determinism() {
+    let (lower, _, _) = lower_body();
+    let collar = drafted(37.82, 10.87, 46.57, 4.23, -20.1);
+    let j = std::sync::Arc::new(lower.fuse(&collar).unwrap().unify().unwrap());
+    let top = top_face(&j);
+    let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let threads: usize = std::env::var("T").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let ts: Vec<f64> = std::env::var("TS").map(|v| v.split(",").map(|x| x.parse().unwrap()).collect()).unwrap_or(vec![9.37, 9.0]);
+    for t in ts {
+        let fails = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..threads {
+                sc.spawn(|| {
+                    for _ in 0..n {
+                        if j.shell_report(&[top], t, false).is_err() {
+                            fails.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        eprintln!("t {t}: {} of {} failed", fails.into_inner(), n * threads);
+    }
+}
+
+/// The largest workable thickness must work every time, not one time in four: OCCT's
+/// offset is nondeterministic just below its limit (see `probe_determinism`).
+#[test]
+fn largest_workable_thickness_is_stable() {
+    let (lower, _, _) = lower_body();
+    let collar = drafted(37.82, 10.87, 46.57, 4.23, -20.1);
+    let j = lower.fuse(&collar).unwrap().unify().unwrap();
+    let top = top_face(&j);
+    assert!(j.shell_report(&[top], 20.0, false).is_err());
+    let max = j.shell_max_thickness(&[top], 20.0, false).expect("some thickness works");
+    eprintln!("largest workable: {max} mm");
+    assert!(max > 5.0 && max < 20.0, "{max}");
+    for k in 0..8 {
+        assert!(j.shell_report(&[top], max, false).is_ok(), "attempt {k} at {max} mm failed");
+    }
+}

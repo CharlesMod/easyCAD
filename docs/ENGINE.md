@@ -651,18 +651,31 @@ The idle app uses no CPU (0.0 s over 20 s with the sample open).
   thickness should be a parameter (`wall`, `lid_wall`; any `Expr` works), so
   changing it (for example from the printer's wall calculator) re-shells everything
   in one edit. To keep that hands-off:
-  - Every fallback runs under a deadline (OCCT's progress `UserBreak`): the default
-    try is unbounded as before, and the fallbacks share 12 s with at most 6 s each. The
-    sharp-join tries used to grind 8–16 s each before failing on a wall too thick for
-    the body; a failing 20 mm wall in the cart went from 80 s to about 15 s. The caps
-    are generous on purpose: with 4 s caps a busy machine (parallel builds) once cut a
-    try that normally takes 0.1 s, so the same document regenerated differently.
-    Working fallbacks take 0.1–1 s, far from the caps.
-  - On failure `Shape::shell_max_thickness` bisects (6 steps, the fast half of the
-    ladder, 5 s budget) for the largest thickness that works, rounds it down to
-    0.01 mm and shells at that value, with the normal caps, to confirm it (failure
-    is not monotone near the limit: the bisection's 10.31 mm failed, the reported
-    9.37 mm works). The error says
+  - The slow fallbacks run under a deadline (OCCT's progress `UserBreak`): the
+    healed and sharp-join tries share 12 s, at most 6 s each. Sharp joins used to
+    grind 8–16 s each before failing on a wall too thick for the body; a failing
+    20 mm wall in the cart went from 80 s to about 15 s. The default, complete
+    intersection and loose-tolerance tries run uncapped, so any shell they build
+    (the cart, the lid, every case in the tests) regenerates the same way however busy
+    the machine is. Wall-clock caps on them made the cart test flaky under load
+    (`cargo test --workspace` beside a regenerating easyCAD window). A poll-count
+    budget would be deterministic, but OCCT polls only between stages (~1000 polls for
+    a 7 ms try and a 4 s try alike). A shell that only the healed or sharp-join tries
+    can build may still differ under heavy load.
+  - On failure `Shape::shell_max_thickness` bisects (6 steps, the uncapped fast half
+    of the ladder, no clock) for the largest thickness that works, rounds it down to
+    0.01 mm and shells at that value to confirm it. **OCCT's offset is not
+    deterministic just below its limit**: on the cart (20 mm requested), the very same
+    call at 9.7–10.3 mm succeeds about one time in four, single-threaded too (it
+    depends on where the private copy's shapes land in memory), while 9.5 mm and
+    below never failed in 24 tries. A single lucky success used to become the
+    reported value, and the re-shell at it then failed: the flaky
+    `impossible_shell_reports_largest_thickness_and_parameter` on a busy machine. Now
+    a thickness counts as workable only when three fresh copies all shell, so the
+    answer lands in the stable range (9.37 mm on every run under full CPU load, and
+    `largest_workable_thickness_is_stable` re-shells at it eight times). The same
+    nondeterminism means a document whose wall sits right at OCCT's limit can
+    regenerate differently from run to run (see Known limitations). The error says
     "largest workable thickness: 9.37 mm", and the model adds "(set `wall` to at most
     9.37 mm, or remove the blockers below)" when the thickness is a plain parameter,
     the same way a fillet reports its largest workable size. The test follows the
@@ -981,7 +994,11 @@ verified on load.
   (a 1 mm collar under a 2 mm wall). Steps and creases that used to fail are handled
   by the shell ladder (Robustness), and a shell that still fails names its likely
   blockers. Draft on faces adjacent to fillets can fail. All return
-  `FeatureStatus::Error`; nothing panics. The offset-and-cut fallback needs flat
+  `FeatureStatus::Error`; nothing panics. OCCT's offset is nondeterministic just
+  below its limit (a band of a few tenths of a mm where the same shell succeeds only
+  sometimes), so a wall right at the limit can flip between built and failed across
+  regenerations; the reported largest workable thickness is chosen outside that band.
+  The offset-and-cut fallback needs flat
   open faces and an inner 3D offset that works (it fails on the same narrow steps
   as the thick solid, so it only helps where MakeThickSolid misbehaves).
 - Ribs use `extent: RibExtent::{Height, ToBody}`. `ToBody` grows the rib along its
