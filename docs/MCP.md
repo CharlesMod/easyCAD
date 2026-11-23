@@ -82,6 +82,7 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
 | `set_param` | create / change / delete parameters, several in one undo step; reports what the change broke |
 | `add_sketch` | `rect`, `rounded_rect`, `circle`, `line`, `arc`, `point` elements + constraints and dimensions as expressions; solves first, refuses non-converging or conflicting sketches; returns DOF, regions, element names. `replace` edits a sketch in place |
 | `add_feature` | any `FeatureKind` as the document's own JSON (numbers accepted for dimensions); checks sketch / body references; optional `position` |
+| `import_mesh` | STL / OBJ / GLB / glTF from an absolute path as a mesh body (`ImportMesh`: up axis, scale, rotation, translation); repairs or refuses meshes that are not closed. Combine with `MeshBoolean`, move/copy with `TransformBody`, flat bottom with `Split` `keep: Above` |
 | `edit_feature` | patch (`{"Fillet":{"radius":"3"}}` changes only the radius), rename, suppress |
 | `delete_feature` | lists what broke downstream |
 | `regenerate` | all feature reports: status, fillet/chamfer summary and per-edge problems with the largest workable size, sketch solves, joint reports, timing |

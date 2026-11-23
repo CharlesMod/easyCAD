@@ -28,7 +28,7 @@ fn split_plane_follows_a_parameter() {
     let mut doc = Document::new("Split");
     doc.set_param("cut", "10").unwrap();
     let b = block(&mut doc, 40.0, 30.0, 20.0);
-    let f = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY, new_name: "Top".into(), offset: "cut".into() });
+    let f = doc.add_feature("Split", FeatureKind::Split { keep: Default::default(), body: Some(b), plane: Plane::XY, new_name: "Top".into(), offset: "cut".into() });
     let z = |doc: &mut Document| doc.regenerate().body_by_id(BodyId::of(f)).unwrap().shape().bbox().unwrap().min.z;
     assert!((z(&mut doc) - 10.0).abs() < 1e-6);
     doc.set_param("cut", "15").unwrap();
@@ -51,7 +51,7 @@ fn rollback_marker_is_saved_undoable_and_inserts_there() {
     let rep = out.report(ch).unwrap();
     assert!(rep.rolled_back && rep.status == FeatureStatus::Suppressed);
     // a new feature goes in at the marker, which moves past it
-    let f = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY.offset(5.0), new_name: "Top".into(), offset: 0.0.into() });
+    let f = doc.add_feature("Split", FeatureKind::Split { keep: Default::default(), body: Some(b), plane: Plane::XY.offset(5.0), new_name: "Top".into(), offset: 0.0.into() });
     assert_eq!(doc.data.features.iter().map(|x| x.id).collect::<Vec<_>>()[1], f);
     assert_eq!(doc.data.rollback, Some(2));
     // saved

@@ -282,6 +282,7 @@ pub fn sensor_node() -> Document {
             plane: Plane::XY,
             new_name: "Lid".into(),
             offset: "lid_split".into(),
+            keep: SplitKeep::Both,
         },
     );
 

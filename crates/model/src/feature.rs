@@ -292,6 +292,11 @@ pub enum FeatureKind {
         /// Moves `plane` along its normal (param expression, e.g. `"lid_split"`).
         #[serde(default = "zero")]
         offset: Expr,
+        /// Which side(s) to keep. `Below` / `Above` discard the other side (e.g. a
+        /// flat bottom: split at the base plane, keep `Above`); `new_name` is then
+        /// unused. Works on mesh bodies too.
+        #[serde(default)]
+        keep: SplitKeep,
     },
     /// Split a (shelled) body at a plane into two halves with a mating joint.
     /// The body keeps the lower half; the upper half becomes `BodyId::of(feature)`.
@@ -321,6 +326,73 @@ pub enum FeatureKind {
         reference: bool,
         #[serde(default)]
         translate: DVec3,
+    },
+    /// Bring an imported triangle mesh (STL / OBJ / GLB / glTF) in as a mesh body:
+    /// a closed triangle mesh that can be moved, split and combined with solid
+    /// bodies (see `MeshBoolean`), but not filleted, shelled or drafted. Applied in
+    /// order: up-axis conversion, `scale` about the file origin, `rotate_deg` (XYZ
+    /// Euler), `translate`. With everything at its default the mesh lands exactly
+    /// as stored in the file (file units taken as mm).
+    ImportMesh {
+        import: ImportId,
+        #[serde(default = "one")]
+        scale: Expr,
+        /// The file's up axis. `Y` (glTF / most game and AI-generated meshes) is
+        /// turned so it points along +Z.
+        #[serde(default)]
+        up: MeshUp,
+        #[serde(default)]
+        rotate_deg: DVec3,
+        #[serde(default = "zero3")]
+        translate: [Expr; 3],
+        /// Shown and exported but never booleaned or printed.
+        #[serde(default)]
+        reference: bool,
+    },
+    /// Move, rotate, scale or copy a body (solid or mesh). Applied in order: `scale`
+    /// about `pivot` (mesh bodies only), `rotate_deg` (XYZ Euler) about `pivot`,
+    /// `translate`. With `copy` the original stays and the moved copy is a new
+    /// body `new_name`.
+    TransformBody {
+        body: BodyId,
+        #[serde(default = "zero3")]
+        translate: [Expr; 3],
+        #[serde(default)]
+        rotate_deg: DVec3,
+        #[serde(default)]
+        pivot: DVec3,
+        #[serde(default = "one")]
+        scale: Expr,
+        #[serde(default)]
+        copy: bool,
+        #[serde(default)]
+        new_name: String,
+    },
+    /// Boolean between bodies where either side may be a mesh body (Manifold
+    /// kernel; solid operands are tessellated at print quality). The target
+    /// becomes a mesh body unless every operand is a solid.
+    ///
+    /// `clearance` grows the tools for `Cut` (the target ends up at least that far
+    /// from them) and shrinks them for `Intersect` (the target is trimmed to stay
+    /// that far inside them, e.g. a sliding fit in a cavity).
+    ///
+    /// `positions`: the target's positions to clear, as offsets from where it is
+    /// (e.g. `[[0,0,0],[0,0,14]]` for a part that travels 14 mm up). The tools
+    /// are applied at each position (moved by the negated offset): `Cut` removes
+    /// everything that would hit a tool at any position, `Intersect` keeps only
+    /// what is inside the tools at every position. Empty = `[[0,0,0]]`.
+    MeshBoolean {
+        #[serde(default)]
+        target: Option<BodyId>,
+        tools: Vec<BodyId>,
+        op: BoolOp,
+        #[serde(default = "zero")]
+        clearance: Expr,
+        #[serde(default)]
+        positions: Vec<[Expr; 3]>,
+        /// Keep the tool bodies (default). `false` removes them from the model.
+        #[serde(default = "yes")]
+        keep_tools: bool,
     },
     /// Place a library part as a linked reference body at one or more placements,
     /// optionally cutting the matching hole into a target body.
@@ -370,6 +442,32 @@ pub enum FeatureKind {
 
 fn zero() -> Expr {
     Expr::new("0")
+}
+fn one() -> Expr {
+    Expr::new("1")
+}
+fn zero3() -> [Expr; 3] {
+    [zero(), zero(), zero()]
+}
+
+/// Up axis of an imported mesh file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshUp {
+    /// Use the file's coordinates as they are.
+    #[default]
+    Z,
+    /// The file is Y-up (glTF convention): rotate +90° about X so +Y becomes +Z.
+    Y,
+}
+
+/// Which side(s) of a `Split` to keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitKeep {
+    /// Below stays in the body, above becomes `new_name`.
+    #[default]
+    Both,
+    Below,
+    Above,
 }
 
 /// One set of edges with its own size (fillet radius / chamfer distance).
@@ -490,6 +588,10 @@ impl FeatureKind {
             FeatureKind::Split { .. } => "Split body",
             FeatureKind::PartingJoint { .. } => "Parting joint",
             FeatureKind::ImportStep { .. } => "Import STEP",
+            FeatureKind::ImportMesh { .. } => "Import mesh",
+            FeatureKind::TransformBody { copy: true, .. } => "Copy body",
+            FeatureKind::TransformBody { .. } => "Move body",
+            FeatureKind::MeshBoolean { .. } => "Combine",
             FeatureKind::InsertPart { .. } => "Insert part",
             FeatureKind::ContextRef { .. } => "In-context reference",
         }

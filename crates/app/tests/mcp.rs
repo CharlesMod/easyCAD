@@ -334,6 +334,90 @@ fn over_http_with_a_token() {
     assert!(easycad_mcp::read_endpoint().is_none(), "the endpoint file is removed when the bridge stops");
 }
 
+/// A mesh body end to end: import an STL, snip it against a solid post at two
+/// carriage positions with clearance, flat bottom, check it with measure and
+/// interference, export a watertight STL. Solid-only features refuse it.
+#[test]
+fn claude_imports_a_mesh_and_snips_it_at_two_positions() {
+    use easycad_model::meshbody;
+    let _g = serial();
+    let dir = tmp("mesh");
+    let pile = meshbody::sample_blob(glam::DVec3::new(0.0, 0.0, 10.0), 10.0, 4);
+    let stl = dir.join("pile.stl");
+    std::fs::write(&stl, meshbody::write_stl_bytes(&pile)).unwrap();
+    let mut h = harness(easycad_model::document::Document::new("Pile"));
+    h.state_mut().mcp = Some(Bridge::new());
+
+    // a static post through the pile's side
+    let sk = call(
+        &mut h,
+        "add_sketch",
+        json!({"name": "Post", "plane": "XY", "elements": [{"type": "rect", "id": "p", "center": [14.5, 0], "width": 11, "height": 40}]}),
+    );
+    let sid = sk["sketch_id"].as_u64().unwrap();
+    let post = call(&mut h, "add_feature", json!({"name": "Post", "kind": {"Extrude": {"sketch": sid, "profiles": "All", "distance": 30, "op": "NewBody"}}}));
+    let post_id = post["feature"]["id"].as_u64().unwrap();
+
+    let err = call_err(&mut h, "import_mesh", json!({"path": "pile.stl"}));
+    assert!(err.contains("absolute"), "{err}");
+    let imp = call(&mut h, "import_mesh", json!({"path": stl.display().to_string(), "name": "Trash pile"}));
+    let fid = imp["feature"]["id"].as_u64().unwrap();
+    assert_eq!(h.state().doc.undo_label(), Some("Claude: import mesh 'pile.stl'"));
+    let pb = imp["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Trash pile").expect("pile body").clone();
+    assert_eq!(pb["mesh_body"], true, "{pb}");
+    let pile_body = json!({"feature": fid, "index": 0});
+
+    // snip at rest and 14 mm up, 0.5 mm clearance
+    let snip = call(
+        &mut h,
+        "add_feature",
+        json!({"name": "Snip", "kind": {"MeshBoolean": {"target": pile_body, "tools": [{"feature": post_id, "index": 0}], "op": "Cut", "clearance": "0.5", "positions": [[0, 0, 0], [0, 0, 14]]}}}),
+    );
+    assert_eq!(snip["feature"]["status"], "ok", "{snip}");
+    let flat = call(
+        &mut h,
+        "add_feature",
+        json!({"name": "Flat bottom", "kind": {"Split": {"body": pile_body, "plane": {"origin": [0, 0, 0], "x_dir": [1, 0, 0], "normal": [0, 0, 1]}, "offset": "1.5", "new_name": "", "keep": "Above"}}}),
+    );
+    assert_eq!(flat["feature"]["status"], "ok", "{flat}");
+
+    let m = call(&mut h, "measure", json!({"body": pile_body}));
+    let b = &m["bodies"][0];
+    assert_eq!(b["mesh"]["watertight"], true, "{b}");
+    assert!((b["bbox"]["min"][2].as_f64().unwrap() - 1.5).abs() < 1e-6, "{b}");
+    assert!(b["bbox"]["max"][0].as_f64().unwrap() <= 9.0 - 0.5 + 1e-6, "{b}");
+    assert!(b["volume_mm3"].as_f64().unwrap() < pile.volume());
+
+    // the pile and the post do not touch (and the copy 14 mm up would not either)
+    let i = call(&mut h, "interference", json!({}));
+    assert!(i["pairs"].as_array().map_or(true, |p| p.is_empty()), "{i}");
+
+    // solid-only features refuse a mesh body, and are taken back
+    let err = call_err(&mut h, "add_feature", json!({"name": "Round", "kind": {"Shell": {"body": pile_body, "open_faces": [], "thickness": "1"}}}));
+    assert!(err.contains("mesh body"), "{err}");
+
+    // watertight STL out
+    let out = dir.join("pile_fit.stl");
+    call(&mut h, "export", json!({"path": out.display().to_string()}));
+    let raw = meshbody::read_mesh(&std::fs::read(&out).unwrap(), "stl").unwrap();
+    let w = easycad_model::export::weld(&easycad_model::occt::Mesh {
+        positions: raw.positions.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect(),
+        indices: raw.tris.clone(),
+        ..Default::default()
+    });
+    assert_eq!(easycad_model::export::open_edges(&w), 0);
+
+    // Move the pile up 14 mm with a copy: still a mesh body
+    let mv = call(
+        &mut h,
+        "add_feature",
+        json!({"name": "Pile at B", "kind": {"TransformBody": {"body": pile_body, "translate": [0, 0, 14], "copy": true, "new_name": "Pile B"}}}),
+    );
+    let bb = mv["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Pile B").expect("copy").clone();
+    assert_eq!(bb["mesh_body"], true);
+    assert!((bb["bbox"]["min"][2].as_f64().unwrap() - 15.5).abs() < 1e-6, "{bb}");
+}
+
 fn base64_decode(s: &str) -> Vec<u8> {
     let val = |c: u8| match c {
         b'A'..=b'Z' => c - b'A',

@@ -475,7 +475,7 @@ fn pcb_step_is_a_locked_reference_component_with_sub_parts() {
     assert!((bb.min - DVec3::new(30.0, 10.0, 1.6)).length() < 1e-6, "{bb:?}");
     assert!(u2.body.appearance().unwrap().parts[0].color.is_some());
     // locked: no features; BOM: one purchased line, not expanded
-    let e = doc.add_feature_in(pcb, "x", FeatureKind::Split { body: None, plane: Plane::XY, new_name: "x".into(), offset: 0.0.into() }).unwrap_err();
+    let e = doc.add_feature_in(pcb, "x", FeatureKind::Split { keep: Default::default(), body: None, plane: Plane::XY, new_name: "x".into(), offset: 0.0.into() }).unwrap_err();
     assert!(e.to_string().contains("locked"), "{e}");
     let bom = doc.bom_tree();
     assert_eq!(bom.indented.len(), 1);

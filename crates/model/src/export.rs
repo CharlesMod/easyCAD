@@ -62,7 +62,14 @@ fn print_mesh(bodies: &[&Body]) -> Result<Vec<IndexedMesh>, ExportError> {
     if bodies.is_empty() {
         return Err(ExportError::Empty);
     }
-    bodies.iter().map(|b| Ok(weld(&b.shape().tessellate(PRINT_LIN_DEFL, PRINT_ANG_DEFL_DEG)?))).collect()
+    bodies
+        .iter()
+        .map(|b| match b.mesh_solid() {
+            // a mesh body's triangles are already the closed solid
+            Some(m) => Ok(weld(&m.to_occt_mesh())),
+            None => Ok(weld(&b.shape().tessellate(PRINT_LIN_DEFL, PRINT_ANG_DEFL_DEG)?)),
+        })
+        .collect()
 }
 
 fn normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
@@ -200,10 +207,16 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// STEP (AP214) of the given bodies, solids and reference bodies alike.
+/// Mesh bodies have no exact geometry and are left out (STL / 3MF carry them).
 pub fn write_step(bodies: &[&Body], path: &Path) -> Result<(), ExportError> {
     if bodies.is_empty() {
         return Err(ExportError::Empty);
     }
+    let solid: Vec<&Body> = bodies.iter().copied().filter(|b| !b.is_mesh()).collect();
+    if solid.is_empty() {
+        return Err(ExportError::Mesh("mesh bodies export as STL or 3MF only (STEP needs exact geometry)".into()));
+    }
+    let bodies = &solid[..];
     // one STEP part per body (per sub-part for assemblies), keeping names/colours
     let mut shapes: Vec<Shape> = Vec::new();
     let mut parts: Vec<occt::StepPart> = Vec::new();

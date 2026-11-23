@@ -860,3 +860,58 @@ fn drawing_of_an_assembly_with_bom_section_and_gdt() {
     }
     save(&mut h, "drawing_assembly");
 }
+
+/// Import an STL through the app's import path, combine it with a solid post in the
+/// Combine dialog (cut with clearance at two positions), OK, and export the
+/// watertight result.
+#[test]
+fn mesh_import_and_combine_dialog() {
+    use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::meshbody;
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("easycad-ui-mesh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stl = dir.join("pile.stl");
+    std::fs::write(&stl, meshbody::write_stl_bytes(&meshbody::sample_blob(glam::DVec3::new(0.0, 0.0, 10.0), 10.0, 4))).unwrap();
+    let mut doc = easycad_model::document::Document::new("Pile");
+    let mut s = easycad_model::sketch::Sketch::new("Post", easycad_model::geom::Plane::XY);
+    s.rect(glam::DVec2::new(9.0, -20.0), glam::DVec2::new(20.0, 20.0));
+    let s = doc.add_sketch(s);
+    let post = BodyId::of(doc.add_feature(
+        "Post",
+        FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: 30.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    ));
+    let mut h = harness(doc);
+    let msg = h.state_mut().import_path(&stl).unwrap();
+    assert!(msg.contains("mesh body"), "{msg}");
+    settle(&mut h);
+    let pile = {
+        let app = h.state_mut();
+        let m = app.model.clone().unwrap();
+        let pile = m.bodies.iter().find(|b| b.body.is_mesh()).expect("mesh body").body.id;
+        app.selection = vec![PickKey { body: pile, kind: PickKind::Face(0) }, PickKey { body: post, kind: PickKind::Face(0) }];
+        app.open_dialog(DialogKind::Combine);
+        let d = app.dialog.as_mut().expect("Combine dialog");
+        let Body::Combine(c) = &mut d.body else { panic!("not the Combine dialog") };
+        assert_eq!(c.target, Some(pile), "the picked mesh body is the target");
+        assert_eq!(c.tools, vec![post]);
+        c.clearance.text = "0.5".into();
+        c.positions = "0, 0, 0; 0, 0, 14".into();
+        app.request_preview();
+        pile
+    };
+    settle(&mut h);
+    save(&mut h, "mesh_combine_dialog");
+    {
+        let app = h.state_mut();
+        app.close_dialog(true);
+    }
+    settle(&mut h);
+    let app = h.state_mut();
+    let f = app.doc.data.features.last().unwrap();
+    assert!(matches!(f.kind, FeatureKind::MeshBoolean { op: BoolOp::Cut, .. }), "{:?}", f.kind);
+    let m = app.model.clone().unwrap();
+    let b = m.body(pile).unwrap();
+    assert!(b.is_mesh() && b.bbox().unwrap().max.x <= 8.5 + 1e-6);
+    assert!(m.result.errors().is_empty(), "{:?}", m.result.errors());
+}
