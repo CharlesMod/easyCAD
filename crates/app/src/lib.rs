@@ -79,7 +79,7 @@ pub fn native_options() -> eframe::NativeOptions {
                     .unwrap_or_default(),
             ))
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([480.0, 400.0]),
         depth_buffer: 0,
         multisampling: 1,
         wgpu_options: wgpu_options(),
