@@ -326,8 +326,14 @@ fn file_menu(app: &mut EasyCadApp, ui: &mut Ui) {
             app.save(true);
         }
         ui.separator();
-        if item(ui, "Import STEP / DXF…", "Ctrl+I").clicked() {
+        if item(ui, "Import STEP / DXF / mesh…", "Ctrl+I").clicked() {
             app.import_file();
+        }
+        if item(ui, "Combine bodies…", "").clicked() {
+            app.open_dialog(DialogKind::Combine);
+        }
+        if item(ui, "Move / copy body…", "").clicked() {
+            app.open_dialog(DialogKind::MoveBody);
         }
         if item(ui, "Export…", "").clicked() {
             app.export = Some(crate::dialogs::export::ExportDialog::new(&app.doc.data));
@@ -420,6 +426,8 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                                 "Split a body at a plane",
                                 Cmd::Dialog(DialogKind::Split),
                             ),
+
+
                         ],
                     ),
                     (
@@ -521,7 +529,7 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                             (
                                 Icon::Import,
                                 "Import",
-                                "Import STEP or DXF (Ctrl+I)",
+                                "Import STEP, DXF or a mesh (STL / OBJ / GLB) (Ctrl+I)",
                                 Cmd::Import,
                             ),
                             (
@@ -1135,6 +1143,9 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::ImportStep { .. } => ("IM", theme::GREEN),
         FeatureKind::InsertPart { .. } => ("PR", theme::GREEN),
         FeatureKind::ContextRef { .. } => ("CX", theme::GREEN),
+        FeatureKind::ImportMesh { .. } => ("MS", theme::GREEN),
+        FeatureKind::TransformBody { .. } => ("MV", theme::TEXT_DIM),
+        FeatureKind::MeshBoolean { .. } => ("CB", theme::ORANGE_SOFT),
     }
 }
 

@@ -1046,7 +1046,11 @@ impl EasyCadApp {
     }
 
     pub fn import_file(&mut self) {
-        let req = crate::files::Request::open("Import STEP or DXF", "STEP / DXF", &["step", "stp", "dxf"]);
+        let req = crate::files::Request::open(
+            "Import STEP, DXF or mesh",
+            "STEP / DXF / STL / OBJ / GLB",
+            &["step", "stp", "dxf", "stl", "obj", "glb", "gltf"],
+        );
         self.ask_path(req, |app, p| match app.import_path(&p) {
             Ok(msg) => app.toast(msg),
             Err(e) => app.warn(e),
@@ -1065,6 +1069,20 @@ impl EasyCadApp {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let bytes = std::fs::read(p).map_err(|e| format!("Import failed: {e}"))?;
+        if easycad_model::meshbody::MESH_EXTENSIONS.contains(&ext.as_str()) {
+            // glTF is Y-up by convention: stand it up the way its source app shows it
+            let up = if ext == "glb" || ext == "gltf" {
+                easycad_model::feature::MeshUp::Y
+            } else {
+                easycad_model::feature::MeshUp::Z
+            };
+            self.doc
+                .import_mesh(&name, bytes, up)
+                .map_err(|e| format!("Import failed: {e}"))?;
+            self.fit_pending = true;
+            self.request_model();
+            return Ok(format!("Imported {name} as a mesh body (edit it in the timeline to scale or place it)"));
+        }
         if ext == "dxf" {
             let imp = self.doc.import_dxf(&name, bytes);
             let d = self.doc.dxf(imp).map_err(|e| format!("DXF: {e}"))?;

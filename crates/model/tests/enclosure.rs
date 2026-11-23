@@ -89,7 +89,7 @@ fn enclosure_end_to_end() {
     // Split into base + lid at z = 25
     let split = doc.add_feature(
         "Split",
-        FeatureKind::Split { body: Some(base_id), plane: Plane::XY.offset(25.0), new_name: "Lid".into(), offset: 0.0.into() },
+        FeatureKind::Split { keep: Default::default(), body: Some(base_id), plane: Plane::XY.offset(25.0), new_name: "Lid".into(), offset: 0.0.into() },
     );
     let lid_id = BodyId::of(split);
     {

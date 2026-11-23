@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use easycad_mcp::{self as proto, json_text, ToolResult};
 use easycad_model::document::{DocData, DocError, Document, ExportFormat, ExportOptions};
-use easycad_model::feature::{BodyId, Feature, FeatureId, FeatureKind, SketchId};
+use easycad_model::feature::{BodyId, Feature, FeatureId, FeatureKind, MeshUp, SketchId};
 use easycad_model::geom::Plane;
 use easycad_model::occt::{EdgeInfo, FaceInfo, Shape, SurfaceKind};
 use easycad_model::params::{Expr, Values};
@@ -280,6 +280,7 @@ fn start(app: &mut EasyCadApp, ctx: &egui::Context, name: &str, args: Value) -> 
         "set_param" => set_param(app, args),
         "add_sketch" => add_sketch(app, args),
         "add_feature" => add_feature(app, args),
+        "import_mesh" => import_mesh(app, args),
         "edit_feature" => edit_feature(app, args),
         "delete_feature" => delete_feature(app, args),
         "regenerate" => Ok(after_model(|app, _| done(regen_json(app)))),
@@ -533,7 +534,10 @@ fn bodies_json(app: &EasyCadApp) -> Value {
         .iter()
         .map(|b| {
             let mut o = json!({"id": b.body.id, "name": b.body.name, "reference": b.body.reference});
-            if let Ok(bb) = b.body.shape().bbox() {
+            if b.body.is_mesh() {
+                o["mesh_body"] = json!(true);
+            }
+            if let Ok(bb) = b.body.bbox() {
                 o["bbox"] = json!({"min": v3(bb.min), "max": v3(bb.max), "size": v3(bb.size())});
             }
             if let Some(e) = &b.error {
@@ -1151,6 +1155,9 @@ fn find_body_refs(v: &Value, f: &mut dyn FnMut(&Value)) {
                 if matches!(k.as_str(), "body" | "target") && x.is_object() {
                     f(x);
                 }
+                if k == "tools" {
+                    x.as_array().into_iter().flatten().filter(|t| t.is_object()).for_each(&mut *f);
+                }
                 find_body_refs(x, f);
             }
         }
@@ -1214,6 +1221,62 @@ fn add_feature(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
         })
     })?;
     Ok(settle_feature(id, app.doc.data.revision, keep, true, before, "new feature"))
+}
+
+fn expr3_arg(args: &Value, k: &str) -> Result<[Expr; 3], String> {
+    match args.get(k) {
+        None | Some(Value::Null) => Ok([Expr::new("0"), Expr::new("0"), Expr::new("0")]),
+        Some(Value::Array(a)) if a.len() == 3 => {
+            let e: Vec<Expr> = a.iter().filter_map(expr_arg).collect();
+            <[Expr; 3]>::try_from(e).map_err(|_| format!("`{k}` must be [x, y, z] of numbers or expressions"))
+        }
+        _ => Err(format!("`{k}` must be [x, y, z]")),
+    }
+}
+
+/// Read a mesh file from disk into the document as a mesh body (`ImportMesh`).
+fn import_mesh(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
+    can_edit(app)?;
+    check_revision(app, &args)?;
+    let path = std::path::PathBuf::from(str_arg(&args, "path").ok_or("`path` is required")?);
+    if !path.is_absolute() {
+        return Err("`path` must be absolute".into());
+    }
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !easycad_model::meshbody::MESH_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!("`{}` is not a mesh file (stl, obj, glb, gltf)", path.display()));
+    }
+    let data = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let up = match str_arg(&args, "up").map(str::to_ascii_uppercase).as_deref() {
+        Some("Y") => MeshUp::Y,
+        Some("Z") => MeshUp::Z,
+        None if ext == "glb" || ext == "gltf" => MeshUp::Y,
+        None => MeshUp::Z,
+        Some(o) => return Err(format!("`up` is Z or Y, not {o}")),
+    };
+    let scale = args.get("scale").and_then(expr_arg).unwrap_or_else(|| Expr::new("1"));
+    let rotate_deg = match args.get("rotate_deg") {
+        None | Some(Value::Null) => DVec3::ZERO,
+        Some(v) => vec3_val(v).ok_or("`rotate_deg` must be [x, y, z] in degrees")?,
+    };
+    let translate = expr3_arg(&args, "translate")?;
+    let reference = bool_arg(&args, "reference").unwrap_or(false);
+    let file = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| format!("mesh.{ext}"));
+    // the feature takes the import's file name; a `name` renames it
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Mesh".into());
+    let name = str_arg(&args, "name").map(str::to_string).unwrap_or(stem);
+    let before = user_changes(app);
+    let label = format!("{LABEL}import mesh '{file}'");
+    let (_, id) = app
+        .doc
+        .import_mesh_as(&label, &file, &name, data, |import| FeatureKind::ImportMesh { import, scale, up, rotate_deg, translate, reference })
+        .map_err(|e| e.to_string())?;
+    app.params.buffers.clear();
+    app.after_edit();
+    app.fit_pending = true;
+    claude_toast(app, label);
+    mark_seen(app);
+    Ok(settle_feature(id, app.doc.data.revision, false, true, before, "mesh import"))
 }
 
 /// `{"Fillet": {"radius": "2"}}` on a fillet changes only `radius`.
@@ -1390,7 +1453,7 @@ fn edge_json(e: &EdgeInfo, sel: &EdgeSelector) -> Value {
 }
 
 fn scale_of(mb: &MeshedBody) -> f64 {
-    mb.body.shape().bbox().map(|b| b.size().length()).unwrap_or(1.0).max(1.0)
+    mb.body.bbox().map(|b| b.size().length()).unwrap_or(1.0).max(1.0)
 }
 
 fn body_matches(mb: &MeshedBody, want: &Value) -> bool {
@@ -1412,11 +1475,15 @@ fn measure(args: Value) -> Step {
         for mb in m.bodies.iter().filter(|b| body_matches(b, &want)) {
             let shape = mb.body.shape();
             let mut o = json!({"id": mb.body.id, "name": mb.body.name, "reference": mb.body.reference});
-            if let Ok(bb) = shape.bbox() {
+            if let Ok(bb) = mb.body.bbox() {
                 o["bbox"] = json!({"min": v3(bb.min), "max": v3(bb.max), "size": v3(bb.size()), "center": v3(bb.center())});
             }
-            if let Ok(v) = shape.volume() {
+            if let Ok(v) = mb.body.volume() {
                 o["volume_mm3"] = json!(r(v));
+            }
+            if let Some(ms) = mb.body.mesh_solid() {
+                let (open, nonmanifold) = ms.edge_defects();
+                o["mesh"] = json!({"triangles": ms.tris.len(), "watertight": open == 0 && nonmanifold == 0});
             }
             if let Ok(a) = shape.area() {
                 o["area_mm2"] = json!(r(a));

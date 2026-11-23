@@ -160,7 +160,7 @@
   },
   {
     "name": "add_feature",
-    "description": "Add a feature at the end of the history (or at the rollback marker) and regenerate. `kind` is easyCAD's feature JSON, one key naming the type. Examples:\n{\"Extrude\":{\"sketch\":1,\"profiles\":\"All\",\"distance\":\"height\",\"op\":\"NewBody\"}}  (op: NewBody|Join|Cut|Intersect; optional symmetric, reverse, draft_deg, target {feature,index})\n{\"Revolve\":{\"sketch\":2,\"profiles\":\"All\",\"axis\":{\"origin\":[0,0,0],\"dir\":[0,0,1]},\"angle_deg\":\"360\",\"op\":\"Join\"}}\n{\"Shell\":{\"open_faces\":[{\"Extreme\":{\"normal\":[0,0,1],\"which\":\"Max\"}}],\"thickness\":\"wall\"}}\n{\"Fillet\":{\"edges\":[{\"Parallel\":{\"dir\":[0,0,1]}}],\"radius\":\"corner_r\",\"auto_reduce\":false}}\n{\"Chamfer\":{\"edges\":[{\"OfFace\":{\"Extreme\":{\"normal\":[0,0,-1],\"which\":\"Max\"}}}],\"distance\":\"0.5\"}}\n{\"Draft\":{\"faces\":[...],\"neutral\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"pull\":[0,0,1],\"angle_deg\":\"1\"}}\n{\"ScrewBoss\":{\"plane\":{...},\"points\":[[10,10],[-10,10]],\"od\":\"6\",\"hole_dia\":\"2.5\",\"height\":\"8\"}}\nAlso Rib, Pattern, Mirror, Split, PartingJoint, InsertPart (see the easycad skill). Dimensions are expressions (strings) or numbers. Address faces and edges with selectors, never indices: faces {\"Extreme\":{normal,which:Max|Min}} (the outermost planar face facing `normal`), {\"AllWithNormal\":{normal}}, {\"Cylinders\":{radius,axis}}, {\"Hint\":{centroid,normal,kind}}; edges {\"OfFace\":<face>}, {\"Between\":[<face>,<face>]}, {\"Parallel\":{dir}}, {\"Circles\":{radius,near}}, {\"Hint\":{midpoint,tangent,kind}}. measure and get_selection return ready-made selectors. Omitted `body`/`target` means the last solid body. The reply has this feature's regen status (fillets: the summary with each failed edge's largest workable size) and the status of every feature after it. A feature that ends in error is taken back out (no undo step left behind) unless keep_on_error is true.",
+    "description": "Add a feature at the end of the history (or at the rollback marker) and regenerate. `kind` is easyCAD's feature JSON, one key naming the type. Examples:\n{\"Extrude\":{\"sketch\":1,\"profiles\":\"All\",\"distance\":\"height\",\"op\":\"NewBody\"}}  (op: NewBody|Join|Cut|Intersect; optional symmetric, reverse, draft_deg, target {feature,index})\n{\"Revolve\":{\"sketch\":2,\"profiles\":\"All\",\"axis\":{\"origin\":[0,0,0],\"dir\":[0,0,1]},\"angle_deg\":\"360\",\"op\":\"Join\"}}\n{\"Shell\":{\"open_faces\":[{\"Extreme\":{\"normal\":[0,0,1],\"which\":\"Max\"}}],\"thickness\":\"wall\"}}\n{\"Fillet\":{\"edges\":[{\"Parallel\":{\"dir\":[0,0,1]}}],\"radius\":\"corner_r\",\"auto_reduce\":false}}\n{\"Chamfer\":{\"edges\":[{\"OfFace\":{\"Extreme\":{\"normal\":[0,0,-1],\"which\":\"Max\"}}}],\"distance\":\"0.5\"}}\n{\"Draft\":{\"faces\":[...],\"neutral\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"pull\":[0,0,1],\"angle_deg\":\"1\"}}\n{\"ScrewBoss\":{\"plane\":{...},\"points\":[[10,10],[-10,10]],\"od\":\"6\",\"hole_dia\":\"2.5\",\"height\":\"8\"}}\nAlso Rib, Pattern, Mirror, Split, PartingJoint, InsertPart (see the easycad skill). Mesh bodies (from import_mesh) combine with solids:\n{\"MeshBoolean\":{\"target\":{\"feature\":9,\"index\":0},\"tools\":[{\"feature\":2,\"index\":0}],\"op\":\"Cut\",\"clearance\":\"0.4\",\"positions\":[[0,0,0],[0,0,\"stroke\"]]}}  (op Join|Cut|Intersect; clearance grows tools for Cut, shrinks them for Intersect; positions = where the target travels, the tools are cleared at each; keep_tools default true)\n{\"TransformBody\":{\"body\":{\"feature\":9,\"index\":0},\"translate\":[0,0,14],\"rotate_deg\":[0,0,90],\"scale\":\"1\",\"copy\":true,\"new_name\":\"Pile at B\"}}  (move/rotate/copy any body; scale on mesh bodies only)\n{\"Split\":{\"body\":{\"feature\":9,\"index\":0},\"plane\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"offset\":\"2\",\"new_name\":\"\",\"keep\":\"Above\"}}  (flat bottom; keep Both|Below|Above, works on mesh bodies)\nFillet, Chamfer, Shell, Draft, Rib, bosses and joints refuse mesh bodies; an Extrude Join/Cut with a mesh body as `target` works. Dimensions are expressions (strings) or numbers. Address faces and edges with selectors, never indices: faces {\"Extreme\":{normal,which:Max|Min}} (the outermost planar face facing `normal`), {\"AllWithNormal\":{normal}}, {\"Cylinders\":{radius,axis}}, {\"Hint\":{centroid,normal,kind}}; edges {\"OfFace\":<face>}, {\"Between\":[<face>,<face>]}, {\"Parallel\":{dir}}, {\"Circles\":{radius,near}}, {\"Hint\":{midpoint,tangent,kind}}. measure and get_selection return ready-made selectors. Omitted `body`/`target` means the last solid body (mesh bodies are used only when named). The reply has this feature's regen status (fillets: the summary with each failed edge's largest workable size) and the status of every feature after it. A feature that ends in error is taken back out (no undo step left behind) unless keep_on_error is true.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -187,6 +187,55 @@
       "required": [
         "name",
         "kind"
+      ]
+    }
+  },
+  {
+    "name": "import_mesh",
+    "description": "Import a triangle mesh (STL, OBJ, GLB or glTF) from disk as a mesh body: a closed solid made of triangles that can be moved (TransformBody), split (Split, e.g. a flat bottom with keep: Above) and combined with solid bodies (MeshBoolean: Join / Cut / Intersect with clearance, at several positions). It is placed as stored in the file unless you give scale / rotate_deg / translate (applied in that order after the up-axis turn; all editable later with edit_feature on the ImportMesh feature, expressions allowed). The file is read and checked first: open or non-manifold meshes are repaired (welded, reoriented, holes filled) or refused with the count of bad edges. Returns the feature report and bodies; the body id is {\"feature\": <feature id>, \"index\": 0}.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute path to a .stl, .obj, .glb or .gltf file."
+        },
+        "name": {
+          "type": "string",
+          "description": "Feature / body name (default: the file name)."
+        },
+        "up": {
+          "type": "string",
+          "enum": [
+            "Z",
+            "Y"
+          ],
+          "description": "The file's up axis. Default Y for .glb/.gltf (turned so it stands up along +Z), Z otherwise (coordinates used as they are)."
+        },
+        "scale": {
+          "description": "Uniform scale about the file origin (number or expression, default 1)."
+        },
+        "rotate_deg": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "XYZ Euler rotation in degrees about the origin (default [0,0,0])."
+        },
+        "translate": {
+          "type": "array",
+          "description": "[x, y, z] in mm, numbers or expressions (default [0,0,0])."
+        },
+        "reference": {
+          "type": "boolean",
+          "description": "Reference body: shown, never booleaned or printed (default false)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
       ]
     }
   },
@@ -248,7 +297,7 @@
   },
   {
     "name": "measure",
-    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it.",
+    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -443,7 +492,7 @@
   },
   {
     "name": "export",
-    "description": "Export the solid bodies to a file: STL or 3MF (printing; the active process profile's compensations apply) or STEP. The format follows the extension unless given. The path must be absolute and its folder must exist.",
+    "description": "Export the solid bodies to a file: STL or 3MF (printing; the active process profile's compensations apply) or STEP. The format follows the extension unless given. The path must be absolute and its folder must exist. Mesh bodies go to STL/3MF as their (watertight) triangles; STEP leaves them out.",
     "inputSchema": {
       "type": "object",
       "properties": {

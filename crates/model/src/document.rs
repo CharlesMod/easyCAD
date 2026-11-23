@@ -49,6 +49,8 @@ pub enum DocError {
 pub enum ImportKind {
     Step,
     Dxf,
+    /// STL / OBJ / GLB / glTF (the name keeps the extension).
+    Mesh,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -519,6 +521,51 @@ impl Document {
         Ok(self.import_step(&name, data, reference))
     }
 
+    /// Import a triangle mesh (STL / OBJ / GLB / glTF; `name` must keep the file
+    /// extension, which picks the reader) and add an `ImportMesh` feature. The
+    /// mesh is read and checked first, so a file that is not a closed solid is
+    /// refused here with nothing added.
+    pub fn import_mesh(&mut self, name: &str, data: Vec<u8>, up: crate::feature::MeshUp) -> Result<(ImportId, FeatureId), DocError> {
+        let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Mesh".into());
+        self.import_mesh_as(&format!("Import {stem}"), name, &stem, data, |import| FeatureKind::ImportMesh {
+            import,
+            scale: Expr::new("1"),
+            up,
+            rotate_deg: glam::DVec3::ZERO,
+            translate: [Expr::new("0"), Expr::new("0"), Expr::new("0")],
+            reference: false,
+        })
+    }
+
+    /// [`Document::import_mesh`] with an undo label, a feature name and the feature
+    /// built by `kind` from the new import id (it should be an `ImportMesh`).
+    pub fn import_mesh_as(
+        &mut self,
+        label: &str,
+        name: &str,
+        feature_name: &str,
+        data: Vec<u8>,
+        kind: impl FnOnce(ImportId) -> FeatureKind,
+    ) -> Result<(ImportId, FeatureId), DocError> {
+        let ext = Path::new(name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let raw = crate::meshbody::read_mesh(&data, &ext).map_err(|e| DocError::Other(e.to_string()))?;
+        crate::meshbody::MeshSolid::repair(&raw).map_err(|e| DocError::Other(e.to_string()))?;
+        let size = data.len() as u64;
+        let blob = self.blobs.put(data);
+        self.edit(label, |d| {
+            let id = ImportId(d.alloc());
+            d.imports.push(ImportEntry { id, import: Import { name: name.into(), kind: ImportKind::Mesh, blob, size } });
+            let f = d.add_feature(feature_name, kind(id));
+            Ok::<_, DocError>((id, f))
+        })
+    }
+
+    pub fn import_mesh_file(&mut self, path: &Path, up: crate::feature::MeshUp) -> Result<(ImportId, FeatureId), DocError> {
+        let data = std::fs::read(path)?;
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh.stl".into());
+        self.import_mesh(&name, data, up)
+    }
+
     /// Store a DXF as an import (no feature; use it from sketches or standoffs).
     pub fn import_dxf(&mut self, name: &str, data: Vec<u8>) -> ImportId {
         let size = data.len() as u64;
@@ -669,13 +716,11 @@ impl Document {
             if opts.orient_to_plate {
                 let o = if it.component == crate::assembly::ComponentId::ROOT { self.data.orientation_of(b.id) } else { self.data.build_orientation };
                 let (axis, angle) = o.quat().to_axis_angle();
-                let mut s = if angle.abs() > 1e-12 { b.shape().rotated(glam::DVec3::ZERO, axis, angle.to_degrees()) } else { Ok(b.shape().clone()) }
-                    .map_err(|e| DocError::Other(e.to_string()))?;
-                let bb = s.bbox().map_err(|e| DocError::Other(e.to_string()))?;
-                s = s.translated(glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(|e| DocError::Other(e.to_string()))?;
-                b.geom = crate::regen::BodyGeom::new(s);
+                let r = b.moved(axis, angle.to_degrees(), glam::DVec3::ZERO).map_err(DocError::Other)?;
+                let bb = r.bbox().map_err(DocError::Other)?;
+                b = r.moved(glam::DVec3::Z, 0.0, glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(DocError::Other)?;
             } else if !it.transform.is_identity() {
-                b.geom = crate::regen::BodyGeom::new(it.placed_shape().map_err(|e| DocError::Other(e.to_string()))?);
+                b = it.transform.apply_body(&b).map_err(DocError::Other)?;
             }
             bodies.push(b);
         }

@@ -112,6 +112,32 @@ fits), `StandoffsFromPcb`, `InsertPart` (library screws, inserts, magnets) and
 missing field or unknown variant; or look at one the user made via
 `get_document`.
 
+## Mesh bodies (STL / OBJ / GLB)
+
+`import_mesh` brings a triangle mesh in as a *mesh body* (as stored in the file;
+GLB/glTF stood up from Y-up). Edit its `ImportMesh` feature to scale or place
+it (`scale`, `rotate_deg`, `translate`, expressions allowed). Mesh bodies work
+with:
+
+```json
+{"MeshBoolean": {"target": {"feature": 9, "index": 0}, "tools": [{"feature": 2, "index": 0}], "op": "Cut", "clearance": "0.4", "positions": [[0,0,0],[0,0,"stroke"]]}}
+{"MeshBoolean": {"target": {"feature": 9, "index": 0}, "tools": [{"feature": 12, "index": 0}], "op": "Intersect", "clearance": "0.4"}}
+{"TransformBody": {"body": {"feature": 9, "index": 0}, "translate": [0,0,14], "copy": true, "new_name": "Pile at B"}}
+{"Split": {"body": {"feature": 9, "index": 0}, "plane": {"origin": [0,0,0], "x_dir": [1,0,0], "normal": [0,0,1]}, "offset": "2", "new_name": "", "keep": "Above"}}
+```
+
+- `MeshBoolean` takes solid or mesh bodies on either side; the target becomes a
+  mesh body (unless all are solids). `clearance` grows the tools for `Cut` and
+  shrinks them for `Intersect` (trim to a cavity with a sliding gap).
+  `positions` lists where the target travels (offsets from where it is): the
+  tools are cleared at every one, e.g. a part on a carriage at rest and at the
+  top of its stroke. Tool bodies stay unless `keep_tools: false`.
+- An `Extrude` with `op: Join`/`Cut` and a mesh body as `target` (a peg, a
+  socket) works too. Fillet, chamfer, shell, draft, ribs, bosses and joints
+  refuse mesh bodies.
+- `measure` reports `mesh: {triangles, watertight}`; `interference` and STL/3MF
+  `export` handle mesh bodies; STEP export leaves them out.
+
 `edit_feature` takes a patch: `{"id": 4, "kind": {"Fillet": {"radius": "3"}}}`
 changes only the radius. `suppressed: true` switches a feature off.
 

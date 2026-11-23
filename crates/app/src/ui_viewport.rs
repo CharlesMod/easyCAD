@@ -1360,6 +1360,14 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
         crate::ui_process::teardrop_menu(app, ui);
     }
     let body = sel[0].body;
+    if ui.button("Move / copy body…").clicked() {
+        app.open_dialog(crate::dialogs::DialogKind::MoveBody);
+        ui.close();
+    }
+    if ui.button("Combine with…").clicked() {
+        app.open_dialog(crate::dialogs::DialogKind::Combine);
+        ui.close();
+    }
     if ui.button("Hide body").clicked() {
         app.hidden.insert(body);
         app.selection.clear();
