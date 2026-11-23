@@ -15,6 +15,16 @@ use egui_kittest::Harness;
 
 const H: f32 = 900.0;
 
+/// The tests in this file run one at a time: each points the app at its own
+/// settings folder through XDG_CONFIG_HOME / XDG_DATA_HOME, which the whole
+/// process shares, and the panes remember the side opened last process-wide.
+/// Run in parallel, one test's app loaded another's settings (both panes closed).
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn config(tag: &str) -> PathBuf {
     let c = std::env::temp_dir().join(format!("easycad-section-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&c);
@@ -135,16 +145,19 @@ fn run(w: f32, panes: bool) {
 
 #[test]
 fn section_checkbox_at_480() {
+    let _serial = serial();
     run(480.0, true);
     run(480.0, false);
 }
 
 #[test]
 fn section_checkbox_at_800() {
+    let _serial = serial();
     run(800.0, true);
 }
 
 #[test]
 fn section_checkbox_at_1440() {
+    let _serial = serial();
     run(1440.0, true);
 }
