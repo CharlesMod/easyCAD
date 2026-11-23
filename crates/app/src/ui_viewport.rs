@@ -161,7 +161,7 @@ impl BodyFacts for Facts<'_> {
     }
 }
 
-fn body_color(reference: bool, part: bool) -> [f32; 4] {
+pub(crate) fn body_color(reference: bool, part: bool) -> [f32; 4] {
     if part {
         [0.55, 0.60, 0.68, 0.75]
     } else if reference {
@@ -325,11 +325,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 
     // edge highlights (thick lines over the image)
-    if let (Some(m), Some(s)) = (&model, &app.shot) {
-        for &(b, e) in &s.edges {
-            draw_edge(&painter, app, m, rect, b, e, crate::mcp::SHOT_EDGE, 3.5, false);
-        }
-    } else if let Some(m) = &model {
+    if let Some(m) = &model {
         let mut sel: Vec<PickKey> = app.selection.clone();
         if let Some(d) = &app.dialog {
             sel.extend(d.picked());
@@ -354,19 +350,8 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 
     // ------------------------------------------------ overlays
-    if let Some(s) = &app.shot {
-        // a Claude screenshot: only the view cube and a caption over the model
-        if !s.label.is_empty() {
-            let font = theme::prop(15.0);
-            let g = painter.layout_no_wrap(s.label.clone(), font, theme::TEXT);
-            let r = Rect::from_min_size(rect.min + vec2(12.0, 12.0), g.size() + vec2(16.0, 10.0));
-            painter.rect_filled(r, 6.0, theme::CARD.gamma_multiply(0.92));
-            painter.galley(r.min + vec2(8.0, 5.0), g, theme::TEXT);
-        }
-    } else {
-        filter_bar(app, ui, rect);
-        display_bar(app, ui, rect);
-    }
+    filter_bar(app, ui, rect);
+    display_bar(app, ui, rect);
     let dialog_w = if app.dialog.is_some() {
         app.dialog_card_w.max(300.0) + 12.0
     } else {
@@ -391,7 +376,7 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         );
         // no timer: the worker wakes the UI when the model arrives
     }
-    if let Some(m) = model.as_ref().filter(|_| app.shot.is_none()) {
+    if let Some(m) = &model {
         if let Some(i) = pick_popover(app, ui, rect, m) {
             popover_click = Some(i);
         }
@@ -594,17 +579,10 @@ fn build_frame(
                 Some((id, off)) if id == b.body.id => off,
                 _ => Vec3::ZERO,
             };
-            let mut translucent = b.body.reference;
-            if let Some(s) = &app.shot {
-                if let Some(a) = s.alpha(b.body.id) {
-                    color[3] = color[3].min(a);
-                    translucent = true;
-                }
-            }
             bodies.push(DrawBody {
                 mesh: m.clone(),
                 color,
-                translucent,
+                translucent: b.body.reference,
                 colors,
                 model: glam::Mat4::from_translation(offset),
             });
@@ -666,18 +644,7 @@ fn build_frame(
         });
     }
     let mut highlights = Vec::new();
-    if let (Some(m), Some(s)) = (model, &app.shot) {
-        for &(b, f) in &s.faces {
-            if let Some(mesh) = mesh_of(m, b) {
-                highlights.push(FaceHighlight { mesh: mesh.clone(), face: f, color: crate::mcp::SHOT_FACE, xray: s.through, model: body_model(app, m, b) });
-            }
-        }
-        for &b in &s.bodies {
-            if let Some(mesh) = mesh_of(m, b) {
-                highlights.push(FaceHighlight { mesh: mesh.clone(), face: u32::MAX, color: crate::mcp::SHOT_BODY, xray: s.through, model: body_model(app, m, b) });
-            }
-        }
-    } else if let Some(m) = model {
+    if let Some(m) = model {
         let mut sel = app.selection.clone();
         if let Some(d) = &app.dialog {
             sel.extend(d.picked());

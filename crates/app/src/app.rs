@@ -151,9 +151,8 @@ pub struct EasyCadApp {
     pub show_perf: bool,
     /// The Claude bridge (MCP server), when on.
     pub mcp: Option<crate::mcp::Bridge>,
-    /// A Claude screenshot in progress: highlights and display overrides for the
-    /// frames it captures (UI overlays are hidden meanwhile).
-    pub shot: Option<crate::mcp::ShotStyle>,
+    /// The GPU device (Claude's screenshots render offscreen on it).
+    pub wgpu: Option<eframe::egui_wgpu::RenderState>,
     pub bench_start: Option<f64>,
 }
 
@@ -186,6 +185,7 @@ impl EasyCadApp {
         let worker = Worker::spawn(move || ctx.request_repaint());
         let doc = doc.unwrap_or_else(|| Document::new("Untitled"));
         let mut app = Self::with_parts(doc, worker, gpu);
+        app.wgpu = cc.wgpu_render_state.clone();
         app.recovery_offer = crate::recovery::orphans();
         app
     }
@@ -254,7 +254,7 @@ impl EasyCadApp {
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             mcp: None,
-            shot: None,
+            wgpu: None,
             bench_start: None,
         }
     }
@@ -565,6 +565,11 @@ impl EasyCadApp {
                     if out.drawing.is_some() {
                         d.result = out.drawing.clone();
                     }
+                }
+            }
+            Purpose::Agent => {
+                if let Some(b) = self.mcp.as_mut() {
+                    b.model = Some(Arc::new(out));
                 }
             }
             Purpose::Preview => {
