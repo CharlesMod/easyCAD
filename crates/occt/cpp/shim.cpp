@@ -28,6 +28,8 @@
 #include <BRepAdaptor_Curve2d.hxx>
 #include <BRepAdaptor_CompCurve.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
@@ -99,6 +101,10 @@
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Wire.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <ShapeBuild_ReShape.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
+#include <BRepTools_History.hxx>
 #include <StlAPI_Writer.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -842,8 +848,283 @@ namespace {
 TopoDS_Shape doOffsetSolid(const TopoDS_Shape &in, double d);
 } // namespace
 
-std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset) {
+// ---- shell strategy ladder ---------------------------------------------------
+//
+// BRepOffsetAPI_MakeThickSolid with its defaults (Arc joins, intersections between
+// adjacent faces only, 1e-3 tolerance) fails on two common shapes:
+//  * a step narrower than the wall: a ledge or inset ring left where a joined
+//    feature's outline is a hair larger or smaller than the body under it (a
+//    drafted body's top rounded to two decimals). Offsetting the walls by t makes the
+//    offsets of the two side faces *around* the ledge cross each other, but the
+//    default mode only intersects faces that share an edge, so the ledge's own
+//    offset is left dangling and the result never closes. Complete intersection
+//    (Intersection = true) intersects every pair of offset faces and handles it.
+//  * a near-tangent crease (a 2° drafted wall meeting a straight one): the pipe the
+//    Arc join puts on the crease is a sliver the 1e-3 tolerance cannot trim. A looser
+//    tolerance closes most; sharp (Intersection) joins, which need no pipe, at the
+//    looser tolerance close the rest (a 2.9° crease that throws in every Arc mode).
+// So: the fast default first, then each remedy, every result checked.
+namespace {
+struct ThickTry {
+  bool complete;
+  GeomAbs_JoinType join;
+  double tol;
+  bool heal;
+};
+const ThickTry kThickTries[] = {
+    {false, GeomAbs_Arc, 1e-3, false},         // 0 default
+    {true, GeomAbs_Arc, 1e-3, false},          // 1 complete intersection
+    {true, GeomAbs_Arc, 1e-2, false},          // 2 + loose tolerance
+    {true, GeomAbs_Arc, 1e-2, true},           // 3 healed + unified input
+    {true, GeomAbs_Intersection, 1e-2, false}, // 4 sharp inner joins, loose tolerance
+    {true, GeomAbs_Intersection, 1e-2, true},  // 5 the same on the healed input
+};
+
+// Rough check of a thick solid: the wall volume of a shell is about the offset
+// faces' area times t (exact for flat walls; curvature and corners move it).
+// A point on face `f` (UV centre, else the first grid point inside the face) and the
+// face's outward normal there.
+bool pointOnFace(const TopoDS_Face &f, gp_Pnt &p, gp_Vec &n) {
+  double u0, u1, v0, v1;
+  BRepTools::UVBounds(f, u0, u1, v0, v1);
+  BRepTopAdaptor_FClass2d cls(f, 1e-7);
+  BRepAdaptor_Surface as(f, Standard_True);
+  for (int k = 0; k <= 64; ++k) {
+    // the centre first, then a 8×8 grid
+    double fu = k == 0 ? 0.5 : ((k - 1) % 8 + 0.5) / 8.0, fv = k == 0 ? 0.5 : ((k - 1) / 8 + 0.5) / 8.0;
+    gp_Pnt2d uv(u0 + fu * (u1 - u0), v0 + fv * (v1 - v0));
+    if (cls.Perform(uv) != TopAbs_IN) continue;
+    gp_Vec du, dv;
+    as.D1(uv.X(), uv.Y(), p, du, dv);
+    n = du.Crossed(dv);
+    if (n.Magnitude() < 1e-12) continue;
+    n.Normalize();
+    if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+    return true;
+  }
+  return false;
+}
+
+bool plausibleThick(const TopoDS_Shape &r, int solids_in, double V, double A_walls, double offset, std::string &why,
+                    const TopTools_ListOfShape &closing) {
+  if (r.IsNull()) {
+    why = "no shape";
+    return false;
+  }
+  BRepCheck_Analyzer ana(r);
+  if (!ana.IsValid()) {
+    why = "an invalid solid";
+    return false;
+  }
+  int solids = 0;
+  for (TopExp_Explorer ex(r, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
+  if (solids != solids_in) {
+    why = solids == 0 ? "no solid" : "the wrong number of solids";
+    return false;
+  }
+  GProp_GProps g;
+  BRepGProp::VolumeProperties(r, g);
+  const double vr = g.Mass();
+  // the thick solid is the walls alone, inward or outward
+  const double wall = vr;
+  const double est = A_walls * std::abs(offset);
+  if (!(vr > 0) || (offset < 0 && vr >= V) || (est > 0 && (wall < 0.5 * est || wall > 1.6 * est))) {
+    std::ostringstream ss;
+    ss.precision(3);
+    ss << "walls of " << wall << " mm³ where about " << est << " mm³ was expected";
+    why = ss.str();
+    return false;
+  }
+  // really open: just under each open face (half a wall in) is outside the result.
+  // (a healed retry once came back with the volume about right but a whole lump
+  // left solid under the opening)
+  for (TopTools_ListIteratorOfListOfShape it(closing); it.More(); it.Next()) {
+    gp_Pnt p;
+    gp_Vec n;
+    if (!pointOnFace(TopoDS::Face(it.Value()), p, n)) continue;
+    BRepClass3d_SolidClassifier sc(r, p.Translated(n * (-0.5 * std::abs(offset))), 1e-6);
+    if (sc.State() != TopAbs_OUT) {
+      why = "material left under an open face";
+      return false;
+    }
+  }
+  return true;
+}
+
+// Progress indicator that asks the algorithm to stop after a deadline (OCCT's offset
+// polls UserBreak between stages): bounds a fallback that would grind for 10-20 s.
+class DeadlineProgress : public Message_ProgressIndicator {
+public:
+  explicit DeadlineProgress(double seconds)
+      : until_(std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                      std::chrono::duration<double>(seconds))) {}
+  Standard_Boolean UserBreak() override { return std::chrono::steady_clock::now() > until_; }
+  void Show(const Message_ProgressScope &, const Standard_Boolean) override {}
+
+private:
+  std::chrono::steady_clock::time_point until_;
+};
+
+// Thick solid of `input` with `closing` faces open: the first strategy whose result
+// passes `plausibleThick`. `strategy` gets its index; null + `why` when none does.
+TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfShape &closing, double offset,
+                              uint32_t &strategy, std::string &why, uint32_t max_steps = 99,
+                              double budget_s = 12.0) {
+  // the default try runs unbounded (as before); every fallback shares `budget_s`,
+  // and none gets more than 6 s. The caps are generous on purpose: a result must not
+  // depend on how busy the machine is, so only pathological tries (a sharp-join
+  // offset grinding 10-20 s before failing) are ever cut.
+  GProp_GProps vp, ap, op;
+  BRepGProp::VolumeProperties(input, vp);
+  BRepGProp::SurfaceProperties(input, ap);
+  for (TopTools_ListIteratorOfListOfShape it(closing); it.More(); it.Next()) BRepGProp::SurfaceProperties(it.Value(), op);
+  const double V = vp.Mass(), A_walls = ap.Mass() - op.Mass();
+  int solids_in = 0;
+  for (TopExp_Explorer ex(input, TopAbs_SOLID); ex.More(); ex.Next()) ++solids_in;
+  const bool prof = std::getenv("CW_PROF") != nullptr;
+  TopoDS_Shape healed;
+  TopTools_ListOfShape healed_closing;
+  std::string first;
+  const auto ladder_t0 = std::chrono::steady_clock::now();
+  bool out_of_time = false;
+  for (uint32_t k = 0; k < sizeof(kThickTries) / sizeof(kThickTries[0]) && k < max_steps; ++k) {
+    const ThickTry &tr = kThickTries[k];
+    auto t0 = std::chrono::steady_clock::now();
+    const double left = budget_s - std::chrono::duration<double>(t0 - ladder_t0).count();
+    if (k > 0 && left <= 0.05) {
+      out_of_time = true;
+      break;
+    }
+    Handle(DeadlineProgress) deadline = new DeadlineProgress(k == 0 ? 1e9 : std::min(left, 6.0));
+    std::string w;
+    try {
+      OCC_CATCH_SIGNALS
+      TopoDS_Shape in = input;
+      const TopTools_ListOfShape *cl = &closing;
+      if (tr.heal) {
+        if (healed.IsNull()) {
+          // ShapeFix + unify, then find the open faces again (unify replaces them)
+          Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(privateCopy(input));
+          fix->Perform();
+          ShapeUpgrade_UnifySameDomain u(fix->Shape(), Standard_True, Standard_True, Standard_False);
+          u.Build();
+          healed = simplify(u.Shape());
+          for (TopTools_ListIteratorOfListOfShape it(closing); it.More(); it.Next()) {
+            TopoDS_Shape f = fix->Context()->Apply(it.Value());
+            const TopTools_ListOfShape &mod = u.History()->Modified(f);
+            if (u.History()->IsRemoved(f)) continue;
+            if (mod.IsEmpty()) healed_closing.Append(f);
+            else
+              for (TopTools_ListIteratorOfListOfShape m(mod); m.More(); m.Next())
+                if (!healed_closing.Contains(m.Value())) healed_closing.Append(m.Value());
+          }
+        }
+        if (healed_closing.Extent() != closing.Extent()) {
+          w = "healing changed the open faces";
+          throw Standard_Failure("skip");
+        }
+        in = healed;
+        cl = &healed_closing;
+      }
+      BRepOffsetAPI_MakeThickSolid mk;
+      mk.MakeThickSolidByJoin(in, *cl, offset, tr.tol, BRepOffset_Skin, tr.complete ? Standard_True : Standard_False,
+                              Standard_False, tr.join, Standard_False, deadline->Start());
+      if (!mk.IsDone() && deadline->UserBreak()) {
+        w = "stopped after its time budget";
+      } else if (!mk.IsDone()) {
+        w = "the offset did not close";
+      } else {
+        TopoDS_Shape r = mk.Shape();
+        BRepCheck_Analyzer ana(r);
+        if (!ana.IsValid()) {
+          Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(r);
+          fix->Perform();
+          r = fix->Shape();
+        }
+        r = simplify(r);
+        if (plausibleThick(r, solids_in, V, A_walls, offset, w, *cl)) {
+          if (prof)
+            std::fprintf(stderr, "  thick solid try %u: ok, %.1f ms\n", k,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+          strategy = k;
+          return r;
+        }
+      }
+    } catch (const Standard_Failure &e) {
+      if (w.empty()) w = e.GetMessageString();
+    } catch (const std::exception &e) {
+      if (w.empty()) w = e.what();
+    }
+    if (prof)
+      std::fprintf(stderr, "  thick solid try %u: %s, %.1f ms\n", k, w.c_str(),
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (k == 0) first = w;
+  }
+  if (max_steps < 99 || out_of_time) {
+    why = std::string(out_of_time ? "the offset strategies ran out of time" : "every offset strategy tried failed") +
+          " (default: " + first + ")";
+    return TopoDS_Shape();
+  }
+  // Last: offset and cut (inward, planar open faces only). The cavity is the body's
+  // inner 3D offset; under each open face the wall is punched out by the face's
+  // prism t deep, clipped to the cavity moved t toward the face (so the side walls
+  // keep their full height). Catches MakeThickSolid giving back the body unchanged
+  // (a side face open under a top fillet tangent to it).
+  if (offset < 0) {
+    auto t0 = std::chrono::steady_clock::now();
+    std::string w;
+    try {
+      OCC_CATCH_SIGNALS
+      TopoDS_Shape cavity = doOffsetSolid(privateCopy(input), offset);
+      const double t = std::abs(offset);
+      TopTools_ListOfShape tools;
+      tools.Append(cavity);
+      for (TopTools_ListIteratorOfListOfShape it(closing); it.More(); it.Next()) {
+        const TopoDS_Face &f = TopoDS::Face(it.Value());
+        BRepAdaptor_Surface as(f);
+        if (as.GetType() != GeomAbs_Plane) {
+          w = "an open face is not flat";
+          throw Standard_Failure("skip");
+        }
+        // the face as it sits in the solid (for its outward normal)
+        TopoDS_Face fo = f;
+        for (TopExp_Explorer ex(input, TopAbs_FACE); ex.More(); ex.Next())
+          if (ex.Current().IsSame(f)) fo = TopoDS::Face(ex.Current());
+        gp_Dir n = as.Plane().Axis().Direction();
+        if (fo.Orientation() == TopAbs_REVERSED) n.Reverse();
+        TopoDS_Shape prism = BRepPrimAPI_MakePrism(fo, gp_Vec(n) * (-1.5 * t)).Shape();
+        gp_Trsf mv;
+        mv.SetTranslation(gp_Vec(n) * (1.5 * t));
+        TopoDS_Shape moved = BRepBuilderAPI_Transform(cavity, mv, Standard_True).Shape();
+        tools.Append(doBoolean(prism, moved, 2u));
+      }
+      TopoDS_Shape tool = tools.First();
+      for (TopTools_ListIteratorOfListOfShape it(tools); it.More(); it.Next())
+        if (!it.Value().IsSame(tools.First())) tool = doBoolean(tool, it.Value(), 0u);
+      TopoDS_Shape r = simplify(doUnify(doBoolean(input, tool, 1u)));
+      if (plausibleThick(r, solids_in, V, A_walls, offset, w, closing)) {
+        strategy = 6;
+        return r;
+      }
+    } catch (const Standard_Failure &e) {
+      if (w.empty()) w = e.GetMessageString();
+    } catch (const std::exception &e) {
+      if (w.empty()) w = e.what();
+    }
+    if (prof)
+      std::fprintf(stderr, "  offset and cut: %s, %.1f ms\n", w.empty() ? "?" : w.c_str(),
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+  }
+  why = "every offset strategy failed (default: " + first + ")";
+  return TopoDS_Shape();
+}
+} // namespace
+
+
+std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t &strategy) {
   requireShape(s, "shell");
+  strategy = 0;
+  std::string why_open;
   if (std::abs(offset) < kTol) fail("shell thickness must be non-zero");
   TopoDS_Shape copy = privateCopy(s.s);
   auto m = mapOf(copy, TopAbs_FACE);
@@ -961,11 +1242,10 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
           OCC_CATCH_SIGNALS
           TopTools_ListOfShape open;
           open.Append(best);
-          BRepOffsetAPI_MakeThickSolid mk;
-          mk.MakeThickSolidByJoin(input, open, offset, 1e-3, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
-          mk.Build();
-          if (mk.IsDone()) {
-            TopoDS_Shape cup = mk.Shape();
+          uint32_t st = 0;
+          std::string why_ts;
+          TopoDS_Shape cup = thickSolidLadder(input, open, offset, st, why_ts);
+          if (!cup.IsNull()) {
             gp_Pln pl = BRepAdaptor_Surface(best).Plane();
             gp_Dir nn = pl.Axis().Direction();
             if (best.Orientation() == TopAbs_REVERSED) nn.Reverse();
@@ -974,10 +1254,13 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
             slab = doBoolean(input, slab, 2u);
             TopoDS_Shape c = simplify(doBoolean(cup, slab, 0u));
             std::string why2;
-            if (plausible(c, why2)) return wrap(c);
+            if (plausible(c, why2)) {
+              strategy = 100 + st;
+              return wrap(c);
+            }
             why += "; open-and-close fallback: " + why2;
           } else {
-            why += "; open-and-close fallback: the thick solid failed";
+            why += "; open-and-close fallback: " + why_ts;
           }
         } catch (const Standard_Failure &e) {
           why += std::string("; open-and-close fallback: ") + e.GetMessageString();
@@ -988,13 +1271,53 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
     }
     fail("shell with no open faces: " + why);
   }
-  BRepOffsetAPI_MakeThickSolid mk;
-  mk.MakeThickSolidByJoin(input, closing, offset, 1e-3, BRepOffset_Skin, Standard_False,
-                          Standard_False, GeomAbs_Arc);
-  mk.Build();
-  if (!mk.IsDone()) fail("shell failed (thickness larger than a fillet radius or feature?)");
-  TopoDS_Shape r = healIfInvalid(mk.Shape(), "shell");
-  return wrap(simplify(r));
+  TopoDS_Shape r = thickSolidLadder(input, closing, offset, strategy, why_open);
+  if (r.IsNull()) fail("shell failed: " + why_open);
+  return wrap(r);
+}
+
+// Largest thickness (same sign as `offset`, below |offset|) that shells: bisection
+// with the fast half of the ladder (default, complete intersection, loose
+// tolerance), `iters` steps. 0 when even |offset| / 2^iters fails.
+double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t iters) {
+  requireShape(s, "shell_max_thickness");
+  TopoDS_Shape copy = privateCopy(s.s);
+  auto m = mapOf(copy, TopAbs_FACE);
+  TopTools_ListOfShape closing;
+  for (uint32_t i : faces) {
+    if (i >= static_cast<uint32_t>(m.Extent())) fail("shell: face index out of range");
+    closing.Append(m.FindKey(static_cast<int>(i) + 1));
+  }
+  if (closing.IsEmpty()) return 0.0;
+  TopoDS_Shape input = simplify(copy);
+  double lo = 0.0, hi = std::abs(offset);
+  const double sign = offset < 0 ? -1.0 : 1.0;
+  // an error path: about 5 s in all (each failed try at a big wall is slow)
+  auto t0 = std::chrono::steady_clock::now();
+  auto left = [&] { return 5.0 - std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+  // `budget` < 0: the ladder's own (load-independent) caps, for the confirmation
+  auto works = [&](double t, double budget) {
+    uint32_t st = 0;
+    std::string why;
+    try {
+      return !thickSolidLadder(input, closing, sign * t, st, why, 3, budget < 0 ? 12.0 : std::max(0.1, budget)).IsNull();
+    } catch (const Standard_Failure &) {
+    } catch (const std::exception &) {
+    }
+    return false;
+  };
+  for (uint32_t k = 0; k < iters && left() > 0; ++k) {
+    double mid = 0.5 * (lo + hi);
+    (works(mid, left()) ? lo : hi) = mid;
+  }
+  // failure is not monotone near the limit: report a value that was itself shelled
+  // with the ladder's normal caps (rounded down to 0.01 mm; backing off 5 % at a time)
+  double t = std::floor(lo * 100.0) / 100.0;
+  for (int k = 0; k < 4 && t > 0; ++k) {
+    if (works(t, -1.0)) return t;
+    t = std::floor(t * 95.0) / 100.0;
+  }
+  return 0.0;
 }
 
 std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, V3 pull,
@@ -1508,10 +1831,20 @@ rust::Vec<V3> outer_wire_point(const Shape &s, double t) {
 namespace {
 // 3D skin offset of a solid as a solid (the caller passes a private copy).
 TopoDS_Shape doOffsetSolid(const TopoDS_Shape &in, double d) {
-  BRepOffsetAPI_MakeOffsetShape mo;
-  mo.PerformByJoin(in, d, 1e-4, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
-  if (!mo.IsDone()) fail("3D offset failed");
-  TopoDS_Shape r = mo.Shape();
+  // the default first, then complete intersection (steps narrower than |d|), then a
+  // looser tolerance (near-tangent creases); see the shell ladder
+  TopoDS_Shape r;
+  for (int k = 0; k < 3 && r.IsNull(); ++k) {
+    try {
+      OCC_CATCH_SIGNALS
+      BRepOffsetAPI_MakeOffsetShape mo;
+      mo.PerformByJoin(in, d, k == 2 ? 1e-2 : 1e-4, BRepOffset_Skin, k > 0 ? Standard_True : Standard_False, Standard_False,
+                       GeomAbs_Arc);
+      if (mo.IsDone()) r = mo.Shape();
+    } catch (const Standard_Failure &) {
+      if (k == 2) throw;
+    }
+  }
   if (r.IsNull()) fail("3D offset produced no shape (offset larger than a convex radius?)");
   // an offset of a solid's skin yields a shell or solid; make it a solid
   if (r.ShapeType() == TopAbs_SHELL) {
@@ -2335,6 +2668,70 @@ void write_stl_file(const Shape &s, rust::Str path, double lin_defl, bool ascii)
   w.ASCIIMode() = ascii;
   std::string p(path);
   if (!w.Write(m, p.c_str())) fail("cannot write STL file " + p);
+}
+
+// ---------------------------------------------------------------- shell diagnosis
+
+// Faces and edges that commonly stop a shell of `|offset|`: faces narrower than the
+// wall (width ≈ 2·area / perimeter, so a ring or strip reads as its width) and
+// creases between faces meeting at under 8° (not tangent, not a real corner).
+rust::Vec<ShellBlocker> shell_blockers(const Shape &s, rust::Slice<const uint32_t> open, double offset) {
+  requireShape(s, "shell_blockers");
+  rust::Vec<ShellBlocker> out;
+  const double t = std::abs(offset);
+  auto fm = mapOf(s.s, TopAbs_FACE);
+  std::vector<bool> is_open(fm.Extent() + 1, false);
+  for (uint32_t i : open)
+    if (i < static_cast<uint32_t>(fm.Extent())) is_open[i + 1] = true;
+  for (int i = 1; i <= fm.Extent(); ++i) {
+    if (is_open[i]) continue;
+    const TopoDS_Face &f = TopoDS::Face(fm.FindKey(i));
+    GProp_GProps a, l;
+    BRepGProp::SurfaceProperties(f, a);
+    BRepGProp::LinearProperties(f, l);
+    if (l.Mass() <= 0) continue;
+    double width = 2.0 * a.Mass() / l.Mass();
+    if (width < t) out.push_back(ShellBlocker{static_cast<uint32_t>(i - 1), -1, 0, width});
+  }
+  TopTools_IndexedDataMapOfShapeListOfShape ef;
+  TopExp::MapShapesAndAncestors(s.s, TopAbs_EDGE, TopAbs_FACE, ef);
+  for (int i = 1; i <= ef.Extent(); ++i) {
+    const TopoDS_Edge &e = TopoDS::Edge(ef.FindKey(i));
+    if (BRep_Tool::Degenerated(e)) continue;
+    TopTools_IndexedMapOfShape adj;
+    for (TopTools_ListIteratorOfListOfShape it(ef.FindFromIndex(i)); it.More(); it.Next()) adj.Add(it.Value());
+    if (adj.Extent() != 2) continue;
+    TopoDS_Face fa = TopoDS::Face(adj(1)), fb = TopoDS::Face(adj(2));
+    // the faces as they sit in the solid (orientation matters for the normals)
+    for (TopExp_Explorer ex(s.s, TopAbs_FACE); ex.More(); ex.Next()) {
+      if (ex.Current().IsSame(fa)) fa = TopoDS::Face(ex.Current());
+      else if (ex.Current().IsSame(fb)) fb = TopoDS::Face(ex.Current());
+    }
+    try {
+      OCC_CATCH_SIGNALS
+      double f0, f1;
+      BRep_Tool::Range(e, f0, f1);
+      gp_Vec na, nb;
+      double worst = 0;
+      bool ok = true;
+      for (double u : {0.25, 0.5, 0.75}) {
+        double tt = f0 + u * (f1 - f0);
+        if (!normalOnFace(fa, e, tt, na) || !normalOnFace(fb, e, tt, nb)) {
+          ok = false;
+          break;
+        }
+        worst = std::max(worst, na.Angle(nb));
+      }
+      double deg = worst * 180.0 / M_PI;
+      if (ok && deg > 0.1 && deg < 8.0) {
+        int ia = fm.FindIndex(fa) - 1, ib = fm.FindIndex(fb) - 1;
+        if (ia < 0 || ib < 0 || is_open[ia + 1] || is_open[ib + 1]) continue;
+        out.push_back(ShellBlocker{static_cast<uint32_t>(ia), ib, 1, deg});
+      }
+    } catch (const Standard_Failure &) {
+    }
+  }
+  return out;
 }
 
 } // namespace cw

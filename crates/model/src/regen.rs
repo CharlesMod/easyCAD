@@ -19,7 +19,7 @@ use crate::meshbody::{self, MeshSolid};
 use crate::library::{local_mate, place, HoleChoice, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
 use crate::process::{Fit, FitClass, ProcessProfile, TeardropStyle};
-use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
+use crate::select::{resolve_edges, resolve_faces, FaceSelector, SelectError, Selector};
 use crate::sketch::{segment_point, Sketch, SolveReport};
 
 /// Geometry of a body plus its lazily computed display mesh.
@@ -372,6 +372,11 @@ pub struct FeatureReport {
     /// The feature is after the document's rollback marker (not computed).
     #[serde(default)]
     pub rolled_back: bool,
+    /// How the feature was built, when a fallback was needed (e.g. "shell:
+    /// complete-intersection offset (the default offset failed)"). Not a warning:
+    /// the result is right.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Where a fillet/chamfer request edge came from.
@@ -396,6 +401,7 @@ impl FeatureReport {
             edge_requests: Vec::new(),
             skipped_edges: Vec::new(),
             rolled_back: false,
+            note: None,
         }
     }
 }
@@ -675,6 +681,7 @@ impl Regenerator {
                     report: None,
                     sketch_report: None,
                     warning: None,
+                    note: None,
                     joint: None,
                     xf: Vec::new(),
                     target_default: None,
@@ -687,7 +694,8 @@ impl Regenerator {
                     t_prov += tp.elapsed().as_secs_f64() * 1000.0;
                     s
                 });
-                let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
+                let (dressup, sketch, warning, joint, note) =
+                    (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take(), ctx.note.take());
                 let (edge_requests, skipped_edges) = (std::mem::take(&mut ctx.edge_requests), std::mem::take(&mut ctx.skipped_edges));
                 match res {
                     Ok(s) => (
@@ -698,6 +706,7 @@ impl Regenerator {
                             joint,
                             edge_requests,
                             skipped_edges,
+                            note,
                             ..FeatureReport::new(f.id, warning.map(FeatureStatus::Warning).unwrap_or(FeatureStatus::Ok))
                         },
                     ),
@@ -775,6 +784,8 @@ struct Ctx<'a> {
     report: Option<DressUpReport>,
     sketch_report: Option<SolveReport>,
     warning: Option<String>,
+    /// How the feature was built when that is worth knowing (a fallback strategy).
+    note: Option<String>,
     joint: Option<crate::joint::JointReport>,
     /// Pattern transform stack (applied innermost first).
     xf: Vec<Xf>,
@@ -856,6 +867,42 @@ fn tidy(s: Shape) -> Shape {
 }
 
 impl Ctx<'_> {
+    /// A failed shell's message, its blockers named by feature and role ("Lower
+    /// body · end face") with a selector for each face.
+    /// `thickness` is the feature's expression: when it is a plain parameter
+    /// (`wall`), the message says which parameter to lower.
+    #[allow(clippy::too_many_arguments)]
+    fn shell_error(&self, st: &ModelState, body: usize, shape: &Shape, open: &[u32], t: f64, thickness: &Expr, e: occt::Error) -> String {
+        let blockers = shape.shell_blockers(open, t).unwrap_or_default();
+        let msg = e.to_string();
+        // the kernel's own list names bare indices; replace it
+        let mut head = msg.split("; likely blockers:").next().unwrap_or(&msg).trim_start_matches("kernel: ").to_string();
+        let name = thickness.0.trim();
+        let is_param = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && name.parse::<f64>().is_err();
+        if let (true, Some(max)) = (is_param, head.split("largest workable thickness: ").nth(1).and_then(|r| r.split(" mm").next())) {
+            head += &format!(" (set `{name}` to at most {max} mm, or remove the blockers below)");
+        }
+        if blockers.is_empty() {
+            return format!("{head} (no narrow face or shallow crease found; try a thinner wall)");
+        }
+        let infos = shape.faces().unwrap_or_default();
+        let origins = crate::provenance::FaceOrigins(st.faces.clone());
+        let id = st.bodies[body].id;
+        let name = |i: u32| {
+            let info = infos.get(i as usize);
+            let label = origins.face(id, i).map(|o| o.label(self.doc, info)).unwrap_or_else(|| format!("face {i}"));
+            match info {
+                Some(f) => {
+                    let r = |v: DVec3| DVec3::new((v.x * 1e3).round() / 1e3, (v.y * 1e3).round() / 1e3, (v.z * 1e3).round() / 1e3);
+                    let sel = FaceSelector::Hint { centroid: r(f.centroid), normal: r(f.normal), kind: Some(f.kind.into()) };
+                    format!("\"{label}\" {}", serde_json::to_string(&sel).unwrap_or_default())
+                }
+                None => format!("\"{label}\""),
+            }
+        };
+        format!("{head}{}", occt::ShellBlocker::summarize(&blockers, t.abs(), name))
+    }
+
     fn ev(&self, e: &Expr) -> R<f64> {
         e.eval(self.vals).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
     }
@@ -1154,7 +1201,15 @@ impl Ctx<'_> {
                 let t = self.ev(thickness)?;
                 let shape = st.bodies[i].shape().clone();
                 let faces = resolve_faces(&shape, open_faces)?;
-                st.bodies[i].geom = BodyGeom::new(shape.shell(&faces, t, *outward)?);
+                match shape.shell_report(&faces, t, *outward) {
+                    Ok((out, how)) => {
+                        if how.is_fallback() {
+                            self.note = Some(format!("shell: {}", how.describe()));
+                        }
+                        st.bodies[i].geom = BodyGeom::new(out);
+                    }
+                    Err(e) => return fail(self.shell_error(st, i, &shape, &faces, t, thickness, e)),
+                }
             }
             FeatureKind::Draft { body, faces, neutral, pull, angle_deg, offset } => {
                 let i = self.target(st, *body)?;
