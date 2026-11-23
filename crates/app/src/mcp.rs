@@ -286,8 +286,10 @@ fn start(app: &mut EasyCadApp, ctx: &egui::Context, name: &str, args: Value) -> 
         "measure" => Ok(measure(args)),
         "get_selection" => Ok(after_model(|app, _| done(selection_json(app)))),
         "interference" => Ok(interference(args)),
+        "clearance" => Ok(clearance(args)),
         "screenshot" => screenshot(app, ctx, args),
         "view_state" => Ok(view_state(args)),
+        "render_sketch" => crate::mcp_sketch::render_sketch(app, &args).map(|v| Step::Done(Ok(v))),
         "export" => export(args),
         "open_document" | "new_document" => open_or_new(app, name, args),
         "save_document" => save_document(app, args),
@@ -300,7 +302,7 @@ fn start(app: &mut EasyCadApp, ctx: &egui::Context, name: &str, args: Value) -> 
 // ------------------------------------------------------------------ shared helpers
 
 /// Round for readable JSON (0.1 µm).
-fn r(x: f64) -> f64 {
+pub(crate) fn r(x: f64) -> f64 {
     let v = (x * 1e4).round() / 1e4;
     if v == 0.0 {
         0.0
@@ -309,15 +311,15 @@ fn r(x: f64) -> f64 {
     }
 }
 
-fn v3(v: DVec3) -> Value {
+pub(crate) fn v3(v: DVec3) -> Value {
     json!([r(v.x), r(v.y), r(v.z)])
 }
 
-fn str_arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
+pub(crate) fn str_arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
     args.get(k).and_then(Value::as_str)
 }
 
-fn bool_arg(args: &Value, k: &str) -> Option<bool> {
+pub(crate) fn bool_arg(args: &Value, k: &str) -> Option<bool> {
     args.get(k).and_then(Value::as_bool)
 }
 
@@ -330,10 +332,12 @@ fn expr_arg(v: &Value) -> Option<Expr> {
 }
 
 /// Mutations are refused while the user is in the middle of something.
+/// Claude edits the document while the user is modelling or has a sketch open (the
+/// sketch session writes back only its own sketch entry when they finish it, so
+/// Claude's other edits survive; `add_sketch` refuses to replace that very sketch).
 fn can_edit(app: &EasyCadApp) -> Result<(), String> {
     match &app.mode {
-        Mode::Model => {}
-        Mode::Sketch(_) => return Err("The user is editing a sketch in easyCAD. Ask them to finish it (Finish sketch) or cancel it, then retry.".into()),
+        Mode::Model | Mode::Sketch(_) => {}
         Mode::Parts(_) => return Err("The user has the parts library open. Ask them to close it, then retry.".into()),
         Mode::Drawing(_) => return Err("The user is on a drawing sheet. Ask them to go back to the model, then retry.".into()),
     }
@@ -406,9 +410,36 @@ fn claude_edit<T>(
     let out = app.doc.edit(&label, f)?;
     app.params.buffers.clear();
     app.after_edit();
+    refresh_open_sketch(app);
     claude_toast(app, label);
     mark_seen(app);
     Ok((out, before))
+}
+
+/// The user's open sketch, if any: (its document id when it edits an existing
+/// sketch, its name).
+fn open_sketch(app: &EasyCadApp) -> Option<(Option<SketchId>, String)> {
+    match &app.mode {
+        Mode::Sketch(s) => Some((s.id, s.sketch.name.clone())),
+        _ => None,
+    }
+}
+
+/// The open sketch session evaluates its dimensions with the parameters it read
+/// when it opened: give it the ones Claude may just have changed.
+fn refresh_open_sketch(app: &mut EasyCadApp) {
+    if let Mode::Sketch(s) = &mut app.mode {
+        s.values = crate::adapters::values(&app.doc.data);
+        s.names = app.doc.data.params.list.iter().map(|p| p.name.clone()).collect();
+    }
+}
+
+/// Refuses a step that would take away the sketch the user has open.
+fn keeps_open_sketch(app: &EasyCadApp) -> bool {
+    match open_sketch(app) {
+        Some((Some(id), _)) => app.doc.data.sketch(id).is_some(),
+        _ => true,
+    }
 }
 
 /// One "Claude: ..." toast at a time: a quick run of steps does not stack them over
@@ -660,7 +691,10 @@ fn document_json(app: &EasyCadApp, defs: bool) -> Value {
         })
         .collect();
     let mode = match (&app.mode, &app.dialog) {
-        (Mode::Sketch(_), _) => "editing a sketch".to_string(),
+        (Mode::Sketch(s), _) => match s.id {
+            Some(id) => format!("editing sketch '{}' (id {}); you can edit everything else, render_sketch shows their draft", s.sketch.name, id.0),
+            None => format!("drawing a new sketch '{}'; you can edit the document meanwhile, render_sketch shows their draft", s.sketch.name),
+        },
         (Mode::Parts(_), _) => "browsing the parts library".to_string(),
         (Mode::Drawing(_), _) => "on a drawing sheet".to_string(),
         (Mode::Model, Some(dl)) => format!("{} dialog open", dl.kind.title()),
@@ -695,7 +729,7 @@ fn sketch_of(k: &FeatureKind) -> Option<SketchId> {
     }
 }
 
-fn plane_json(p: &Plane) -> Value {
+pub(crate) fn plane_json(p: &Plane) -> Value {
     for (n, q) in [("XY", Plane::XY), ("XZ", Plane::XZ), ("YZ", Plane::YZ)] {
         if p.x_dir.abs_diff_eq(q.x_dir, 1e-9) && p.normal.abs_diff_eq(q.normal, 1e-9) {
             let off = p.origin.dot(q.normal);
@@ -1042,6 +1076,14 @@ fn add_sketch(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
     if let Some(id) = replace {
         if app.doc.data.sketch(id).is_none() {
             return Err(format!("no sketch with id {}", id.0));
+        }
+        if let Some((Some(open), name)) = open_sketch(app) {
+            if open == id {
+                return Err(format!(
+                    "The user has sketch '{name}' (id {}) open in easyCAD: replacing it now would be overwritten when they finish. Add a new sketch instead, or ask them to finish it first.",
+                    id.0
+                ));
+            }
         }
     }
     let label = match replace {
@@ -1546,6 +1588,141 @@ fn interference(args: Value) -> Step {
                 "failed": failed,
                 "verdict": if rep.pairs.is_empty() { "no interference" } else { "bodies overlap" },
             });
+            let _ = tx.send(Ok(vec![json_text(&v)]));
+        });
+        Step::Recv(rx)
+    })
+}
+
+/// One side of a `clearance` question: bodies, or faces / edges picked by selector.
+struct Side {
+    /// (index into the model's bodies, part, label)
+    parts: Vec<(usize, easycad_model::occt::SubShape, String)>,
+}
+
+fn clearance_side(m: &crate::worker::Output, v: &Value, what: &str) -> Result<Side, String> {
+    use easycad_model::occt::SubShape;
+    let names = || m.bodies.iter().map(|b| format!("'{}'", b.body.name)).collect::<Vec<_>>().join(", ");
+    let (body, face, edge) = match v {
+        Value::String(_) => (v.clone(), None, None),
+        Value::Object(o) if o.contains_key("feature") => (v.clone(), None, None),
+        Value::Object(o) => (
+            o.get("body").cloned().unwrap_or(Value::Null),
+            o.get("face").cloned(),
+            o.get("edge").cloned(),
+        ),
+        _ => return Err(format!("`{what}`: a body name, a body id {{\"feature\":..,\"index\":..}}, or {{\"body\":..,\"face\":<selector>}} / {{\"body\":..,\"edge\":<selector>}}")),
+    };
+    let fsel = face
+        .map(|f| serde_json::from_value::<FaceSelector>(f).map_err(|e| format!("`{what}.face` is not a face selector: {e}")))
+        .transpose()?;
+    let esel = edge
+        .map(|f| serde_json::from_value::<EdgeSelector>(f).map_err(|e| format!("`{what}.edge` is not an edge selector: {e}")))
+        .transpose()?;
+    let mut parts = Vec::new();
+    let mut matched_body = false;
+    for (bi, mb) in m.bodies.iter().enumerate().filter(|(_, b)| body_matches(b, &body)) {
+        matched_body = true;
+        let name = &mb.body.name;
+        let shape = mb.body.shape();
+        if let Some(fs) = &fsel {
+            for i in fs.resolve(shape).unwrap_or_default() {
+                parts.push((bi, SubShape::Face(i), format!("'{name}' face {i}")));
+            }
+        } else if let Some(es) = &esel {
+            for i in es.resolve(shape).unwrap_or_default() {
+                parts.push((bi, SubShape::Edge(i), format!("'{name}' edge {i}")));
+            }
+        } else {
+            parts.push((bi, SubShape::Whole, format!("'{name}'")));
+        }
+    }
+    if !matched_body {
+        return Err(format!("`{what}`: no body {body} (bodies: {})", names()));
+    }
+    if parts.is_empty() {
+        return Err(format!("`{what}`: the selector matched nothing on those bodies; check it with screenshot highlight or measure faces/edges"));
+    }
+    Ok(Side { parts })
+}
+
+fn clearance(args: Value) -> Step {
+    after_model(move |app, _| {
+        let Some(m) = agent_model(app) else { return fail("no model yet") };
+        let Some(a) = args.get("a") else { return fail("`a` is required: a body name, or {\"body\":..,\"face\":<selector>}") };
+        let a = match clearance_side(&m, a, "a") {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        let a_bodies: Vec<usize> = a.parts.iter().map(|p| p.0).collect();
+        let b = match args.get("b").filter(|v| !v.is_null()) {
+            Some(v) => match clearance_side(&m, v, "b") {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            },
+            None => Side {
+                parts: m
+                    .bodies
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !a_bodies.contains(i))
+                    .map(|(i, mb)| (i, easycad_model::occt::SubShape::Whole, format!("'{}'", mb.body.name)))
+                    .collect(),
+            },
+        };
+        if b.parts.is_empty() {
+            return fail("there is no other body to measure to");
+        }
+        if a.parts.len() * b.parts.len() > 400 {
+            return fail(format!("{} × {} pairs is too many: narrow the selectors", a.parts.len(), b.parts.len()));
+        }
+        let all_others = args.get("b").is_none_or(Value::is_null);
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let mut rows = Vec::new();
+            let mut errors = Vec::new();
+            for (ai, ap, al) in &a.parts {
+                for (bi, bp, bl) in &b.parts {
+                    if ai == bi && (*ap == easycad_model::occt::SubShape::Whole || *bp == easycad_model::occt::SubShape::Whole) {
+                        continue;
+                    }
+                    match m.bodies[*ai].body.shape().min_distance(*ap, m.bodies[*bi].body.shape(), *bp) {
+                        Ok(d) => rows.push((d, al.clone(), bl.clone())),
+                        Err(e) => errors.push(json!({"a": al, "b": bl, "error": e.to_string()})),
+                    }
+                }
+            }
+            rows.sort_by(|x, y| x.0.distance.total_cmp(&y.0.distance));
+            let row = |(d, al, bl): &(easycad_model::occt::Distance, String, String)| {
+                let mut o = json!({
+                    "a": al, "b": bl, "distance_mm": r(d.distance),
+                    "point_on_a": v3(d.on_self), "point_on_b": v3(d.on_other),
+                });
+                if d.distance > 1e-7 {
+                    o["direction_a_to_b"] = v3((d.on_other - d.on_self).normalize());
+                } else {
+                    o["touching"] = json!(true);
+                }
+                o
+            };
+            let Some(best) = rows.first() else {
+                let _ = tx.send(Err(format!("no distance could be computed: {}", json!(errors))));
+                return;
+            };
+            let mut v = json!({"min_distance_mm": r(best.0.distance), "closest": row(best)});
+            if best.0.distance <= 1e-7 {
+                v["note"] = json!("they touch or overlap (distance 0): use interference for the overlap volume");
+            }
+            if rows.len() > 1 {
+                let label = if all_others { "by_body" } else { "pairs" };
+                v[label] = json!(rows.iter().take(12).map(row).collect::<Vec<_>>());
+                if rows.len() > 12 {
+                    v["more_pairs"] = json!(rows.len() - 12);
+                }
+            }
+            if !errors.is_empty() {
+                v["failed"] = json!(errors);
+            }
             let _ = tx.send(Ok(vec![json_text(&v)]));
         });
         Step::Recv(rx)
@@ -2268,7 +2445,7 @@ impl Shot {
     }
 }
 
-fn thick_line(img: &mut image::RgbaImage, a: (f32, f32), b: (f32, f32), r: f32, c: [u8; 3]) {
+pub(crate) fn thick_line(img: &mut image::RgbaImage, a: (f32, f32), b: (f32, f32), r: f32, c: [u8; 3]) {
     let (w, h) = (img.width() as i32, img.height() as i32);
     let len = ((b.0 - a.0).hypot(b.1 - a.1)).max(1.0);
     let steps = (len * 2.0).min(20_000.0) as i32;
@@ -2287,8 +2464,9 @@ fn thick_line(img: &mut image::RgbaImage, a: (f32, f32), b: (f32, f32), r: f32, 
     }
 }
 
-/// 5×7 glyphs (rows top to bottom, 5 bits each, MSB left) for captions.
-fn glyph(ch: char) -> [u8; 7] {
+/// 5×7 glyphs (rows top to bottom, 5 bits each, MSB left) for captions and
+/// labels; letters print upper case.
+pub(crate) fn glyph(ch: char) -> [u8; 7] {
     match ch.to_ascii_uppercase() {
         'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
         'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
@@ -2330,47 +2508,77 @@ fn glyph(ch: char) -> [u8; 7] {
         '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
         '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
         '\'' => [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
+        '*' => [0x00, 0x15, 0x0E, 0x1F, 0x0E, 0x15, 0x00],
+        '/' => [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+        ',' => [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
+        ':' => [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
+        '#' => [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
+        '<' => [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+        '>' => [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+        '?' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        '%' => [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
+        '^' => [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
+        '°' => [0x0C, 0x12, 0x12, 0x0C, 0x00, 0x00, 0x00],
         _ => [0; 7],
     }
 }
 
-/// A caption in the top-left corner, on a dark box.
-fn draw_caption(img: &mut image::RgbaImage, text: &str) {
-    let s = 2u32;
+/// Text in the 5×7 font at `scale`, its top-left at (x, y), on an optional box
+/// (3 px padding). Returns the box's size.
+pub(crate) fn draw_text(img: &mut image::RgbaImage, x: i32, y: i32, scale: u32, text: &str, fg: [u8; 3], bg: Option<[u8; 3]>) -> (u32, u32) {
+    let s = scale.max(1);
     let (cw, ch) = (6 * s, 7 * s);
     let n = text.chars().count() as u32;
-    let (bw, bh) = ((n * cw + 10 * s / 2 + 6).min(img.width()), (ch + 12).min(img.height()));
-    for y in 8..8 + bh {
-        for x in 8..8 + bw {
-            if x < img.width() && y < img.height() {
-                img.put_pixel(x, y, image::Rgba([34, 38, 44, 255]));
+    let (bw, bh) = (n * cw - s + 6, ch + 6);
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+    let mut put = |px: i32, py: i32, c: [u8; 3]| {
+        if px >= 0 && py >= 0 && px < iw && py < ih {
+            img.put_pixel(px as u32, py as u32, image::Rgba([c[0], c[1], c[2], 255]));
+        }
+    };
+    if let Some(bg) = bg {
+        for py in y..y + bh as i32 {
+            for px in x..x + bw as i32 {
+                put(px, py, bg);
             }
         }
     }
     for (i, c) in text.chars().enumerate() {
         let g = glyph(c);
-        let (x0, y0) = (14 + i as u32 * cw, 14);
+        let (x0, y0) = (x + 3 + (i as u32 * cw) as i32, y + 3);
         for (row, bits) in g.iter().enumerate() {
             for col in 0..5u32 {
                 if bits & (0x10 >> col) != 0 {
                     for dy in 0..s {
                         for dx in 0..s {
-                            let (x, y) = (x0 + col * s + dx, y0 + row as u32 * s + dy);
-                            if x < img.width() && y < img.height() {
-                                img.put_pixel(x, y, image::Rgba([230, 232, 235, 255]));
-                            }
+                            put(x0 + (col * s + dx) as i32, y0 + (row as u32 * s + dy) as i32, fg);
                         }
                     }
                 }
             }
         }
     }
+    (bw, bh)
+}
+
+/// A caption in the top-left corner, on a dark box.
+pub(crate) fn draw_caption(img: &mut image::RgbaImage, text: &str) {
+    draw_text(img, 8, 8, 2, text, [230, 232, 235], Some([34, 38, 44]));
 }
 
 // ------------------------------------------------------------------ documents
 
 fn open_or_new(app: &mut EasyCadApp, tool: &str, args: Value) -> Result<Step, String> {
     can_edit(app)?;
+    if let Some((_, name)) = open_sketch(app) {
+        return Err(format!(
+            "The user is editing sketch '{name}' in easyCAD. Ask them to finish or cancel it before switching documents."
+        ));
+    }
     let unsaved = app.doc.data.revision != app.saved_revision && !app.doc.data.features.is_empty();
     if unsaved && !bool_arg(&args, "discard_unsaved").unwrap_or(false) {
         return Err(format!(
@@ -2423,6 +2631,13 @@ fn undo(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
         return Err(format!("the last step is the user's (\"{label}\"), not yours, so it was not undone"));
     }
     app.undo();
+    if !keeps_open_sketch(app) {
+        app.redo();
+        return Err(format!(
+            "undoing \"{label}\" would remove the sketch the user has open, so it was not undone. Ask them to finish or cancel it first."
+        ));
+    }
+    refresh_open_sketch(app);
     mark_seen(app);
     Ok(after_model(move |app, _| {
         let mut o = outcome_json(app, None);

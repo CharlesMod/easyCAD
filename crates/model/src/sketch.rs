@@ -245,6 +245,54 @@ impl Sketch {
         Ok(sys.report(&x, max < SOLVE_TOL, 0, max))
     }
 
+    /// Which points and entities can still move without breaking a constraint, at
+    /// the current positions: the nullspace of the constraint Jacobian, projected
+    /// onto each variable. `None` for sketches too large to analyse quickly.
+    pub fn free_geometry(&self, vars: &Values) -> Result<Option<FreeGeometry>, SketchError> {
+        let sys = System::build(self, vars)?;
+        let x = sys.pack(self);
+        let n = sys.n_vars();
+        if n > MAX_FREE_VARS {
+            return Ok(None);
+        }
+        let m = sys.residuals(&x).len();
+        let mut weight = vec![1.0f64; n];
+        if m > 0 && n > 0 {
+            let j = sys.jacobian(&x, m);
+            let a = j.transpose() * &j;
+            let eig = a.symmetric_eigen();
+            let lmax = eig.eigenvalues.iter().cloned().fold(0.0, f64::max);
+            let tol = (1e-7 * lmax.sqrt().max(1.0)).powi(2);
+            weight = vec![0.0; n];
+            for (k, l) in eig.eigenvalues.iter().enumerate() {
+                if *l <= tol {
+                    let v = eig.eigenvectors.column(k);
+                    for (i, w) in weight.iter_mut().enumerate() {
+                        *w += v[i] * v[i];
+                    }
+                }
+            }
+        }
+        let free_var = |i: usize| weight[i] > 1e-6;
+        let points: Vec<bool> = (0..self.points.len()).map(|i| free_var(2 * i) || free_var(2 * i + 1)).collect();
+        let entities = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(ei, e)| match e.geom {
+                Geom::Line { a, b } => points[a.0 as usize] || points[b.0 as usize],
+                Geom::Arc { center, start, end } => {
+                    points[center.0 as usize] || points[start.0 as usize] || points[end.0 as usize]
+                }
+                Geom::Circle { center, .. } => {
+                    points[center.0 as usize]
+                        || sys.circle_vars.iter().any(|(i, v)| *i == ei && free_var(*v))
+                }
+            })
+            .collect();
+        Ok(Some(FreeGeometry { points, entities }))
+    }
+
     // ------------------------------------------------------------------ profiles
 
     /// Non-construction geometry as 2D segments.
@@ -269,6 +317,17 @@ impl Sketch {
 }
 
 pub const CHAIN_TOL: f64 = 1e-4;
+/// Above this many variables [`Sketch::free_geometry`] gives up (an n×n eigen
+/// decomposition; DXF imports can have thousands).
+const MAX_FREE_VARS: usize = 800;
+
+/// What can still move in a sketch ([`Sketch::free_geometry`]), parallel to
+/// `points` and `entities`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreeGeometry {
+    pub points: Vec<bool>,
+    pub entities: Vec<bool>,
+}
 const SOLVE_TOL: f64 = 1e-9;
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1121,24 @@ mod tests {
         let rep = s.solve(&vals).unwrap();
         assert!(!rep.converged);
         assert_eq!(rep.status, ConstraintStatus::Conflicting);
+    }
+
+    #[test]
+    fn free_geometry_finds_the_loose_line() {
+        let mut sk = Sketch::new("t", Plane::XY);
+        let [b, r, ..] = sk.rect(v(0.0, 0.0), v(10.0, 5.0));
+        let Geom::Line { a, .. } = sk.entities[b.0 as usize].geom else { panic!() };
+        sk.constrain(Constraint::Fix(a, v(0.0, 0.0)));
+        sk.constrain(Constraint::Length(b, Expr::from(10.0)));
+        let vals = Values::default();
+        let f = sk.free_geometry(&vals).unwrap().unwrap();
+        assert!(f.entities[r.0 as usize], "the height is free, so the right side moves");
+        assert!(!f.points[a.0 as usize]);
+        let Geom::Line { a: ra, .. } = sk.entities[r.0 as usize].geom else { panic!() };
+        assert!(!f.points[ra.0 as usize], "the bottom-right corner is fixed by the length");
+        sk.constrain(Constraint::Length(r, Expr::from(5.0)));
+        let f = sk.free_geometry(&vals).unwrap().unwrap();
+        assert!(f.entities.iter().all(|e| !e) && f.points.iter().all(|p| !p));
     }
 
     #[test]
