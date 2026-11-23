@@ -127,6 +127,10 @@ pub struct Output {
     pub ctx_pickable: bool,
     /// Section view caps: (mesh, mesh frame -> view frame).
     pub caps: Vec<(Arc<Mesh>, DAffine3)>,
+    /// Section view: the whole (uncut) mesh of each body the plane cut, by body
+    /// (or occurrence) key, in its own mesh frame. The viewport draws it as a
+    /// wireframe, so the cut-away half stays visible as context.
+    pub cut_away: HashMap<BodyId, Arc<Mesh>>,
     /// The position the bodies are shown in (`None` = as modeled).
     pub pose: Option<PositionId>,
     /// The position the request asked for (even when it failed).
@@ -644,12 +648,16 @@ fn process(
         });
     }
     let mut caps = Vec::new();
+    let mut cut_away = HashMap::new();
     let (mut bodies, mut picker) = (bodies, picker);
     let mut ctx = ctx;
     if let Some((o, n)) = r.cut {
         // section view (GUI_NEEDS #9): keep what is behind the plane, add the caps
         for b in &mut bodies {
             if let Some((mb, cap)) = cut_body(&b.body, o, n, r.quality) {
+                if let Some(whole) = b.mesh.clone().filter(|_| !kept_whole(&mb, b)) {
+                    cut_away.insert(b.body.id, whole);
+                }
                 *b = mb;
                 if let Some(c) = cap {
                     // a hair towards the viewer: the kept half has its own face there
@@ -664,6 +672,9 @@ fn process(
             let inv = c.xf.inverse();
             let (lo, ln) = (inv.transform_point3(o), inv.transform_vector3(n));
             if let Some((mb, cap)) = cut_body(&c.mb.body, lo, ln, r.quality) {
+                if let Some(whole) = c.mb.mesh.clone().filter(|_| !kept_whole(&mb, &c.mb)) {
+                    cut_away.insert(c.key, whole);
+                }
                 c.picker = mb.mesh.as_ref().map(|m| Arc::new(BodyPicker::new(mb.body.id, m)));
                 c.mb = mb;
                 if let Some(cm) = cap {
@@ -689,10 +700,20 @@ fn process(
         asm,
         ctx_pickable,
         caps,
+        cut_away,
         pose: pose_id.filter(|_| pose_error.is_none()),
         pose_requested: pose_id,
         pose_error,
     }
+}
+
+/// The plane missed the body on its front: all of it is kept, nothing is cut away.
+pub fn kept_whole(cut: &MeshedBody, whole: &MeshedBody) -> bool {
+    cut.mesh.is_some() && cut.faces.len() == whole.faces.len() && cut.edges.len() == whole.edges.len()
+        && match (cut.body.shape().volume(), whole.body.shape().volume()) {
+            (Ok(a), Ok(b)) => (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+            _ => false,
+        }
 }
 
 /// One body cut at a plane: the kept half (meshed, with its topology) and the cap.

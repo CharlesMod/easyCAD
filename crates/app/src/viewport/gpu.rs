@@ -20,6 +20,8 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SLOT: u64 = 256;
 const MAX_DRAWS: u64 = 1024;
+/// Edge colour of Wireframe mode (and of a section view's cut-away half).
+const WIRE_EDGE: [f32; 4] = [0.78, 0.80, 0.83, 1.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DisplayMode {
@@ -40,6 +42,9 @@ pub struct DrawBody {
     pub colors: Option<Arc<Vec<[f32; 3]>>>,
     /// Model matrix: mesh frame -> view frame (placed instances, explode, drags).
     pub model: Mat4,
+    /// Drawn as a wireframe only (its edges and a faint fill, as in Wireframe
+    /// mode), whatever the display mode: the half a section view cuts away.
+    pub edges_only: bool,
 }
 
 #[derive(Clone)]
@@ -879,6 +884,7 @@ impl ViewportGpu {
             .iter()
             .filter(|b| self.meshes.get(&key(&b.mesh, b.colors.as_ref())).is_none_or(|g| in_view(g.bounds, f.view_proj * b.model)))
             .collect();
+        let (shown, ghosts): (Vec<&DrawBody>, Vec<&DrawBody>) = shown.into_iter().partition(|b| !b.edges_only);
         for b in shown.iter().copied().filter(|b| !b.translucent) {
             if wire {
                 continue;
@@ -887,7 +893,7 @@ impl ViewportGpu {
         }
         if f.mode != DisplayMode::Shaded {
             let ec = if wire {
-                [0.78, 0.80, 0.83, 1.0]
+                WIRE_EDGE
             } else {
                 f.edge_color
             };
@@ -900,6 +906,10 @@ impl ViewportGpu {
                 list.push((P::Lines, key(&b.mesh, b.colors.as_ref()), What::Edges, ub(b, c, 0.0)));
             }
         }
+        // the cut-away half of a section view: wireframe lines, in every mode
+        for b in ghosts.iter().copied() {
+            list.push((P::Lines, key(&b.mesh, b.colors.as_ref()), What::Edges, ub(b, WIRE_EDGE, 0.0)));
+        }
         if f.grid.is_some() {
             list.push((P::Grid, (0, 0), What::Grid, u([0.0; 4], 0.0, &Mat4::IDENTITY)));
         }
@@ -911,6 +921,11 @@ impl ViewportGpu {
                 c[3] = 0.06;
                 list.push((P::Blend, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, c, 0.0)));
             }
+        }
+        for b in ghosts.iter().copied() {
+            let mut c = b.color;
+            c[3] = 0.06;
+            list.push((P::Blend, key(&b.mesh, b.colors.as_ref()), What::All, ub(b, c, 0.0)));
         }
         for h in &f.highlights {
             if let Some((hk, g)) = self.any_key(&h.mesh).and_then(|k| Some((k, self.meshes.get(&k)?))) {

@@ -759,10 +759,17 @@ fn section_view_and_sketch_slice() {
         let app = h.state();
         let m = app.model.as_ref().unwrap();
         assert!(!m.caps.is_empty(), "cut faces");
+        assert!(!m.cut_away.is_empty(), "the cut-away half is kept, to draw as a wireframe");
+        assert!(m.cut_away.keys().all(|id| m.bodies.iter().any(|b| b.body.id == *id)));
         assert!(app.section_cut().is_some());
     }
     let img = save(&mut h, "section_view");
     assert_viewport_rendered(&img, h.state().viewport_rect.shrink(60.0));
+    // shaded without edges: only the cut-away half has lines
+    h.state_mut().display = easycad_app::viewport::gpu::DisplayMode::Shaded;
+    h.run_steps(4);
+    save(&mut h, "section_view_shaded");
+    h.state_mut().display = easycad_app::viewport::gpu::DisplayMode::ShadedEdges;
     h.state_mut().toggle_section();
     settle(&mut h);
     assert!(h.state().model.as_ref().unwrap().caps.is_empty());

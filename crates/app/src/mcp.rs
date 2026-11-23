@@ -2010,6 +2010,8 @@ impl HighlightReq {
 struct Scene {
     bodies: Vec<MeshedBody>,
     caps: Vec<(Arc<easycad_model::occt::Mesh>, glam::DAffine3)>,
+    /// The whole meshes of the bodies a section cut, drawn as a wireframe.
+    cut_away: Vec<Arc<easycad_model::occt::Mesh>>,
 }
 
 enum Phase {
@@ -2241,16 +2243,19 @@ impl Shot {
                     let v = app.mcp.as_ref().map(|b| b.view.clone()).unwrap_or_default();
                     let visible: Vec<MeshedBody> = m.bodies.iter().filter(|b| !v.hidden.contains(&b.body.id)).cloned().collect();
                     match v.section {
-                        None => return Ok(self.render(app, Scene { bodies: visible, caps: Vec::new() })),
+                        None => return Ok(self.render(app, Scene { bodies: visible, caps: Vec::new(), cut_away: Vec::new() })),
                         Some(s) => {
                             let (o, n) = s.plane();
                             let q = app.settings.mesh.quality();
                             let (tx, rx) = channel();
                             std::thread::spawn(move || {
-                                let mut sc = Scene { bodies: Vec::new(), caps: Vec::new() };
+                                let mut sc = Scene { bodies: Vec::new(), caps: Vec::new(), cut_away: Vec::new() };
                                 for b in visible {
                                     match crate::worker::cut_body(&b.body, o, n, q) {
                                         Some((mb, cap)) => {
+                                            if let Some(whole) = b.mesh.clone().filter(|_| !crate::worker::kept_whole(&mb, &b)) {
+                                                sc.cut_away.push(whole);
+                                            }
                                             sc.bodies.push(mb);
                                             if let Some(c) = cap {
                                                 sc.caps.push((c, glam::DAffine3::from_translation(n * 0.05)));
@@ -2439,7 +2444,7 @@ impl Shot {
         };
         text += &format!(", document revision {}", app.doc.data.revision);
         if let Some(s) = view.section {
-            text += &format!("\nsection: plane {}={:.2}, keeping the {} side (cut faces tinted orange)", ["x", "y", "z"][s.axis], s.pos, if s.keep_above { "upper" } else { "lower" });
+            text += &format!("\nsection: plane {}={:.2}, keeping the {} side (cut faces tinted orange, the cut-away side drawn as a wireframe)", ["x", "y", "z"][s.axis], s.pos, if s.keep_above { "upper" } else { "lower" });
         }
         for note in notes {
             text += &format!("\n{note}");
@@ -2473,10 +2478,14 @@ impl Shot {
                 color[3] = color[3].min(a);
                 translucent = true;
             }
-            bodies.push(DrawBody { mesh: mesh.clone(), color, translucent, colors: b.colors.clone(), model: glam::Mat4::IDENTITY });
+            bodies.push(DrawBody { mesh: mesh.clone(), color, translucent, colors: b.colors.clone(), model: glam::Mat4::IDENTITY, edges_only: false });
         }
         for (cap, xf) in &scene.caps {
-            bodies.push(DrawBody { mesh: cap.clone(), color: srgba(crate::theme::ORANGE_SOFT), translucent: false, colors: None, model: crate::ui_viewport::to_mat4(*xf) });
+            bodies.push(DrawBody { mesh: cap.clone(), color: srgba(crate::theme::ORANGE_SOFT), translucent: false, colors: None, model: crate::ui_viewport::to_mat4(*xf), edges_only: false });
+        }
+        for whole in &scene.cut_away {
+            let color = crate::ui_viewport::body_color(false, false);
+            bodies.push(DrawBody { mesh: whole.clone(), color, translucent: false, colors: None, model: glam::Mat4::IDENTITY, edges_only: true });
         }
         let mesh_of = |id: BodyId| scene.bodies.iter().find(|b| b.body.id == id).and_then(|b| b.mesh.clone());
         let mut highlights = Vec::new();
