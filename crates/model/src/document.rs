@@ -427,6 +427,10 @@ impl Document {
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|s| s.label.as_str())
     }
+    /// Undo step labels, most recent first.
+    pub fn undo_labels(&self) -> impl Iterator<Item = &str> {
+        self.undo.iter().rev().map(|s| s.label.as_str())
+    }
 
     /// Undo the last edit; returns its label.
     pub fn undo(&mut self) -> Option<String> {
@@ -437,6 +441,14 @@ impl Document {
         self.data.revision = rev;
         self.touch();
         Some(s.label)
+    }
+
+    /// Undo the last edit and forget it (no redo step): for an edit that turned out
+    /// wrong and should leave no trace in the history.
+    pub fn discard_last(&mut self) -> Option<String> {
+        let l = self.undo()?;
+        self.redo.pop();
+        Some(l)
     }
 
     pub fn redo(&mut self) -> Option<String> {

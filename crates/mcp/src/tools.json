@@ -1,0 +1,179 @@
+[
+  {
+    "name": "get_document",
+    "description": "Read the open easyCAD document: name, path, revision, unsaved flag, parameters (expression and value), sketches (solve status, DOF, closed regions), features in history order (id, name, type, full definition, regen status and summary), bodies (id, name, bounding box), the undo history and what the app is doing (a dialog or sketch open). `user_changes` lists edits the user made in the app since your last call: read it before every change and build on the user's edits instead of overwriting them. Feature definitions use the same JSON as add_feature / edit_feature.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "include_definitions": {"type": "boolean", "description": "Include each feature's full `kind` JSON (default true). Set false for a short overview of long histories."}
+      }
+    }
+  },
+  {
+    "name": "set_param",
+    "description": "Create or change user parameters (mm and degrees; expressions like \"wall*2 + 0.2\", \"1/8 in\", \"max(3, w/10)\"). Several parameters in one call are one undo step. Waits for regeneration and returns every feature's status, so you see what the change broke. Prefer named parameters over literals in sketches and features: the user can then tweak the design from the Parameters panel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "description": "Parameter name (letters, digits, _; not a unit or function name)."},
+        "expr": {"type": ["string", "number"], "description": "Expression or number."},
+        "comment": {"type": "string", "description": "Optional note shown next to the parameter."},
+        "params": {
+          "type": "array",
+          "description": "Set several at once instead of name/expr.",
+          "items": {"type": "object", "properties": {"name": {"type": "string"}, "expr": {"type": ["string", "number"]}, "comment": {"type": "string"}}, "required": ["name", "expr"]}
+        },
+        "delete": {"type": "array", "items": {"type": "string"}, "description": "Parameter names to remove (refused while anything still uses them)."},
+        "expected_revision": {"type": "integer", "description": "Refuse if the document revision moved (the user edited since you looked)."}
+      }
+    }
+  },
+  {
+    "name": "add_sketch",
+    "description": "Add (or replace) a constrained 2D sketch and solve it. Elements: `rect` ({center,width,height} fully constrained, or {min,max} with only H/V constraints), `rounded_rect` ({center,width,height,radius}, fully constrained), `circle` ({center, radius|diameter}, centre fixed), `line` ({from,to}), `arc` ({center,start,end}, counter-clockwise), `point` ({at}). Coordinates are numbers in plane units (mm); sizes (width, height, radius, diameter, constraint values) are expressions such as \"width\" or \"wall*2\". Give elements an `id` to reference them in constraints: rect lines `<id>.bottom/.right/.top/.left`, corners `<id>.bl/.br/.tr/.tl`, centre `<id>.center`; rounded_rect lines plus arcs `<id>.arc_br/.arc_tr/.arc_tl/.arc_bl`; any line's ends `<id>.a/.b`; an arc's `<id>.center/.start/.end`; a circle's `<id>.center`; raw indices `#p3` / `#e2`. Constraint types: coincident{a,b}, horizontal{entity}, vertical{entity}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, point_on_line{point,entity}, point_on_circle{point,entity}, midpoint{point,entity}, symmetric{a,b,line}, fix{point,at?}, distance{a,b,value}, distance_x{a,b,value}, distance_y{a,b,value}, point_line_distance{point,entity,value}, length{entity,value}, radius{entity,value}, diameter{entity,value}, angle{a,b,value}. Returns the sketch id, the solve report (status, DOF, residual), the closed regions found and the names you can reference. A sketch that does not converge or conflicts is not added.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "plane": {
+          "description": "\"XY\" (normal +Z), \"XZ\" (front plane, normal -Y, x along +X), \"YZ\" (normal +X, x along +Y), or {origin:[x,y,z], x_dir:[..], normal:[..]}.",
+          "oneOf": [{"type": "string", "enum": ["XY", "XZ", "YZ"]}, {"type": "object"}]
+        },
+        "offset": {"type": "number", "description": "Move the plane along its normal (mm)."},
+        "elements": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string", "enum": ["rect", "rounded_rect", "circle", "line", "arc", "point"]}, "id": {"type": "string"}, "construction": {"type": "boolean"}}, "required": ["type"]}},
+        "constraints": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]}},
+        "replace": {"type": "integer", "description": "Replace the sketch with this id (features using it follow)."},
+        "expected_revision": {"type": "integer"}
+      },
+      "required": ["name", "plane", "elements"]
+    }
+  },
+  {
+    "name": "add_feature",
+    "description": "Add a feature at the end of the history (or at the rollback marker) and regenerate. `kind` is easyCAD's feature JSON, one key naming the type. Examples:\n{\"Extrude\":{\"sketch\":1,\"profiles\":\"All\",\"distance\":\"height\",\"op\":\"NewBody\"}}  (op: NewBody|Join|Cut|Intersect; optional symmetric, reverse, draft_deg, target {feature,index})\n{\"Revolve\":{\"sketch\":2,\"profiles\":\"All\",\"axis\":{\"origin\":[0,0,0],\"dir\":[0,0,1]},\"angle_deg\":\"360\",\"op\":\"Join\"}}\n{\"Shell\":{\"open_faces\":[{\"Extreme\":{\"normal\":[0,0,1],\"which\":\"Max\"}}],\"thickness\":\"wall\"}}\n{\"Fillet\":{\"edges\":[{\"Parallel\":{\"dir\":[0,0,1]}}],\"radius\":\"corner_r\",\"auto_reduce\":false}}\n{\"Chamfer\":{\"edges\":[{\"OfFace\":{\"Extreme\":{\"normal\":[0,0,-1],\"which\":\"Max\"}}}],\"distance\":\"0.5\"}}\n{\"Draft\":{\"faces\":[...],\"neutral\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"pull\":[0,0,1],\"angle_deg\":\"1\"}}\n{\"ScrewBoss\":{\"plane\":{...},\"points\":[[10,10],[-10,10]],\"od\":\"6\",\"hole_dia\":\"2.5\",\"height\":\"8\"}}\nAlso Rib, Pattern, Mirror, Split, PartingJoint, InsertPart (see the easycad skill). Dimensions are expressions (strings) or numbers. Address faces and edges with selectors, never indices: faces {\"Extreme\":{normal,which:Max|Min}} (the outermost planar face facing `normal`), {\"AllWithNormal\":{normal}}, {\"Cylinders\":{radius,axis}}, {\"Hint\":{centroid,normal,kind}}; edges {\"OfFace\":<face>}, {\"Between\":[<face>,<face>]}, {\"Parallel\":{dir}}, {\"Circles\":{radius,near}}, {\"Hint\":{midpoint,tangent,kind}}. measure and get_selection return ready-made selectors. Omitted `body`/`target` means the last solid body. The reply has this feature's regen status (fillets: the summary with each failed edge's largest workable size) and the status of every feature after it. A feature that ends in error is taken back out (no undo step left behind) unless keep_on_error is true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "description": "Feature name shown in the history, e.g. \"Bin body\"."},
+        "kind": {"type": "object", "description": "Feature definition, e.g. {\"Extrude\":{...}}."},
+        "position": {"type": "integer", "description": "Insert before this history index instead of at the end."},
+        "keep_on_error": {"type": "boolean", "description": "Keep the feature even if it fails (default false)."},
+        "expected_revision": {"type": "integer"}
+      },
+      "required": ["name", "kind"]
+    }
+  },
+  {
+    "name": "edit_feature",
+    "description": "Change a feature by id: a new `kind` definition (same JSON as add_feature; get the current one from get_document), a new `name`, or `suppressed`. One undo step. Regenerates and reports. If the edit makes a previously working feature fail it is reverted unless keep_on_error is true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "integer"},
+        "name": {"type": "string"},
+        "kind": {"type": "object"},
+        "suppressed": {"type": "boolean"},
+        "keep_on_error": {"type": "boolean"},
+        "expected_revision": {"type": "integer"}
+      },
+      "required": ["id"]
+    }
+  },
+  {
+    "name": "delete_feature",
+    "description": "Delete a feature by id (one undo step). Features that depended on its bodies will report errors: the reply lists them.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"id": {"type": "integer"}, "expected_revision": {"type": "integer"}},
+      "required": ["id"]
+    }
+  },
+  {
+    "name": "regenerate",
+    "description": "Wait for the model to finish regenerating and return every feature's report: status (ok / warning / error / unresolved reference / suppressed), fillet and chamfer summaries (edges applied, reduced, failed with their largest workable size), sketch solve reports, timing, and the resulting bodies.",
+    "inputSchema": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "measure",
+    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "body": {"description": "Body name or {feature,index}; omit for all bodies.", "oneOf": [{"type": "string"}, {"type": "object"}]},
+        "faces": {"type": "boolean", "description": "List faces (default false)."},
+        "edges": {"type": "boolean", "description": "List edges (default false)."},
+        "limit": {"type": "integer", "description": "At most this many faces / edges per body (default 80)."}
+      }
+    }
+  },
+  {
+    "name": "get_selection",
+    "description": "What the user has selected in the viewport right now (bodies, faces, edges), with geometry, what made each face, and selectors you can use directly. Use it when the user says \"this face\" or \"these edges\".",
+    "inputSchema": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "interference",
+    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"include_reference": {"type": "boolean", "description": "Include reference bodies such as imported PCBs and library parts (default true)."}}
+    }
+  },
+  {
+    "name": "screenshot",
+    "description": "A PNG of the 3D viewport, as the user sees it, after regeneration finishes. `view` turns the camera like the view cube (the user sees it move): \"iso\", \"front\", \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges); \"current\" keeps the user's view. Use it to check each significant step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "view": {"type": "string", "description": "Named view (default \"current\")."},
+        "fit": {"type": "boolean", "description": "Zoom to fit the model (default true when a view is given)."},
+        "max_width": {"type": "integer", "description": "Downscale to at most this many pixels wide (default 1024)."}
+      }
+    }
+  },
+  {
+    "name": "export",
+    "description": "Export the solid bodies to a file: STL or 3MF (printing; the active process profile's compensations apply) or STEP. The format follows the extension unless given. The path must be absolute and its folder must exist.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "format": {"type": "string", "enum": ["stl", "3mf", "step"]},
+        "include_reference": {"type": "boolean", "description": "Include reference bodies (STEP only; default false)."},
+        "orient_to_plate": {"type": "boolean", "description": "Apply each body's build orientation (STL/3MF; default true)."}
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "open_document",
+    "description": "Open a .ecad document folder in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"path": {"type": "string"}, "discard_unsaved": {"type": "boolean"}},
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "new_document",
+    "description": "Start a new empty document in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "discard_unsaved": {"type": "boolean"}},
+      "required": ["name"]
+    }
+  },
+  {
+    "name": "save_document",
+    "description": "Save the document: to its current .ecad folder, or to `path` (an absolute path; .ecad is added).",
+    "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+  },
+  {
+    "name": "undo",
+    "description": "Undo the last step. By default only your own steps (labelled \"Claude: ...\") are undone; anything else is refused so you never undo the user's work by accident.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"allow_user_steps": {"type": "boolean", "description": "Also undo a step the user made (only when the user asked)."}}
+    }
+  }
+]

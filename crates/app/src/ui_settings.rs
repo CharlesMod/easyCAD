@@ -22,6 +22,7 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
     let mut s = app.settings.clone();
     let mut inch = crate::units::inch();
     let mut cloud_act = None;
+    let mut mcp_on = app.mcp.is_some();
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
@@ -98,6 +99,18 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
             };
             ui.add(egui::Label::new(widgets::muted(&note)).wrap());
             ui.add_space(6.0);
+            theme::section_label(ui, "Claude bridge");
+            ui.checkbox(&mut mcp_on, "Let Claude model in this window (MCP, this computer only)");
+            let note = match &app.mcp {
+                Some(b) => format!(
+                    "Listening on {} · {} calls so far. Claude's steps show up live and undo one at a time.",
+                    b.url().unwrap_or_else(|| "(not listening)".into()),
+                    b.calls
+                ),
+                None => "Claude Code connects through the easycad plugin (tools/claude-plugin, docs/MCP.md). Also: easycad --mcp.".into(),
+            };
+            ui.add(egui::Label::new(widgets::muted(&note)).wrap());
+            ui.add_space(6.0);
             cloud_act = drive_section(app, ui);
         });
     match cloud_act {
@@ -114,6 +127,11 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
         }
         Some(CloudAct::Dismiss(_)) | None => {}
     }
+    if mcp_on != app.mcp.is_some() {
+        let port = app.settings.mcp_port.unwrap_or(easycad_mcp::DEFAULT_PORT);
+        app.set_mcp(ui.ctx(), mcp_on, port);
+        s.mcp = app.mcp.is_some();
+    }
     if inch != crate::units::inch() {
         crate::units::set_inch(inch);
         s.inch = inch;
@@ -124,6 +142,7 @@ fn settings_window(app: &mut EasyCadApp, ui: &mut Ui) {
         || s.default_profile != app.settings.default_profile
         || s.autosave_min != app.settings.autosave_min
         || s.inch != app.settings.inch
+        || s.mcp != app.settings.mcp
     {
         let remesh = s.mesh != app.settings.mesh;
         app.settings = s;

@@ -31,6 +31,10 @@ Fully offline.
 - **2D drawings:** views by cube face, iso corner or any rotation; associative dimensions,
   notes, balloons, BOM table and title block; PDF / DXF / SVG.
 - **Export:** STEP (parts or assembly), STL, 3MF.
+- **Model with Claude:** `easycad --mcp` (or Settings → Claude bridge) lets Claude Code
+  drive the open window over MCP. You watch every step appear, edit alongside, and undo
+  Claude's steps one at a time. Install the plugin in `tools/claude-plugin`; see
+  [docs/MCP.md](docs/MCP.md).
 - **Selection that works:** a pick stack under the cursor (Tab cycles hidden faces, no
   press-and-hold), a full view cube (26 regions, 15° steps, home), and Fusion navigation.
 
@@ -51,8 +55,10 @@ Release zips for macOS, Linux and Windows: `scripts/build-release.sh` (run on a 
 | `crates/occt` | cxx bridge to a narrow C++ shim over OpenCascade 7.8 |
 | `crates/model` | documents, params/expressions, sketch solver, features, regen cache, joints, process profiles, parts library, assemblies, drawings, import/export |
 | `crates/app` | the desktop app (`easycad` binary) plus snapshot and click-through (`e2e/`) tests |
+| `crates/mcp` | the Claude bridge protocol: MCP tool schemas, the loopback HTTP server, the `easycad-mcp` stdio shim |
 | `crates/sync` | Google Drive sync: OAuth (PKCE, keychain), Drive v3 client, local-first three-way sync engine |
-| `docs/` | `ENGINE.md` (engine API), `GUI.md`, `GUI_NEEDS.md`, `BUILDING.md` |
+| `docs/` | `ENGINE.md` (engine API), `GUI.md`, `GUI_NEEDS.md`, `BUILDING.md`, `MCP.md` (Claude bridge) |
+| `tools/claude-plugin` | Claude Code plugin marketplace with the `easycad` plugin (MCP config + driving skill) |
 
 Documents are `.ecad` folders (`doc.json` plus content-addressed `blobs/`). Older `.cwk`
 folders still open.

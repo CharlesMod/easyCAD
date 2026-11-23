@@ -149,6 +149,8 @@ pub struct EasyCadApp {
     pub cloud: crate::cloud::Cloud,
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
     pub show_perf: bool,
+    /// The Claude bridge (MCP server), when on.
+    pub mcp: Option<crate::mcp::Bridge>,
     pub bench_start: Option<f64>,
 }
 
@@ -248,6 +250,7 @@ impl EasyCadApp {
             overhang: Default::default(),
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
+            mcp: None,
             bench_start: None,
         }
     }
@@ -1097,6 +1100,7 @@ impl EasyCadApp {
         self.bench_pan(ui.ctx());
         crate::viewport::gpu::set_hidden(!crate::widgets::window_visible(ui.ctx()));
         self.poll_worker();
+        crate::mcp::poll(self, &ui.ctx().clone());
         for n in self.cloud.poll(self.path.as_deref()) {
             match n {
                 crate::cloud::Notice::Info(t) => self.toast(t),
@@ -1402,6 +1406,9 @@ impl EasyCadApp {
 
     /// Clean exit: unsaved work keeps a last recovery copy, saved work leaves none.
     pub fn on_close(&mut self) {
+        if let Some(b) = self.mcp.as_mut() {
+            b.stop();
+        }
         self.autosave.flush();
         let dirty = self.is_dirty() || (self.path.is_none() && !crate::ui_welcome::is_empty(self));
         if dirty && self.settings.autosave_min > 0 {

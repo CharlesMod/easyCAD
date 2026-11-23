@@ -957,6 +957,12 @@ verified on load.
 
 ## Changelog for GUI
 
+- **Claude bridge (MCP).** See `docs/MCP.md`. Model additions:
+  - `Expr` also deserializes from a JSON number (`20` → `"20"`), so hand-written and
+    generated feature JSON can use plain numbers. It still serializes as a string.
+  - `Document::undo_labels()` (most recent first) and `Document::discard_last()`
+    (undo and drop the redo step, for an edit that turned out wrong).
+
 - **Kernel batch (todo-kernel).**
   - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to
     `Cosmetic`). Struct literals need `threads: Default::default()`; I added it in

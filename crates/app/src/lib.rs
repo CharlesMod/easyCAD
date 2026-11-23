@@ -7,6 +7,7 @@ pub mod cloud;
 pub mod dialogs;
 pub mod e2e_state;
 pub mod files;
+pub mod mcp;
 pub mod pickstack;
 pub mod profiler;
 pub mod recovery;

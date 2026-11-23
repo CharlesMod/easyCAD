@@ -27,6 +27,12 @@ pub struct Settings {
     /// Minutes between recovery copies; 0 = off.
     #[serde(default = "two")]
     pub autosave_min: u32,
+    /// Run the Claude bridge (MCP server on 127.0.0.1) at startup.
+    #[serde(default)]
+    pub mcp: bool,
+    /// Its port (`None` = the default, 47311).
+    #[serde(default)]
+    pub mcp_port: Option<u16>,
 }
 
 fn two() -> u32 {

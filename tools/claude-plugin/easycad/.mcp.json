@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "easycad": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/easycad-mcp-launch"
+    }
+  }
+}

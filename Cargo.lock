@@ -1166,6 +1166,7 @@ name = "easycad"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "easycad-mcp",
  "easycad-model",
  "easycad-sync",
  "eframe",
@@ -1179,6 +1180,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "easycad-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
