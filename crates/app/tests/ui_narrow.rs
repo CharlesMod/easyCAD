@@ -13,6 +13,16 @@ use egui_kittest::Harness;
 
 const H: f32 = 900.0;
 
+/// The tests in this file run one at a time: each points the app at its own
+/// settings folder through XDG_CONFIG_HOME / XDG_DATA_HOME, which the whole
+/// process shares, and the panes remember the side opened last process-wide.
+/// Run in parallel, one test's app loaded another's settings (both panes closed).
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn harness(w: f32, config: &std::path::Path) -> Harness<'static, EasyCadApp> {
     std::env::set_var("XDG_CONFIG_HOME", config);
     std::env::set_var("XDG_DATA_HOME", config.join("data"));
@@ -120,6 +130,7 @@ fn at_width(w: f32, panes_open: bool) {
 
 #[test]
 fn sketch_at_480() {
+    let _serial = serial();
     let cfg = config("sketch");
     let mut h = harness(480.0, &cfg);
     h.key_press(egui::Key::S);
@@ -136,6 +147,7 @@ fn sketch_at_480() {
 /// At 800 only one pane shows at a time: the one opened last.
 #[test]
 fn one_pane_at_a_time_when_narrow() {
+    let _serial = serial();
     let cfg = config("onepane");
     let mut h = harness(800.0, &cfg);
     let r = h.state().viewport_rect;
@@ -156,6 +168,7 @@ fn one_pane_at_a_time_when_narrow() {
 
 #[test]
 fn dialog_at_480() {
+    let _serial = serial();
     let cfg = config("dialog");
     let mut h = harness(480.0, &cfg);
     h.key_press(egui::Key::E);
@@ -177,17 +190,20 @@ fn dialog_at_480() {
 
 #[test]
 fn toolbars_at_480() {
+    let _serial = serial();
     at_width(480.0, false);
     at_width(480.0, true);
 }
 
 #[test]
 fn toolbars_at_800() {
+    let _serial = serial();
     at_width(800.0, true);
     at_width(800.0, false);
 }
 
 #[test]
 fn toolbars_at_1440() {
+    let _serial = serial();
     at_width(1440.0, true);
 }
