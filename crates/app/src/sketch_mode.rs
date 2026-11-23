@@ -968,19 +968,24 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                     .size(11.0)
                     .color(theme::TEXT_MUTED),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("Pan MMB · Zoom wheel · F fit · Ctrl+Z undo in sketch")
-                            .size(11.0)
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
+                if ui.ctx().content_rect().width() >= 860.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new("Pan MMB · Zoom wheel · F fit · Ctrl+Z undo in sketch")
+                                .size(11.0)
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
+                }
             });
         });
     // side panes fold to rails like the model screen's (crate::panes)
     use crate::panes::{self, Pane, Side};
-    let (left_was, right_was) =
-        (!app.settings.left_pane_collapsed, !app.settings.right_pane_collapsed);
+    let (left_was, right_was) = panes::fit(
+        ui.ctx(),
+        true,
+        (!app.settings.left_pane_collapsed, !app.settings.right_pane_collapsed),
+    );
     let (mut left, mut right) = (left_was, right_was);
     panes::show(
         ui,

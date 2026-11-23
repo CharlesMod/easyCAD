@@ -63,6 +63,10 @@ pub fn show(ui: &mut Ui, p: Pane, open: &mut bool, add: impl FnOnce(&mut Ui)) {
         .frame(p.frame);
     let (side, name) = (p.side, p.name);
     let clicked = egui::Panel::show_switched(ui, open, rail, full, |ui, expanded| {
+        // fill the panel: egui reserves the contents' width while it slides, and
+        // contents narrower than the panel (the rail's, shown in the sliding
+        // panel past halfway) would let the viewport's edge lag the panel's
+        ui.set_min_width(ui.max_rect().width());
         if expanded {
             add(ui);
             false
@@ -143,9 +147,71 @@ pub fn right_open(app: &EasyCadApp) -> bool {
     !app.settings.right_pane_collapsed
 }
 
+/// Below this window width both panes open would leave the viewport too little
+/// room: only one shows (the one opened last), the other keeps its rail.
+pub const BOTH_PANES_MIN_W: f32 = 900.0;
+
+/// Which side the user opened last (true = left): the one that shows when the
+/// window is too narrow for both.
+static LEFT_LAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// The same for the sketch screen, where the palette (right) comes first.
+static SK_LEFT_LAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn last(sketch: bool) -> &'static std::sync::atomic::AtomicBool {
+    if sketch {
+        &SK_LEFT_LAST
+    } else {
+        &LEFT_LAST
+    }
+}
+
+/// The panes actually shown, from the ones wanted open (`left_open` /
+/// `right_open`, or the sketch screen's) and the window's width.
+/// `sketch`: the sketch screen's panes (else the model screen's).
+pub fn fit(ctx: &egui::Context, sketch: bool, (l, r): (bool, bool)) -> (bool, bool) {
+    if l && r && ctx.content_rect().width() < BOTH_PANES_MIN_W {
+        if last(sketch).load(std::sync::atomic::Ordering::Relaxed) {
+            (true, false)
+        } else {
+            (false, true)
+        }
+    } else {
+        (l, r)
+    }
+}
+
+/// The user opened Parameters during this dialog: it stays, narrow or not.
+static RIGHT_FOR_DIALOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The model screen's panes as shown this frame.
+pub fn shown(app: &EasyCadApp, ctx: &egui::Context) -> (bool, bool) {
+    let (l, mut r) = fit(ctx, false, (left_open(app), right_open(app)));
+    // a feature dialog's card needs the viewport's width: in a narrow window
+    // Parameters folds for the dialog too, like the browser does
+    if app.dialog.is_none() {
+        RIGHT_FOR_DIALOG.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if r && app.dialog.is_some()
+        && app.mode.is_model()
+        && !RIGHT_FOR_DIALOG.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let left = if l { 250.0 } else { RAIL };
+        if ctx.content_rect().width() - left - 300.0 < app.dialog_card_w.max(300.0) + 40.0 {
+            r = false;
+        }
+    }
+    (l, r)
+}
+
 /// Open or close a side: the user's choice, saved for the next start. Closing
 /// the browser during a dialog only folds it for that dialog, as before.
 pub fn set(app: &mut EasyCadApp, side: Side, open: bool) {
+    if open {
+        last(!app.mode.is_model()).store(side == Side::Left, std::sync::atomic::Ordering::Relaxed);
+        if side == Side::Right && app.dialog.is_some() {
+            RIGHT_FOR_DIALOG.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let folding_for_dialog =
         side == Side::Left && !open && app.dialog.is_some() && app.mode.is_model();
     match side {
@@ -179,7 +245,11 @@ pub fn shortcuts(app: &mut EasyCadApp, ctx: &egui::Context) {
         return;
     }
     let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
-    let (l, r) = (left_open(app), right_open(app));
+    let (l, r) = if app.mode.is_model() {
+        shown(app, ctx)
+    } else {
+        fit(ctx, true, (!app.settings.left_pane_collapsed, !app.settings.right_pane_collapsed))
+    };
     if pressed(Key::OpenBracket) {
         set(app, Side::Left, !l);
     }
