@@ -43,7 +43,10 @@ booleans run in non-destructive mode.
   `chamfer_raw` make a single attempt.
 - `shell(open_faces, thickness, outward)` (with no open faces: a closed hollow solid,
   i.e. the outer skin plus an internal void shell, or an error naming the failed
-  offset) and
+  offset); `shell_report` also returns the `ShellStrategy` used (`is_fallback()`,
+  `describe()`), and `shell_blockers(open, t)` lists `ShellBlocker::{NarrowFace,
+  Crease}` (faces narrower than the wall, creases under 8°), which a failed shell
+  names in its error. See Robustness. And
   `draft(faces, pull, deg, &neutral_frame)`.
 - Transforms: `translated`, `rotated`, `mirrored`, `linear_pattern`,
   `circular_pattern`, `split(origin, normal) -> (below, above)`.
@@ -596,6 +599,55 @@ The idle app uses no CPU (0.0 s over 20 s with the sample open).
     more with the failed chains first and keeps the run that applied more edges
     (fixed 6 of 22 order-dependent edges; the rest interact either way).
 
+- **Shell ladder** (`thickSolidLadder`, shim). A drafted body with a collar joined
+  on top (the 1:18 trash cart, built through the Claude bridge) failed with "shell
+  failed (thickness larger than a fillet radius or feature?)". Root cause: the
+  collar was sketched at the lower body's top outline rounded to two decimals
+  (37.82 / r 10.87 against the drafted top's 37.788 / r 10.864), so the fuse left a
+  0.016 mm ledge ring at the joint. `BRepOffsetAPI_MakeThickSolid` by default only
+  intersects offset faces that share an edge; when a face is narrower than the wall,
+  the offsets of the faces on either side of it cross each other, the narrow face's
+  own offset is left dangling, and the offset never closes. Any step or inset
+  narrower than the wall did it (0.016–0.5 mm under a 1.2 mm wall; 1.5 mm was fine),
+  as did an overlapping collar. A second, separate failure: a near-tangent crease
+  (the 2.083° wall meeting a straight or −5° collar at exactly the same outline),
+  where the Arc join's pipe is a sliver the 1e-3 tolerance cannot trim. Shell now
+  tries, in order, and keeps the first result that passes the checks:
+
+  | step | `ShellStrategy` | fixes |
+  |---|---|---|
+  | 0 | `Default` (Arc joins, adjacent intersections, 1e-3) | everything that worked before |
+  | 1 | `CompleteIntersection` (every pair of offset faces intersected) | steps and insets narrower than the wall |
+  | 2 | `LooseTolerance` (+ 0.01 mm) | near-tangent creases (2° bend) |
+  | 3 | `Healed` (ShapeFix + UnifySameDomain first, then 2) | split / badly joined faces |
+  | 4 | `SharpJoins` (Intersection joins, 0.01 mm) | creases every Arc mode throws on (2.9°) |
+  | 5 | `HealedSharp` | both |
+  | 6 | `OffsetAndCut` (inward, flat open faces): body − inner 3D offset − a punch under each open face | MakeThickSolid giving the body back unchanged |
+
+  Every candidate must be valid, keep the input's solid count, have a wall volume
+  within 0.5–1.6 × (area − open area) × t, and be really open: a point half a wall
+  under each open face must be outside it. The checks exposed an old silent failure:
+  a side face opened under a top fillet tangent to it came back as the unchanged
+  body in every MakeThickSolid mode, and was reported `Ok` (the test
+  `selector_threshold_reports_unresolved_after_drastic_edit` passed on it). Step 6
+  hollows it now. The punch is the open face's prism, t deep, clipped to the cavity
+  moved t toward the face, so the side walls keep their full height. A healed retry once came back with the
+  volume about right but the collar left solid, which the last check rejects. The
+  closed shell's open-and-close fallback uses the same ladder (`OpenAndClose(k)`),
+  and `offset_solid` retries with complete intersection, then 0.01 mm.
+  Fallbacks cost 20–120 ms on the cart (the default path is unchanged, ~12 ms). The
+  model puts the strategy in `FeatureReport::note` ("shell: complete-intersection
+  offset (the default offset failed)"), which is not a warning because the result
+  is right. When every step fails, the error lists up to four likely blockers by
+  feature and role, with a `FaceSelector::Hint` for each, and says what to change
+  (`"Collar · start face" {"Hint":…} is only 0.300 mm wide (the wall is 2 mm) …
+  make the outlines match exactly, step out by more than the wall, or use a thinner
+  wall`). Tests: `crates/occt/tests/shell_draft.rs` (the repro, 21 collar variants:
+  exact / ledge 0.1, 0.5, 1.5 / inset 0.016, 0.5 / overlap × collar draft −20.1, −5,
+  0; a boss flush with a drafted wall; a side pocket; collar + pocket; the error),
+  and `crates/model/tests/shell_robust.rs` (the cart's feature tree, the note, the
+  named blockers).
+
 ## Concurrency contract
 
 Everything in `occt` and `easycad-model` may run on any number of threads at once.
@@ -894,8 +946,13 @@ verified on load.
   normal/tangent, and of the same surface/curve type. Otherwise the feature reports
   `FeatureStatus::Unresolved`.
 - OCCT's limits apply. Shell fails when an inward thickness exceeds a concave
-  fillet radius, and draft on faces adjacent to fillets can fail. Both return
-  `FeatureStatus::Error`; nothing panics.
+  fillet radius, or when a feature is thinner than the wall in the offset direction
+  (a 1 mm collar under a 2 mm wall). Steps and creases that used to fail are handled
+  by the shell ladder (Robustness), and a shell that still fails names its likely
+  blockers. Draft on faces adjacent to fillets can fail. All return
+  `FeatureStatus::Error`; nothing panics. The offset-and-cut fallback needs flat
+  open faces and an inner 3D offset that works (it fails on the same narrow steps
+  as the thick solid, so it only helps where MakeThickSolid misbehaves).
 - Ribs use `extent: RibExtent::{Height, ToBody}`. `ToBody` grows the rib along its
   direction and trims it where it first meets the body; with draft it is rebuilt to
   that height. A rib that never meets the body, or starts inside it, is an error.
@@ -956,6 +1013,17 @@ verified on load.
   rolling ball (three edges) or a filling patch (more); there is no setback option.
 
 ## Changelog for GUI
+
+- **Shell robustness (trash cart).**
+  - New `FeatureReport.note: Option<String>` (serde-defaulted): how a feature was
+    built when a fallback was needed, e.g. "shell: complete-intersection offset (the
+    default offset failed)". Status stays `Ok`. The GUI can show it as an info line
+    and the Claude bridge returns it with the report. `FeatureReport { .. }` literals
+    need `note: None` (only `regen.rs` builds them).
+  - A failed Shell's `FeatureStatus::Error` now lists likely blockers, each with
+    its face label and a `FaceSelector::Hint` in JSON, plus what to change.
+  - occt: `Shape::shell_report`, `Shape::shell_blockers`, `ShellStrategy`,
+    `ShellBlocker`. `Shape::shell` keeps its signature.
 
 - **Kernel batch (todo-kernel).**
   - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to
