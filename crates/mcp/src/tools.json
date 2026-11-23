@@ -355,6 +355,24 @@
     }
   },
   {
+    "name": "clearance",
+    "description": "The smallest gap between two bodies, or between faces / edges picked by selector, with the closest points (exact, from the kernel). Use it to check that a part clears a wall, how much room is left around a PCB or servo, how far a hole is from an edge, or the wall thickness between two faces of one body (a = {\"body\": \"Box\", \"face\": <outer>}, b = {\"body\": \"Box\", \"face\": <inner>}). Omit `b` to measure from `a` to every other body, nearest first. 0 means touching or overlapping: then use interference for the overlap volume. Reads the whole committed document, like measure.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "description": "A body name (\"Lid\"), a body id {\"feature\": 3, \"index\": 0}, or part of bodies: {\"body\": \"Base\", \"face\": <face selector>} or {\"body\": \"Base\", \"edge\": <edge selector>} (body optional: then every body the selector matches on)."
+        },
+        "b": {
+          "description": "A body name (\"Lid\"), a body id {\"feature\": 3, \"index\": 0}, or part of bodies: {\"body\": \"Base\", \"face\": <face selector>} or {\"body\": \"Base\", \"edge\": <edge selector>} (body optional: then every body the selector matches on)."
+        }
+      },
+      "required": [
+        "a"
+      ]
+    }
+  },
+  {
     "name": "screenshot",
     "description": "A PNG of the model, rendered offscreen from your own view. It is separate from the user's window: their camera, hidden bodies, section, display mode, selection or open sketch never change your picture, and your calls never move their view. Your view (camera, hidden bodies, section, display) is kept from call to call; every reply shows it, and view_state resets it. `view` turns your camera to a view-cube direction and keeps it there: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges). \"current\" (the default) is your last view, and \"user\" copies the user's camera, to see what they are looking at. `views` takes up to 6 directions as one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]) without moving your camera: use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body (this picture only), so you can confirm what a selector picks before you use it in add_feature. `section` cuts the model with a plane (x, y or z, at a coordinate in mm) to show walls, cavities and parts inside, and stays on until `section: null`. A new cut with no view given looks straight at it. `hide`, `show` (or \"all\") and `isolate` take body names and persist. `xray` (this picture only) draws every body see-through. `display` persists: \"shaded\", \"edges\" or \"wireframe\". Uses your view's position (see apply_position); `position` switches it first.",
     "inputSchema": {
@@ -602,6 +620,36 @@
       "required": [
         "position"
       ]
+    }
+  },
+  {
+    "name": "render_sketch",
+    "description": "A flat picture of a sketch in its own plane, drawn for you: fully constrained geometry white, geometry that can still move blue (with the list of free entities and coordinates in the text), construction dashed grey, dimensions amber as expr=value, closed regions shaded and numbered R0.. (what an extrude's profiles use), a mm grid and the sketch axes, entity labels E3 (= #e3). Use it after add_sketch to check shape, dimensions and DOF, or to see the sketch the user is drawing right now: with no `id` it renders the user's open sketch, unfinished draft included (also given an `id` they have open, unless `saved: true`). The text gives the plane mapping (sketch x/y in model coordinates), regions with areas, dimensions with values, and mm per pixel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Sketch id (get_document lists them). Omit for the sketch the user has open."
+        },
+        "saved": {
+          "type": "boolean",
+          "description": "With the id of the sketch the user has open: the version in the document instead of their draft."
+        },
+        "labels": {
+          "type": "string",
+          "enum": [
+            "entities",
+            "all",
+            "none"
+          ],
+          "description": "\"entities\" (default): entity labels and dimensions; \"all\": also point labels P0..; \"none\": geometry only."
+        },
+        "max_width": {
+          "type": "integer",
+          "description": "Image width limit in px (240-1600, default 900)."
+        }
+      }
     }
   },
   {

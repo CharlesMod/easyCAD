@@ -82,9 +82,17 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
   undo history. Edits take an optional `expected_revision` and are refused if the
   document moved.
 - **The user stays in charge.** Edits are refused while the user has a feature
-  dialog, a sketch, the parts library, a drawing or the wizard open, or is editing a
+  dialog, the parts library, a drawing or the wizard open, or is editing a
   component in place. The reply says so, so Claude can ask them. Claude's `undo`
   tool only undoes Claude's own steps.
+- **Sketching side by side.** While the user has a sketch open Claude keeps
+  editing: the sketch session writes back only its own sketch entry when they
+  finish (`SketchSession::commit` through `scope::edit`), so Claude's parameters,
+  sketches and features survive it. The open session gets the new parameter
+  values at once. Refused: `add_sketch` replacing the sketch they have open (their
+  Finish would overwrite it), an `undo` that would delete it, and opening or
+  starting another document. `render_sketch` with no `id` shows their unfinished
+  draft.
 - **Failed features leave no trace.** A new feature, or an edit that breaks a
   working feature, is taken back out with `Document::discard_last` (no undo or redo
   entry). The error carries the full report. `keep_on_error` keeps it.
@@ -104,9 +112,11 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
 | `measure` | per body: bbox, volume, area; optionally faces and edges with what made them and a ready selector (`Extreme` / `Cylinders` / `Between` when unique, else `Hint`) |
 | `get_selection` | the user's viewport selection, same format |
 | `interference` | overlapping body pairs with common volume (parts or assemblies) |
+| `clearance` | smallest gap between bodies, or faces / edges picked by selector (also two faces of one body: wall thickness), with the closest points and the direction (`BRepExtrema_DistShapeShape` via `Shape::min_distance`); without `b`, to every other body, nearest first. 0 = touching, see `interference` |
 | `screenshot` | offscreen PNG from Claude's own view (kept across calls). `view`: view-cube directions (`iso`, `front`, `top front right`, ...), `current` or `user` (the user's camera). `views`: up to 6 as one labelled contact sheet. `highlight`: faces / edges (selectors), `features` (the faces each made) or `bodies` painted orange with the rest faded (`ghost`). `section`: plane cut (`axis`, `at` mm, `keep`) until `null`. `hide` / `show` / `isolate`, `display` (kept), `xray` (this picture), `reset_view`. `max_width` |
 | `view_state` | Claude's view state; `reset` |
 | `list_positions`, `add_position`, `edit_position`, `apply_position` | named positions (animation states): rigid moves of bodies or occurrences, display only. Claude's view and the user's window each show their own; `apply_position` `for: user` snaps the user's window. `interference`, `screenshot` and `measure` take `position` |
+| `render_sketch` | a sketch drawn flat in its plane (CPU, `mcp_sketch.rs`): constrained geometry white, free geometry blue (from the nullspace of the constraint Jacobian, `Sketch::free_geometry`), construction dashed, dimensions as `expr=value`, closed regions shaded and numbered, mm grid, axes, entity labels. Text: DOF and status, free entities with coordinates, regions with areas, dimensions, plane mapping, mm per px. No `id`: the user's open draft |
 | `export` | STL / 3MF / STEP to an absolute path (active process profile, build orientation) |
 | `open_document`, `new_document`, `save_document` | refuse to drop unsaved changes unless `discard_unsaved` |
 | `undo` | Claude's last step only, unless `allow_user_steps` |
@@ -136,3 +146,8 @@ feature JSON gives serde's message plus an example.
   stays pixel-identical, `measure`, `interference` and `get_document` give the
   same answers, and Claude's own hide / section / display / views never change the
   user's camera, section, hidden bodies or display.
+  A fifth renders sketches (a constrained rectangle with its `w` dimension, a
+  loose line in blue with DOF 4), measures clearances (block to floor 3 mm, wall
+  thickness between two faces 2 mm, bad bodies and selectors refused), and edits
+  beside the user's open sketch: parameters reach the session, replacing the open
+  sketch is refused, their draft renders, and finishing it keeps Claude's edit.

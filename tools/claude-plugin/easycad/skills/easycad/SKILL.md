@@ -1,6 +1,6 @@
 ---
 name: easycad
-description: Model parts live in the user's running easyCAD app through the easycad MCP tools (get_document, set_param, add_sketch, add_feature, edit_feature, measure, screenshot, export, ...). Use whenever the user asks to design, model, change, check or export a part, enclosure, bracket, box, case or other 3D-printable geometry in easyCAD, or refers to what is open or selected in easyCAD.
+description: Model parts live in the user's running easyCAD app through the easycad MCP tools (get_document, set_param, add_sketch, add_feature, edit_feature, measure, clearance, screenshot, render_sketch, export, ...). Use whenever the user asks to design, model, change, check or export a part, enclosure, bracket, box, case or other 3D-printable geometry in easyCAD, or refers to what is open or selected in easyCAD.
 ---
 
 # Driving easyCAD
@@ -83,6 +83,11 @@ what the user clicked. When the user says "this face" or "these edges", call
   `angle`...). Names: `rect` gives `<id>.bottom/.right/.top/.left`,
   `.bl/.br/.tr/.tl`, `.center`; lines `.a/.b`; arcs and circles `.center`.
 - Replace a sketch in place with `replace: <sketch_id>`: features using it follow.
+- **Look at it:** `render_sketch {"id": <sketch_id>}` draws it flat: white is
+  fully constrained, **blue can still move** (the text lists those entities with
+  coordinates and the DOF), amber are the dimensions as `expr=value`, shaded R0..
+  are the closed regions an extrude can use. Use it after a sketch with DOF > 0 or
+  surprising regions. Without `id` it shows the sketch the user is drawing now.
 
 ## Features (`add_feature`, `edit_feature`)
 
@@ -204,7 +209,7 @@ To see what *they* are looking at, use `"view": "user"`.
   `isolate: ["Servo"]`, `hide: [...]` and `show: "all"` choose bodies and persist,
   and so does `display` (`shaded`, `edges`, `wireframe`).
 - Pictures show shape and placement. They do not measure: read sizes from
-  `measure` and clearances from `interference`.
+  `measure`, gaps from `clearance` and overlaps from `interference`.
 
 ## Checking
 
@@ -212,14 +217,23 @@ To see what *they* are looking at, use `"view": "user"`.
   requirement after each feature that should change them.
 - `interference` checks bodies (a lid against the base, a servo or PCB reference
   body against the walls) and reports the overlap volume of each pair.
+- `clearance` gives the smallest gap and the closest points: `{"a": "Servo"}`
+  measures to every other body, nearest first; `{"a": "Lid", "b": "Base"}` one
+  pair; faces or edges by selector (`{"body": "Box", "face": <selector>}`), also
+  two faces of one body for a wall thickness. 0 means touching or overlapping:
+  then ask `interference` how much.
 - `regenerate` returns every feature's report without changing anything.
 
 ## Etiquette
 
 - Never undo, delete or overwrite the user's own steps unless they ask. The
   `undo` tool only undoes your steps unless `allow_user_steps` is set.
-- When a tool says the user has a dialog or sketch open, tell them and wait. Do
-  not retry in a loop.
+- The user may sketch while you work: you can still edit the document (they
+  finish their sketch on their own), but not replace the sketch they have open.
+  `get_document`'s `app.state` says what they are doing; `render_sketch` with no
+  `id` shows their draft if they ask you about it.
+- When a tool says the user has a dialog open, tell them and wait. Do not retry
+  in a loop.
 - Ask before `open_document` / `new_document` when there are unsaved changes, and
   before `save_document` to a new place. `export` writes only where the user
   wants files.

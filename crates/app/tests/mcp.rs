@@ -584,8 +584,93 @@ fn claude_and_the_user_see_independently() {
     assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
     let sk = shot_image(&call_raw(&mut h, "screenshot", json!({})).expect("sketch mode"));
     assert!(diff(&base, &sk) < 0.001, "{}", diff(&base, &sk));
-    let err = call_err(&mut h, "set_param", json!({"name": "w", "expr": 61}));
-    assert!(err.contains("editing a sketch"), "{err}");
+    // Claude keeps working while the user sketches
+    let doc = call(&mut h, "get_document", json!({"include_definitions": false}));
+    assert!(doc["app"]["state"].as_str().unwrap().contains("new sketch"), "{doc}");
+    call(&mut h, "set_param", json!({"name": "w", "expr": 61}));
+}
+
+/// Pixels close to a colour.
+fn count_rgb(img: &image::RgbaImage, c: [u8; 3]) -> usize {
+    img.pixels().filter(|p| (0..3).all(|i| (p.0[i] as i32 - c[i] as i32).abs() <= 12)).count()
+}
+
+#[test]
+fn sketch_pictures_clearances_and_editing_beside_an_open_sketch() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("Sketches"));
+    h.state_mut().mcp = Some(Bridge::new());
+    box_with_block(&mut h);
+    let doc = call(&mut h, "get_document", json!({"include_definitions": false}));
+    let base_id = doc["sketches"][0]["id"].as_u64().unwrap();
+
+    // ---- render_sketch: a fully constrained rectangle, dimension w = 60
+    let c = call_raw(&mut h, "render_sketch", json!({"id": base_id})).expect("render");
+    let img = shot_image(&c);
+    let t: Value = serde_json::from_str(c[1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(t["solve"]["dof"], 0, "{t}");
+    assert_eq!(t["regions"].as_array().unwrap().len(), 1);
+    assert!((t["regions"][0]["area_mm2"].as_f64().unwrap() - 2400.0).abs() < 1e-6, "{t}");
+    assert!(t["dimensions"].as_array().unwrap().iter().any(|d| d["expr"] == "w" && d["value"] == 60.0), "{t}");
+    assert!(t.get("free").is_none(), "{t}");
+    assert!(img.width() <= 900 && img.height() > 200);
+    assert!(count_rgb(&img, [226, 229, 233]) > 300, "constrained outline in white");
+    assert!(count_rgb(&img, [236, 178, 64]) > 50, "dimension text in amber");
+    assert_eq!(count_rgb(&img, [80, 160, 255]), 0, "nothing free");
+    // a loose line: blue, listed with its coordinates
+    let loose = call(&mut h, "add_sketch", json!({"name": "Loose", "plane": "XZ", "elements": [{"type": "line", "id": "l", "from": [0, 0], "to": [30, 10]}]}));
+    let c = call_raw(&mut h, "render_sketch", json!({"id": loose["sketch_id"], "labels": "all"})).expect("render loose");
+    let t: Value = serde_json::from_str(c[1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(t["solve"]["dof"], 4, "{t}");
+    assert_eq!(t["free"][0]["entity"], "#e0", "{t}");
+    assert_eq!(t["free"][0]["b"], json!([30.0, 10.0]));
+    assert_eq!(t["plane_mapping"]["sketch_y"], json!([0.0, 0.0, 1.0]));
+    assert!(count_rgb(&shot_image(&c), [80, 160, 255]) > 30, "the free line is blue");
+    assert!(call_err(&mut h, "render_sketch", json!({})).contains("Sketches:"));
+
+    // ---- clearance: the block sits 3 mm above the floor (wall 2, block at z 5)
+    let cl = call(&mut h, "clearance", json!({"a": "Servo"}));
+    assert!((cl["min_distance_mm"].as_f64().unwrap() - 3.0).abs() < 1e-6, "{cl}");
+    assert_eq!(cl["closest"]["b"], "'Box'");
+    assert!((cl["closest"]["point_on_a"][2].as_f64().unwrap() - 5.0).abs() < 1e-6, "{cl}");
+    assert_eq!(cl["closest"]["direction_a_to_b"], json!([0.0, 0.0, -1.0]));
+    // wall thickness between two faces of one body: top outside to the ceiling inside
+    let wall = call(&mut h, "clearance", json!({
+        "a": {"body": "Box", "face": {"Extreme": {"normal": [0, 0, 1], "which": "Max"}}},
+        "b": {"body": "Box", "face": {"AllWithNormal": {"normal": [0, 0, -1]}}},
+    }));
+    assert!((wall["min_distance_mm"].as_f64().unwrap() - 2.0).abs() < 1e-6, "{wall}");
+    assert!(call_err(&mut h, "clearance", json!({"a": "Nope"})).contains("bodies:"));
+    assert!(call_err(&mut h, "clearance", json!({"a": {"body": "Box", "face": {"Cylinders": {}}}})).contains("matched nothing"));
+
+    // ---- the user opens the Base sketch; Claude keeps editing around it
+    h.state_mut().open_sketch(Some(easycad_model::feature::SketchId(base_id as u32)));
+    assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    let doc = call(&mut h, "get_document", json!({"include_definitions": false}));
+    assert!(doc["app"]["state"].as_str().unwrap().contains(&format!("(id {base_id})")), "{doc}");
+    call(&mut h, "set_param", json!({"name": "wall", "expr": 2.5}));
+    if let easycad_app::app::Mode::Sketch(s) = &h.state().mode {
+        assert_eq!(s.values.get("wall"), Some(&2.5), "the open sketch sees Claude's parameter");
+    }
+    let err = call_err(&mut h, "add_sketch", json!({"name": "X", "replace": base_id, "plane": "XY", "elements": [{"type": "circle", "center": [0, 0], "radius": 3}]}));
+    assert!(err.contains("open"), "{err}");
+    // their draft, unfinished: render_sketch shows it
+    if let easycad_app::app::Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.sketch.circle(glam::DVec2::new(0.0, 0.0), 5.0);
+        s.dirty = true;
+    }
+    let draft: Value = serde_json::from_str(call_raw(&mut h, "render_sketch", json!({})).unwrap()[1]["text"].as_str().unwrap()).unwrap();
+    assert!(draft["source"].as_str().unwrap().contains("user's open sketch"), "{draft}");
+    let saved: Value = serde_json::from_str(call_raw(&mut h, "render_sketch", json!({"id": base_id, "saved": true})).unwrap()[1]["text"].as_str().unwrap()).unwrap();
+    let n = saved["counts"]["entities"].as_u64().unwrap();
+    assert_eq!(draft["counts"]["entities"].as_u64().unwrap(), n + 1, "{draft}");
+    assert_eq!(draft["free"][0]["kind"], "circle", "their new circle is free: {draft}");
+    // they finish: both their sketch and Claude's parameter are in the document
+    h.state_mut().finish_sketch();
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+    let d = &h.state().doc.data;
+    assert_eq!(d.sketch(easycad_model::feature::SketchId(base_id as u32)).unwrap().entities.len() as u64, n + 1);
+    assert!(d.params.list.iter().any(|p| p.name == "wall" && p.expr.0 == "2.5"));
 }
 
 /// A tub, a lid hinged on x through (y 22, z 56.5) and a pile on a carriage.

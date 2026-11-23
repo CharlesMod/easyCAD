@@ -1557,6 +1557,7 @@ impl eframe::App for EasyCadApp {
             debug_repaint(ui.ctx());
         }
         self.frame(ui);
+        self.remember_window(ui.ctx());
         crate::profiler::app_ms(self.frame_ms, frame.info().cpu_usage.map(|s| s * 1000.0));
         if self.show_perf {
             let area = if self.viewport_rect.is_positive() { self.viewport_rect } else { ui.ctx().content_rect() };
@@ -1569,6 +1570,30 @@ impl eframe::App for EasyCadApp {
 
     fn on_exit(&mut self) {
         self.on_close();
+    }
+}
+
+impl EasyCadApp {
+    /// Save the window's position and size once it settles (not mid-drag), so the next launch
+    /// reopens it there. Saved on change rather than at exit, which a killed process skips.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner, dragging, fullscreen, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, i.pointer.any_down(), v.fullscreen.unwrap_or(false), v.minimized.unwrap_or(false))
+        });
+        let (Some(outer), Some(inner)) = (outer, inner) else { return };
+        if dragging || fullscreen || minimized {
+            return;
+        }
+        let r = [outer.min.x, outer.min.y, inner.width(), inner.height()];
+        let changed = match self.settings.window {
+            Some(old) => old.iter().zip(r).any(|(a, b)| (a - b).abs() > 1.0),
+            None => true,
+        };
+        if changed {
+            self.settings.window = Some(r);
+            self.settings.save();
+        }
     }
 }
 
