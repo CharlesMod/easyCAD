@@ -138,7 +138,8 @@ fn claude_builds_a_shelled_filleted_box_step_by_step() {
     assert!(close(size(&ex), [60.0, 40.0, 25.0]), "{ex}");
     let body_id = ex["feature"]["id"].as_u64().unwrap();
     assert_eq!(h.state().doc.undo_label(), Some("Claude: add Extrude 'Bin body'"));
-    // the viewport has it
+    // the user's viewport has it too
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
     assert_eq!(h.state().model.as_ref().unwrap().bodies.len(), 1);
 
     let fi = call(
@@ -416,6 +417,175 @@ fn claude_imports_a_mesh_and_snips_it_at_two_positions() {
     let bb = mv["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Pile B").expect("copy").clone();
     assert_eq!(bb["mesh_body"], true);
     assert!((bb["bbox"]["min"][2].as_f64().unwrap() - 15.5).abs() < 1e-6, "{bb}");
+}
+
+/// Decode the image block of a screenshot reply.
+fn shot_image(c: &[Value]) -> image::RgbaImage {
+    assert_eq!(c[0]["type"], "image");
+    image::load_from_memory(&base64_decode(c[0]["data"].as_str().unwrap())).expect("PNG").to_rgba8()
+}
+
+/// Pixels of the highlight orange.
+fn orange(img: &image::RgbaImage) -> usize {
+    img.pixels().filter(|p| p.0[0] > 190 && p.0[1] > 50 && p.0[1] < 150 && p.0[2] < 90).count()
+}
+
+/// A closed hollow box with a block inside it, built through the bridge.
+fn box_with_block(h: &mut Harness<'static, EasyCadApp>) -> (Value, u64) {
+    call(h, "set_param", json!({"params": [{"name": "w", "expr": 60}, {"name": "wall", "expr": 2}]}));
+    let sk = call(h, "add_sketch", json!({"name": "Base", "plane": "XY", "elements": [{"type": "rect", "center": [0, 0], "width": "w", "height": 40}]}));
+    call(h, "add_feature", json!({"name": "Box", "kind": {"Extrude": {"sketch": sk["sketch_id"], "profiles": "All", "distance": 30, "op": "NewBody"}}}));
+    let shell = call(h, "add_feature", json!({"name": "Hollow", "kind": {"Shell": {"open_faces": [], "thickness": "wall"}}}));
+    assert_eq!(shell["feature"]["status"], "ok", "{shell}");
+    let sk2 = call(h, "add_sketch", json!({"name": "Inner", "plane": "XY", "offset": 5, "elements": [{"type": "rect", "center": [0, 0], "width": 20, "height": 10}]}));
+    call(h, "add_feature", json!({"name": "Servo", "kind": {"Extrude": {"sketch": sk2["sketch_id"], "profiles": "All", "distance": 10, "op": "NewBody"}}}));
+    let id = shell["feature"]["id"].as_u64().unwrap();
+    (shell, id)
+}
+
+/// Share of pixels that differ noticeably.
+fn diff(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
+    assert_eq!(a.dimensions(), b.dimensions());
+    let n = a.pixels().zip(b.pixels()).filter(|(p, q)| (0..3).any(|i| (p.0[i] as i32 - q.0[i] as i32).abs() > 24)).count();
+    n as f64 / (a.width() * a.height()) as f64
+}
+
+#[test]
+fn screenshots_that_help_claude_see() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("Seeing"));
+    h.state_mut().mcp = Some(Bridge::new());
+    let (shell, _) = box_with_block(&mut h);
+
+    let c = call_raw(&mut h, "screenshot", json!({"view": "front"})).expect("front");
+    assert!(c[1]["text"].as_str().unwrap().starts_with("Front"), "{}", c[1]["text"]);
+    let plain = shot_image(&c);
+    assert_eq!(plain.width(), 1024);
+
+    // a contact sheet of four views does not move Claude's camera
+    let c = call_raw(&mut h, "screenshot", json!({"views": ["front", "top", "right", "iso"], "max_width": 800})).expect("sheet");
+    let sheet = shot_image(&c);
+    // the front cell is the same picture as the front view (60 wide, 30 high)
+    let front = image::imageops::resize(&plain, 398, 299, image::imageops::FilterType::Triangle);
+    let cell = image::imageops::crop_imm(&sheet, 0, 0, 398, 299).to_image();
+    let wide = |img: &image::RgbaImage| {
+        let body: Vec<(u32, u32)> = img.enumerate_pixels().filter(|(_, y, p)| *y > 40 && p.0[0] > 140 && p.0[1] > 140).map(|(x, y, _)| (x, y)).collect();
+        let (x0, x1) = (body.iter().map(|p| p.0).min().unwrap(), body.iter().map(|p| p.0).max().unwrap());
+        let (y0, y1) = (body.iter().map(|p| p.1).min().unwrap(), body.iter().map(|p| p.1).max().unwrap());
+        (x1 - x0) as f64 / (y1 - y0) as f64
+    };
+    assert!(wide(&cell) > 1.7 && wide(&front) > 1.7, "front views are 2:1 wide, got {} / {}", wide(&cell), wide(&front));
+    assert!(sheet.width() <= 800 && sheet.width() > 700, "{}", sheet.width());
+    assert!(c[1]["text"].as_str().unwrap().contains("4 views, 2 per row"), "{}", c[1]["text"]);
+    let again = shot_image(&call_raw(&mut h, "screenshot", json!({})).expect("current"));
+    assert!(diff(&plain, &again) < 0.001, "current = the last single view");
+
+    // the box is closed: highlighting the block shows it through the faded box
+    let c = call_raw(&mut h, "screenshot", json!({"highlight": {"bodies": ["Servo"]}})).expect("ghost");
+    let ghost = shot_image(&c);
+    assert!(orange(&ghost) > 500 && orange(&plain) < 50, "ghosted {} plain {}", orange(&ghost), orange(&plain));
+
+    // a selector, the faces a feature made, a selector that matches nothing
+    let c = call_raw(&mut h, "screenshot", json!({"view": "top front right", "highlight": {"faces": [{"Extreme": {"normal": [0, 0, 1], "which": "Max"}}], "body": "Box"}})).expect("faces");
+    assert!(orange(&shot_image(&c)) > 2000, "{}", orange(&shot_image(&c)));
+    assert!(c[1]["text"].as_str().unwrap().contains("highlighted (orange): 1 faces"), "{}", c[1]["text"]);
+    let c = call_raw(&mut h, "screenshot", json!({"highlight": {"features": [shell["feature"]["id"]]}})).expect("feature");
+    assert!(c[1]["text"].as_str().unwrap().contains("6 faces"), "{}", c[1]["text"]);
+    let c = call_raw(&mut h, "screenshot", json!({"highlight": {"edges": [{"Parallel": {"dir": [0, 0, 1]}}], "body": "Box"}})).expect("edges");
+    assert!(c[1]["text"].as_str().unwrap().contains("8 edges"), "{}", c[1]["text"]);
+    assert!(orange(&shot_image(&c)) > 300);
+    let err = call_err(&mut h, "screenshot", json!({"highlight": {"faces": [{"Cylinders": {"radius": 99.0, "axis": null}}]}}));
+    assert!(err.contains("matched no face"), "{err}");
+
+    // a section stays on until removed, and looks straight at the cut
+    let c = call_raw(&mut h, "screenshot", json!({"section": {"axis": "y", "at": 0}})).expect("section");
+    let section = shot_image(&c);
+    let t = c[1]["text"].as_str().unwrap();
+    assert!(t.starts_with("Back") && t.contains("plane y=0.00"), "{t}");
+    let c = call_raw(&mut h, "screenshot", json!({"view": "iso"})).expect("still cut");
+    assert!(c[1]["text"].as_str().unwrap().contains("section: plane y"), "{}", c[1]["text"]);
+    let err = call_err(&mut h, "screenshot", json!({"section": {"axis": "z", "at": 500}}));
+    assert!(err.contains("outside the model"), "{err}");
+    let c = call_raw(&mut h, "screenshot", json!({"section": null, "hide": ["Servo"], "display": "wireframe"})).expect("uncut");
+    let t = c[1]["text"].as_str().unwrap();
+    assert!(!t.contains("section: plane") && t.contains("\"hidden_bodies\":[\"Servo\"]") && t.contains("wireframe"), "{t}");
+    let st = call(&mut h, "view_state", json!({"reset": true}));
+    assert_eq!(st["claude_view"]["hidden_bodies"], json!([]));
+    assert_eq!(st["claude_view"]["display"], "edges");
+
+    let dir = tmp("see");
+    for (name, img) in [("plain", &plain), ("sheet", &sheet), ("ghost", &ghost), ("section", &section)] {
+        img.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+}
+
+#[test]
+fn claude_and_the_user_see_independently() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("Together"));
+    h.state_mut().mcp = Some(Bridge::new());
+    let (_, shell_id) = box_with_block(&mut h);
+    let base = shot_image(&call_raw(&mut h, "screenshot", json!({"view": "iso"})).expect("base"));
+    let vol = call(&mut h, "measure", json!({"body": "Box"}))["bodies"][0]["volume_mm3"].as_f64().unwrap();
+    assert_eq!(call(&mut h, "interference", json!({}))["verdict"], "no interference");
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+
+    // the user changes everything about their own view
+    let servo = h.state().model.as_ref().unwrap().bodies.iter().find(|b| b.body.name == "Servo").unwrap().body.id;
+    {
+        let app = h.state_mut();
+        app.hidden.insert(servo);
+        app.toggle_section();
+        app.display = easycad_app::viewport::gpu::DisplayMode::Wireframe;
+        app.camera.orbit(glam::Vec2::new(120.0, -40.0));
+        let mb = &app.model.as_ref().unwrap().bodies[0];
+        let f = mb.faces.iter().position(|f| f.normal.z > 0.99).unwrap() as u32;
+        app.selection = vec![easycad_app::pickstack::PickKey { body: mb.body.id, kind: easycad_app::pickstack::PickKind::Face(f) }];
+    }
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+    let user_pose = h.state().camera.pose();
+    let user_section = h.state().section;
+
+    // Claude's picture, numbers and document are unchanged
+    let same = shot_image(&call_raw(&mut h, "screenshot", json!({})).expect("same"));
+    assert!(diff(&base, &same) < 0.001, "{}", diff(&base, &same));
+    assert_eq!(call(&mut h, "measure", json!({"body": "Box"}))["bodies"][0]["volume_mm3"].as_f64().unwrap(), vol);
+    // the selection is described on the whole model
+    let sel = call(&mut h, "get_selection", json!({}));
+    assert_eq!(sel["selection"][0]["type"], "face", "{sel}");
+    // and Claude's calls never touch the user's view
+    call_raw(&mut h, "screenshot", json!({"view": "front", "hide": ["Box"], "section": {"axis": "x"}, "display": "shaded"})).expect("claude's own");
+    call_raw(&mut h, "screenshot", json!({"views": ["top", "left"]})).expect("sheet");
+    assert_eq!(h.state().camera.pose(), user_pose);
+    assert_eq!(h.state().section, user_section);
+    assert!(h.state().hidden.contains(&servo) && h.state().hidden.len() == 1);
+    assert_eq!(h.state().display, easycad_app::viewport::gpu::DisplayMode::Wireframe);
+    // Claude's view lasts across calls; "user" borrows the user's camera
+    let st = call(&mut h, "view_state", json!({}));
+    assert_eq!(st["claude_view"]["hidden_bodies"], json!(["Box"]), "{st}");
+    let c = call_raw(&mut h, "screenshot", json!({"view": "user", "reset_view": true})).expect("user view");
+    assert!(c[1]["text"].as_str().unwrap().starts_with("The user's view"));
+
+    // a dialog that rolls the user's viewport back to before the shell
+    h.state_mut().edit_feature(easycad_model::feature::FeatureId(shell_id as u32));
+    assert!(h.state().dialog.is_some());
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+    let doc = call(&mut h, "get_document", json!({"include_definitions": false}));
+    assert_eq!(doc["bodies"].as_array().unwrap().len(), 2);
+    assert!(doc["features"].as_array().unwrap().iter().all(|f| f["status"] == "ok"), "{doc}");
+    assert_eq!(call(&mut h, "measure", json!({"body": "Box"}))["bodies"][0]["volume_mm3"].as_f64().unwrap(), vol);
+    assert_eq!(call(&mut h, "interference", json!({}))["verdict"], "no interference", "the shell is still there for Claude");
+    let iso = shot_image(&call_raw(&mut h, "screenshot", json!({"view": "iso"})).expect("dialog open"));
+    assert!(diff(&base, &iso) < 0.001, "{}", diff(&base, &iso));
+    h.state_mut().close_dialog(false);
+
+    // and an open sketch
+    h.state_mut().open_sketch(None);
+    assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    let sk = shot_image(&call_raw(&mut h, "screenshot", json!({})).expect("sketch mode"));
+    assert!(diff(&base, &sk) < 0.001, "{}", diff(&base, &sk));
+    let err = call_err(&mut h, "set_param", json!({"name": "w", "expr": 61}));
+    assert!(err.contains("editing a sketch"), "{err}");
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {

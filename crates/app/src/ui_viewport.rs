@@ -161,7 +161,7 @@ impl BodyFacts for Facts<'_> {
     }
 }
 
-fn body_color(reference: bool, part: bool) -> [f32; 4] {
+pub(crate) fn body_color(reference: bool, part: bool) -> [f32; 4] {
     if part {
         [0.55, 0.60, 0.68, 0.75]
     } else if reference {

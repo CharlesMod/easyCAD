@@ -1,7 +1,7 @@
 [
   {
     "name": "get_document",
-    "description": "Read the open easyCAD document: name, path, revision, unsaved flag, parameters (expression and value), sketches (solve status, DOF, closed regions), features in history order (id, name, type, full definition, regen status and summary), bodies (id, name, bounding box), the undo history and what the app is doing (a dialog or sketch open). `user_changes` lists edits the user made in the app since your last call: read it before every change and build on the user's edits instead of overwriting them. Feature definitions use the same JSON as add_feature / edit_feature.",
+    "description": "Read the open easyCAD document: name, path, revision, unsaved flag, parameters (expression and value), sketches (solve status, DOF, closed regions), features in history order (id, name, type, full definition, regen status and summary), bodies (id, name, bounding box), the undo history and what the app is doing (a dialog or sketch open). `user_changes` lists edits the user made in the app since your last call: read it before every change and build on the user's edits instead of overwriting them. Feature definitions use the same JSON as add_feature / edit_feature. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -297,7 +297,7 @@
   },
   {
     "name": "measure",
-    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select.",
+    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -337,7 +337,7 @@
   },
   {
     "name": "interference",
-    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body.",
+    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -350,21 +350,142 @@
   },
   {
     "name": "screenshot",
-    "description": "A PNG of the 3D viewport, as the user sees it, after regeneration finishes. `view` turns the camera like the view cube (the user sees it move): \"iso\", \"front\", \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges); \"current\" keeps the user's view. Use it to check each significant step.",
+    "description": "A PNG of the model, rendered offscreen from your own view. It is separate from the user's window: their camera, hidden bodies, section, display mode, selection or open sketch never change your picture, and your calls never move their view. Your view (camera, hidden bodies, section, display) is kept from call to call; every reply shows it, and view_state resets it. `view` turns your camera to a view-cube direction and keeps it there: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges). \"current\" (the default) is your last view, and \"user\" copies the user's camera, to see what they are looking at. `views` takes up to 6 directions as one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]) without moving your camera: use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body (this picture only), so you can confirm what a selector picks before you use it in add_feature. `section` cuts the model with a plane (x, y or z, at a coordinate in mm) to show walls, cavities and parts inside, and stays on until `section: null`. A new cut with no view given looks straight at it. `hide`, `show` (or \"all\") and `isolate` take body names and persist. `xray` (this picture only) draws every body see-through. `display` persists: \"shaded\", \"edges\" or \"wireframe\".",
     "inputSchema": {
       "type": "object",
       "properties": {
         "view": {
           "type": "string",
-          "description": "Named view (default \"current\")."
+          "description": "View direction, \"current\" (default: your last view) or \"user\" (the user's camera). Kept for later calls."
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Several directions as one contact sheet (1-6); your camera stays where it was."
         },
         "fit": {
           "type": "boolean",
-          "description": "Zoom to fit the model (default true when a view is given)."
+          "description": "Zoom to fit the bodies drawn (default true for named views, false for current/user)."
+        },
+        "highlight": {
+          "type": "object",
+          "description": "What to paint orange.",
+          "properties": {
+            "faces": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Face selectors, as in add_feature."
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Edge selectors."
+            },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Feature ids: the faces each one made."
+            },
+            "bodies": {
+              "type": "array",
+              "description": "Body names or {feature,index}: whole bodies."
+            },
+            "body": {
+              "description": "Resolve face/edge selectors on this body only (name or {feature,index}); default every body."
+            }
+          }
+        },
+        "ghost": {
+          "type": "boolean",
+          "description": "Fade the bodies that are not highlighted (default true when highlighting). This picture only."
+        },
+        "xray": {
+          "type": "boolean",
+          "description": "Draw every body see-through, to show parts inside others. This picture only."
+        },
+        "section": {
+          "description": "Cut view, kept until `section: null`.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "axis": {
+                  "type": "string",
+                  "enum": [
+                    "x",
+                    "y",
+                    "z"
+                  ]
+                },
+                "at": {
+                  "type": "number",
+                  "description": "Plane position in mm along the axis (default the middle of the model)."
+                },
+                "keep": {
+                  "type": "string",
+                  "enum": [
+                    "below",
+                    "above"
+                  ],
+                  "description": "Which side of the plane stays (default below, i.e. smaller coordinates)."
+                }
+              },
+              "required": [
+                "axis"
+              ]
+            }
+          ]
+        },
+        "hide": {
+          "type": "array",
+          "description": "Body names (or {feature,index}) to leave out of your view from now on."
+        },
+        "isolate": {
+          "type": "array",
+          "description": "Show only these bodies in your view from now on (`show: \"all\"` undoes it)."
         },
         "max_width": {
           "type": "integer",
-          "description": "Downscale to at most this many pixels wide (default 1024)."
+          "description": "Width of the returned PNG in pixels (default 1024)."
+        },
+        "show": {
+          "description": "Body names to bring back into your view, or \"all\"."
+        },
+        "display": {
+          "type": "string",
+          "enum": [
+            "shaded",
+            "edges",
+            "wireframe"
+          ],
+          "description": "How your view draws bodies (kept)."
+        },
+        "reset_view": {
+          "type": "boolean",
+          "description": "Start from the default view (iso, fitted, everything shown, no section) before applying the rest."
+        }
+      }
+    }
+  },
+  {
+    "name": "view_state",
+    "description": "Your own view of the model (camera direction, hidden bodies, section, display), which screenshot keeps from call to call. It is separate from the user's window in both directions. `reset: true` goes back to the default: iso, fitted, every body shown, no section.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "reset": {
+          "type": "boolean"
         }
       }
     }

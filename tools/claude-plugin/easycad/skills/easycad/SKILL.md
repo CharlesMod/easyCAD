@@ -32,9 +32,8 @@ view looks along +Y); right is +X.
    `problems` elsewhere in the history. A new feature that fails is taken back out
    automatically. Read the message, fix the cause, retry; do not pile features on
    top of an error.
-5. **Look at it.** `screenshot` after each significant step (`"iso"` or
-   `"top front right"`, `"front"`, `"top"`...). It moves the user's camera, so use
-   `"current"` when they are looking at something.
+5. **Look at it.** `screenshot` after each significant step (see "Seeing the
+   model" below).
 6. **Small steps, narrated.** Say in one line what you are about to do, do one
    feature per call, and show the result. The user may interrupt and steer.
 
@@ -156,6 +155,33 @@ changes only the radius. `suppressed: true` switches a feature off.
 - `unresolved` means a stored selector no longer matches confidently (the
   geometry changed a lot). The report carries `best_candidate`: use it in
   `edit_feature` if it is the intended face or edge, or pick again with `measure`.
+
+## Seeing the model (`screenshot`)
+
+You have **your own view**, rendered offscreen: its camera, hidden bodies, section
+and display mode are yours and stay put between calls (each reply shows them;
+`view_state` with `reset: true` starts over). The user's window is separate in
+both directions: what they hide, cut, select or orbit never changes your
+picture, and your pictures never move their view. Only the document is shared.
+To see what *they* are looking at, use `"view": "user"`.
+
+- `{"view": "iso"}` for one look (the camera stays there: later `{}` shots reuse
+  it). `{"views": ["front", "top", "right", "iso"]}` returns one labelled contact
+  sheet without moving your camera. Use it to check proportions and placement in
+  one call. Front looks along +Y (you see X across, Z up); top looks down -Z.
+- **Before using a selector, look at what it picks:**
+  `{"view": "iso", "highlight": {"edges": [<selector>]}}` paints the edges orange
+  and fades the other bodies. Faces, `features: [id]` (the faces a feature made)
+  and `bodies: ["Lid"]` work the same way. The reply counts what matched. If the
+  orange is not what you meant, change the selector before add_feature.
+- **Inside and through:** `{"section": {"axis": "y", "at": 0}}` cuts your view and
+  looks straight at the cut (cut faces are tinted orange) until `"section": null`.
+  It shows wall thickness, cavities, bosses, and whether a part inside clears the
+  walls. `xray: true` makes every body see-through for one picture.
+  `isolate: ["Servo"]`, `hide: [...]` and `show: "all"` choose bodies and persist,
+  and so does `display` (`shaded`, `edges`, `wireframe`).
+- Pictures show shape and placement. They do not measure: read sizes from
+  `measure` and clearances from `interference`.
 
 ## Checking
 
