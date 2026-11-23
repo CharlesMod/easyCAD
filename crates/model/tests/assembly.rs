@@ -938,3 +938,24 @@ fn rollback_is_per_component() {
     doc.undo();
     assert_eq!(doc.data.component(lid).unwrap().rollback, None);
 }
+
+/// A plain multi-body part: its bodies are tested against each other only with
+/// `within_occurrence` (they all share the root path).
+#[test]
+fn interference_between_bodies_of_one_part() {
+    let mut doc = Document::new("Boxes");
+    for (name, x) in [("A", 0.0), ("B", 5.0), ("C", 40.0)] {
+        let mut sk = Sketch::new(name, Plane::XY);
+        sk.rect(DVec2::new(x, 0.0), DVec2::new(x + 10.0, 10.0));
+        let s = doc.add_sketch(sk);
+        doc.add_feature(name, FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: "10".into(), symmetric: false, reverse: false, draft_deg: "0".into(), op: BoolOp::NewBody, target: None });
+    }
+    let r = AssemblyResult::flat(doc.regenerate().clone());
+    assert_eq!(r.instances.len(), 3);
+    let none = interference(&doc.data, &r, &InterferenceOptions::default());
+    assert!(none.pairs.is_empty() && none.tested == 0);
+    let rep = interference(&doc.data, &r, &InterferenceOptions { within_occurrence: true, ..Default::default() });
+    assert_eq!(rep.pairs.len(), 1, "{:?}", rep.pairs.iter().map(|p| (&p.a.label, &p.b.label)).collect::<Vec<_>>());
+    assert!((rep.pairs[0].volume - 500.0).abs() < 1e-3, "{}", rep.pairs[0].volume);
+    assert_eq!((rep.tested, rep.culled), (1, 2));
+}

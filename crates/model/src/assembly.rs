@@ -1597,15 +1597,19 @@ pub struct InterferenceOptions {
     pub include_hidden: bool,
     /// Smallest common volume reported (mm³). Default 1e-3.
     pub min_volume: f64,
+    /// Also test bodies of the same occurrence against each other (a multi-body
+    /// part, e.g. `AssemblyResult::flat`). Default false: only different occurrences.
+    pub within_occurrence: bool,
 }
 
 impl Default for InterferenceOptions {
     fn default() -> Self {
-        InterferenceOptions { include_reference: true, include_hidden: false, min_volume: 1e-3 }
+        InterferenceOptions { include_reference: true, include_hidden: false, min_volume: 1e-3, within_occurrence: false }
     }
 }
 
-/// Interference between instances of different occurrences: bounding-box cull, then
+/// Interference between instances of different occurrences (and, with
+/// `within_occurrence`, between bodies of one occurrence): bounding-box cull, then
 /// the exact common volume (pairs run on parallel threads).
 pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions) -> InterferenceReport {
     let inst: Vec<&Instance> = r.instances.iter().filter(|i| (opts.include_hidden || i.visible) && (opts.include_reference || !i.body.reference)).collect();
@@ -1621,7 +1625,8 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     let mut todo = Vec::new();
     for x in 0..placed.len() {
         for y in x + 1..placed.len() {
-            if placed[x].0.path == placed[y].0.path {
+            let same_occ = placed[x].0.path == placed[y].0.path;
+            if same_occ && (!opts.within_occurrence || placed[x].0.body == placed[y].0.body) {
                 continue;
             }
             let (a, b) = (&placed[x].2, &placed[y].2);

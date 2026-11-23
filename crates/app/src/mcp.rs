@@ -1485,15 +1485,16 @@ fn interference(args: Value) -> Step {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             use easycad_model::assembly::{interference, AssemblyResult, InterferenceOptions};
-            let opts = InterferenceOptions { include_reference, ..Default::default() };
             let flat;
-            let res = match &m.asm {
-                Some(a) => &*a.result,
+            // a plain part: its bodies against each other (they share the root path)
+            let (res, within_occurrence) = match &m.asm {
+                Some(a) => (&*a.result, false),
                 None => {
                     flat = AssemblyResult::flat(m.result.clone());
-                    &flat
+                    (&flat, true)
                 }
             };
+            let opts = InterferenceOptions { include_reference, within_occurrence, ..Default::default() };
             let rep = interference(&m.data, res, &opts);
             let pairs: Vec<Value> = rep
                 .pairs

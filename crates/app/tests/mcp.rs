@@ -228,6 +228,32 @@ fn claude_builds_a_shelled_filleted_box_step_by_step() {
     assert_eq!(sel["selection"][0]["type"], "face");
     assert_eq!(sel["selection"][0]["selector"], json!({"Extreme": {"normal": [0.0, 0.0, -1.0], "which": "Max"}}), "{sel}");
 
+    // interference between the bodies of a plain part: none yet, then an overlapping box
+    let i = call(&mut h, "interference", json!({}));
+    assert_eq!(i["verdict"], "no interference", "{i}");
+    let sk2 = call(
+        &mut h,
+        "add_sketch",
+        json!({"name": "Probe", "plane": "XY", "elements": [{"type": "rect", "id": "p", "center": [25, 0], "width": 10, "height": 10}]}),
+    );
+    let probe = call(
+        &mut h,
+        "add_feature",
+        json!({"name": "Probe", "kind": {"Extrude": {"sketch": sk2["sketch_id"], "profiles": "All", "distance": 10, "op": "NewBody"}}}),
+    );
+    let i = call(&mut h, "interference", json!({}));
+    let pairs = i["interfering_pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1, "{i}");
+    // the probe (x 20..30, y ±5, z 0..10) overlaps the 1.6 mm wall (x 28.4..30: 160 mm³)
+    // and the floor (x 20..28.4, z 0..1.6: 134.4 mm³)
+    assert!((pairs[0]["volume_mm3"].as_f64().unwrap() - 294.4).abs() < 1.0, "{i}");
+    let _ = probe;
+    // drop the probe again without leaving steps (the undo checks below expect the user's step last)
+    for _ in 0..2 {
+        h.state_mut().doc.discard_last();
+    }
+    h.state_mut().after_edit();
+
     // export
     let out = tmp("export").join("bin.stl");
     let ex = call(&mut h, "export", json!({"path": out.to_str().unwrap()}));
