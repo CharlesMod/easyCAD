@@ -106,6 +106,7 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
 | `interference` | overlapping body pairs with common volume (parts or assemblies) |
 | `screenshot` | offscreen PNG from Claude's own view (kept across calls). `view`: view-cube directions (`iso`, `front`, `top front right`, ...), `current` or `user` (the user's camera). `views`: up to 6 as one labelled contact sheet. `highlight`: faces / edges (selectors), `features` (the faces each made) or `bodies` painted orange with the rest faded (`ghost`). `section`: plane cut (`axis`, `at` mm, `keep`) until `null`. `hide` / `show` / `isolate`, `display` (kept), `xray` (this picture), `reset_view`. `max_width` |
 | `view_state` | Claude's view state; `reset` |
+| `list_positions`, `add_position`, `edit_position`, `apply_position` | named positions (animation states): rigid moves of bodies or occurrences, display only. Claude's view and the user's window each show their own; `apply_position` `for: user` snaps the user's window. `interference`, `screenshot` and `measure` take `position` |
 | `export` | STL / 3MF / STEP to an absolute path (active process profile, build orientation) |
 | `open_document`, `new_document`, `save_document` | refuse to drop unsaved changes unless `discard_unsaved` |
 | `undo` | Claude's last step only, unless `allow_user_steps` |

@@ -14,6 +14,7 @@ use easycad_model::assembly::{
 };
 use easycad_model::document::{BlobStore, DocData};
 use easycad_model::feature::{BodyId, FeatureId};
+use easycad_model::positions::PositionId;
 use easycad_model::library::Library;
 use easycad_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
 use easycad_model::pick::{BodyPicker, EdgeTolerance, Hit, HitKind, Picker};
@@ -56,6 +57,8 @@ pub struct Request {
     /// Section view: (point, normal) in the view frame; bodies keep what is behind
     /// the plane and get cap faces.
     pub cut: Option<(DVec3, DVec3)>,
+    /// Show the model in this position (animation state; display only).
+    pub pose: Option<PositionId>,
 }
 
 /// One solid's cut at the section plane, as triangles in plane coordinates.
@@ -124,6 +127,12 @@ pub struct Output {
     pub ctx_pickable: bool,
     /// Section view caps: (mesh, mesh frame -> view frame).
     pub caps: Vec<(Arc<Mesh>, DAffine3)>,
+    /// The position the bodies are shown in (`None` = as modeled).
+    pub pose: Option<PositionId>,
+    /// The position the request asked for (even when it failed).
+    pub pose_requested: Option<PositionId>,
+    /// Why the requested position could not be applied (bodies shown as modeled).
+    pub pose_error: Option<String>,
 }
 
 impl Output {
@@ -273,6 +282,7 @@ impl Worker {
             active: Vec::new(),
             explode: 0.0,
             cut: None,
+            pose: None,
         })
     }
 
@@ -465,6 +475,25 @@ fn process(
     } else {
         regen.regenerate(&r.data, &r.blobs, &r.library)
     };
+    // position (animation state): move root bodies and occurrences, display only
+    let mut result = result;
+    let mut pose_error = None;
+    let pose_id = r.pose.filter(|_| r.purpose != Purpose::Drawing);
+    if let Some(pid) = pose_id {
+        let root_active = asm_out.as_ref().map_or(true, |a| a.2 == ComponentId::ROOT);
+        let applied = r.data.pose(pid).and_then(|pose| {
+            if root_active {
+                result.bodies = pose.apply(&result.bodies)?;
+            }
+            if let Some(a) = asm_out.as_mut() {
+                a.0 = pose.apply_assembly(&a.0)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = applied {
+            pose_error = Some(e);
+        }
+    }
     let drawing = r.drawing.as_ref().map(|d| {
         // balloons and BOM tables from the document data (GUI_NEEDS #11)
         let flat;
@@ -660,6 +689,9 @@ fn process(
         asm,
         ctx_pickable,
         caps,
+        pose: pose_id.filter(|_| pose_error.is_none()),
+        pose_requested: pose_id,
+        pose_error,
     }
 }
 

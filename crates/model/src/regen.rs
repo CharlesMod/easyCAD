@@ -68,6 +68,25 @@ impl BodyGeom {
     }
 }
 
+/// A mesh moved rigidly (positions, normals, edge polylines).
+fn move_mesh(m: &Mesh, xf: &glam::DAffine3) -> Mesh {
+    let p = |v: &[f32; 3]| {
+        let q = xf.transform_point3(DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64));
+        [q.x as f32, q.y as f32, q.z as f32]
+    };
+    let n = |v: &[f32; 3]| {
+        let q = xf.matrix3 * DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
+        [q.x as f32, q.y as f32, q.z as f32]
+    };
+    Mesh {
+        positions: m.positions.iter().map(p).collect(),
+        normals: m.normals.iter().map(n).collect(),
+        indices: m.indices.clone(),
+        tri_face: m.tri_face.clone(),
+        edges: m.edges.iter().map(|e| occt::EdgePolyline { edge: e.edge, points: e.points.iter().map(p).collect() }).collect(),
+    }
+}
+
 /// Tessellation levels. `Preview` is for interactive dragging, `Display` the
 /// default viewport mesh, `Final` print/export quality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -160,7 +179,16 @@ impl Body {
                 if v != DVec3::ZERO {
                     s = s.translated(v).map_err(|e| e.0)?;
                 }
-                BodyGeom::new(s)
+                // the moved shape tessellates the same: move the meshes already made
+                let r = if angle_deg.abs() > 1e-12 { glam::DMat3::from_axis_angle(axis.normalize(), angle_deg.to_radians()) } else { glam::DMat3::IDENTITY };
+                let xf = glam::DAffine3 { matrix3: r, translation: v };
+                let g = BodyGeom { shape: s, meshes: Default::default(), appearance: self.geom.appearance.clone(), solid_mesh: None };
+                for (k, slot) in self.geom.meshes.iter().enumerate() {
+                    if let Some(Ok(m)) = slot.get() {
+                        let _ = g.meshes[k].set(Ok(Arc::new(move_mesh(m, &xf))));
+                    }
+                }
+                Arc::new(g)
             }
         };
         Ok(Body { geom, ..self.clone() })

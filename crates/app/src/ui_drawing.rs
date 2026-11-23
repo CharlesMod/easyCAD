@@ -411,6 +411,7 @@ pub fn sync(app: &mut EasyCadApp) {
                 active: Vec::new(),
                 explode: 0.0,
                 cut: None,
+                pose: None,
             });
         }
     }

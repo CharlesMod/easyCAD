@@ -27,6 +27,7 @@ pub mod ui_mates;
 pub mod ui_overhang;
 pub mod ui_main;
 pub mod ui_parts;
+pub mod ui_positions;
 pub mod ui_process;
 pub mod ui_settings;
 pub mod ui_viewport;

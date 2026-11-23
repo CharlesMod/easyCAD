@@ -508,8 +508,8 @@ fn tp(xf: &glam::DAffine3, p: [f32; 3]) -> Vec3 {
 /// Model matrix of a body in the current frame (drags and explode included).
 fn body_model(app: &EasyCadApp, m: &Output, b: easycad_model::feature::BodyId) -> glam::Mat4 {
     match m.ctx_body(b) {
-        Some(c) => to_mat4(crate::ui_assembly::display_xf(app, c)),
-        None => glam::Mat4::IDENTITY,
+        Some(c) => to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c)),
+        None => to_mat4(app.tween_body(b)),
     }
 }
 
@@ -591,7 +591,7 @@ fn build_frame(
                 color,
                 translucent: b.body.reference,
                 colors,
-                model: glam::Mat4::from_translation(offset),
+                model: glam::Mat4::from_translation(offset) * to_mat4(app.tween_body(b.body.id)),
             });
         }
     }
@@ -647,7 +647,7 @@ fn build_frame(
             color,
             translucent: b.reference || dim || tinted,
             colors,
-            model: to_mat4(crate::ui_assembly::display_xf(app, c)),
+            model: to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c)),
         });
     }
     let mut highlights = Vec::new();
@@ -968,7 +968,7 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let dropdown = format!("{current} ▾");
     let head = 30.0 + gap + 30.0 + gap + seg_w(ui, "Overhang") + gap + 9.0 + gap
         + if asm { seg_w(ui, "Explode") + gap + if explode_on { 110.0 + gap } else { 0.0 } + 9.0 + gap } else { 0.0 };
-    let modes: f32 = DISPLAY_MODES.iter().map(|m| seg_w(ui, m.1) + gap).sum::<f32>() - gap;
+    let modes: f32 = DISPLAY_MODES.iter().map(|m| seg_w(ui, m.1) + gap).sum::<f32>() - gap + 9.0 + gap + seg_w(ui, "Positions") + 24.0;
     let avail = rect.width() - 24.0 - 10.0;
     // 0: everything, 1: modes as a dropdown, 2: fit + section + »
     let tier = if head + modes <= avail {
@@ -1011,7 +1011,12 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                                 }
                                 ui.separator();
                                 mode_items(app, ui);
+                                ui.separator();
+                                if ui.selectable_label(app.positions.open, "Positions…").on_hover_text("Named poses to snap between").clicked() {
+                                    app.positions.open = !app.positions.open;
+                                }
                             });
+                        app.positions.button = Some(r.rect);
                         return;
                     }
                     let on = app.overhang.on;
@@ -1037,9 +1042,12 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                         let r = widgets::seg(ui, &dropdown, true).on_hover_text("Display mode (1 / 2 / 3)");
                         egui::Popup::menu(&r).show(|ui| mode_items(app, ui));
                     }
+                    bar_sep(ui);
+                    crate::ui_positions::bar_button(app, ui);
                 });
             });
         });
+    crate::ui_positions::panel(app, ui, rect);
 }
 
 fn bar_sep(ui: &mut Ui) {

@@ -15,6 +15,7 @@ pub mod meshbody;
 pub mod overhang;
 pub mod params;
 pub mod pick;
+pub mod positions;
 pub mod process;
 pub mod provenance;
 pub mod regen;

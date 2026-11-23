@@ -136,6 +136,10 @@ pub struct EasyCadApp {
     pub active: easycad_model::assembly::OccPath,
     /// Assemblies: explode slider 0..1 (display only).
     pub explode: f32,
+    /// The position (animation state) the user shows the model in (`None` = as
+    /// modeled). Display only.
+    pub pose: Option<easycad_model::positions::PositionId>,
+    pub positions: crate::ui_positions::PositionsUi,
     pub asm: crate::ui_assembly::AsmUi,
     /// Explode slider rect (E2E state dump).
     pub asm_explode_rect: Option<egui::Rect>,
@@ -246,6 +250,8 @@ impl EasyCadApp {
             recovery_offer: Vec::new(),
             active: Vec::new(),
             explode: 0.0,
+            pose: None,
+            positions: Default::default(),
             asm: Default::default(),
             asm_explode_rect: None,
             section: None,
@@ -367,7 +373,9 @@ impl EasyCadApp {
             active: self.active.clone(),
             explode: self.explode,
             cut: self.section_cut(),
+            pose: self.shown_pose(),
         });
+        self.positions.sent = self.shown_pose();
         self.model_dirty = false;
     }
 
@@ -420,6 +428,7 @@ impl EasyCadApp {
                     active: self.active.clone(),
                     explode: self.explode,
                     cut: self.section_cut(),
+                    pose: None,
                 });
             }
             None => {
@@ -1138,6 +1147,7 @@ impl EasyCadApp {
             ui.ctx().request_repaint();
         }
         self.shortcuts(ui.ctx());
+        self.positions_tick(&ui.ctx().clone());
         if self.model_dirty {
             self.submit_model();
         }

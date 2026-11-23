@@ -915,3 +915,68 @@ fn mesh_import_and_combine_dialog() {
     assert!(b.is_mesh() && b.bbox().unwrap().max.x <= 8.5 + 1e-6);
     assert!(m.result.errors().is_empty(), "{:?}", m.result.errors());
 }
+
+/// The Positions panel next to the display modes: three positions, the cart snapped
+/// to "very full" (after its tween), the lid selected with its move shown.
+#[test]
+fn positions_panel() {
+    use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::positions::{PoseMove, PoseTarget};
+    let _serial = serial();
+    let mut doc = easycad_model::document::Document::new("Cart");
+    let mut ids = Vec::new();
+    for (name, lo, hi) in [
+        ("Tub floor", [-20.0, -22.0, 0.0], [20.0, 22.0, 2.0]),
+        ("Lid", [-20.0, -22.0, 56.5], [20.0, 22.0, 58.5]),
+        ("Pile", [-10.0, -10.0, 20.0], [10.0, 10.0, 50.0]),
+    ] {
+        let mut s = easycad_model::sketch::Sketch::new(name, easycad_model::geom::Plane::XY.offset(lo[2]));
+        s.rect(glam::DVec2::new(lo[0], lo[1]), glam::DVec2::new(hi[0], hi[1]));
+        let s = doc.add_sketch(s);
+        ids.push(BodyId::of(doc.add_feature(
+            name,
+            FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: (hi[2] - lo[2]).into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+        )));
+    }
+    let (lid, pile) = (ids[1], ids[2]);
+    let full = doc
+        .edit("positions", |d| {
+            for (name, dz, deg) in [("closed", "0", "0"), ("peeking full", "7", "-25"), ("very full", "14", "-100")] {
+                let id = d.add_position(name);
+                d.positions.last_mut().unwrap().moves = vec![
+                    PoseMove { translate: ["0".into(), "0".into(), dz.into()], ..PoseMove::new(PoseTarget::Body(pile)) },
+                    PoseMove { angle_deg: deg.into(), axis: glam::DVec3::X, pivot: glam::DVec3::new(0.0, 22.0, 56.5), ..PoseMove::new(PoseTarget::Body(lid)) },
+                ];
+                if name == "very full" {
+                    return Ok::<_, ()>(id);
+                }
+            }
+            unreachable!()
+        })
+        .unwrap();
+    let mut h = harness(doc);
+    {
+        let app = h.state_mut();
+        app.positions.open = true;
+        app.go_to_position(Some(full));
+    }
+    settle(&mut h);
+    h.run_steps(20); // the tween (0.35 s at 30 fps)
+    {
+        let app = h.state_mut();
+        assert_eq!(app.model.as_ref().unwrap().pose, Some(full));
+        assert!(app.positions.anim.is_none(), "the tween ended");
+        let lid_top = app.model.as_ref().unwrap().body(lid).unwrap().bbox().unwrap().max.z;
+        assert!(lid_top > 90.0, "{lid_top}");
+        app.selection = vec![PickKey { body: lid, kind: PickKind::Face(0) }];
+    }
+    h.run_steps(3);
+    save(&mut h, "positions_panel");
+    // a dialog shows the modeled pose; closing it goes back
+    h.state_mut().open_dialog(DialogKind::Split);
+    settle(&mut h);
+    assert_eq!(h.state().model.as_ref().unwrap().pose, None);
+    h.state_mut().close_dialog(false);
+    settle(&mut h);
+    assert_eq!(h.state().model.as_ref().unwrap().pose, Some(full));
+}

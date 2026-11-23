@@ -138,6 +138,29 @@ with:
 - `measure` reports `mesh: {triangles, watertight}`; `interference` and STL/3MF
   `export` handle mesh bodies; STEP export leaves them out.
 
+## Positions (animation states)
+
+Positions are named poses: bodies (or components) moved rigidly from where the
+history puts them. Use them for mechanisms such as a lid open or closed, or a
+carriage up or down. They are display only and never change the history. Your
+view and the user's window each show their own position.
+
+```json
+add_position {"name": "very full", "moves": [
+  {"body": "Pile", "translate": [0, 0, "stroke"]},
+  {"body": "Lid", "axis": [1, 0, 0], "pivot": [0, 22, 56.5], "angle_deg": -75}]}
+apply_position {"position": "very full"}            // your view only
+apply_position {"position": "closed", "for": "user"} // snap the user's window
+interference {"position": "peeking"}                // check clearances in a pose
+screenshot {"position": "very full", "views": ["front", "right"]}
+```
+
+Rotation is about `axis` through `pivot`, then `translate`; expressions work.
+`edit_position` with `set` / `remove` / `name` / `delete: true` changes one.
+The user's Positions panel (next to Wireframe) has numbered buttons and a ▶ Play
+that loops through them until they move the view; `list_positions` reports
+`user_playing`. Playback never changes your view.
+
 `edit_feature` takes a patch: `{"id": 4, "kind": {"Fillet": {"radius": "3"}}}`
 changes only the radius. `suppressed: true` switches a feature off.
 

@@ -124,6 +124,10 @@ pub struct DocData {
     /// which moves past them. `None` = the end of the history.
     #[serde(default)]
     pub rollback: Option<usize>,
+    /// Named positions (animation states): display-only poses of bodies and
+    /// occurrences. See [`crate::positions`].
+    #[serde(default)]
+    pub positions: Vec<crate::positions::Position>,
     pub next_id: u32,
 }
 
@@ -150,6 +154,7 @@ impl DocData {
             occurrences: Vec::new(),
             mates: Vec::new(),
             rollback: None,
+            positions: Vec::new(),
             next_id: 1,
         }
     }

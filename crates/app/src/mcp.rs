@@ -20,6 +20,7 @@ use easycad_model::feature::{BodyId, Feature, FeatureId, FeatureKind, MeshUp, Sk
 use easycad_model::geom::Plane;
 use easycad_model::occt::{EdgeInfo, FaceInfo, Shape, SurfaceKind};
 use easycad_model::params::{Expr, Values};
+use easycad_model::positions::{PoseMove, PoseTarget, PositionId};
 use easycad_model::regen::{FeatureReport, FeatureStatus};
 use easycad_model::select::{EdgeSelector, Extremum, FaceSelector};
 use easycad_model::sketch::{Constraint, EntityId, Geom, PointId, Sketch};
@@ -240,7 +241,9 @@ fn model_ready(app: &mut EasyCadApp) -> bool {
     let (rev, id) = (app.doc.data.revision, app.doc.data.doc_id.clone());
     let busy = app.worker.busy_with(Purpose::Agent);
     let Some(b) = app.mcp.as_ref() else { return false };
-    if b.model.as_ref().is_some_and(|m| m.data.revision == rev && m.data.doc_id == id) {
+    // a position deleted meanwhile: back to the modeled pose
+    let pose = b.view.position.filter(|p| app.doc.data.position(*p).is_some());
+    if b.model.as_ref().is_some_and(|m| m.data.revision == rev && m.data.doc_id == id && m.pose_requested == pose) {
         return true;
     }
     if !busy {
@@ -257,6 +260,7 @@ fn model_ready(app: &mut EasyCadApp) -> bool {
             active: Vec::new(),
             explode: 0.0,
             cut: None,
+            pose,
         });
     }
     false
@@ -275,6 +279,18 @@ fn fail(msg: impl Into<String>) -> Step {
 }
 
 fn start(app: &mut EasyCadApp, ctx: &egui::Context, name: &str, args: Value) -> Step {
+    if matches!(name, "interference" | "screenshot" | "measure") {
+        if let Some(p) = args.get("position") {
+            match resolve_position(&app.doc.data, p) {
+                Ok(p) => {
+                    if let Some(b) = app.mcp.as_mut() {
+                        b.view.position = p;
+                    }
+                }
+                Err(e) => return fail(e),
+            }
+        }
+    }
     let r = match name {
         "get_document" => Ok(get_document(args)),
         "set_param" => set_param(app, args),
@@ -289,6 +305,10 @@ fn start(app: &mut EasyCadApp, ctx: &egui::Context, name: &str, args: Value) -> 
         "interference" => Ok(interference(args)),
         "screenshot" => screenshot(app, ctx, args),
         "view_state" => Ok(view_state(args)),
+        "list_positions" => Ok(after_model(|app, _| done(positions_json(app)))),
+        "add_position" => add_position(app, args),
+        "edit_position" => edit_position(app, args),
+        "apply_position" => apply_position(app, args),
         "export" => export(args),
         "open_document" | "new_document" => open_or_new(app, name, args),
         "save_document" => save_document(app, args),
@@ -1578,6 +1598,10 @@ fn interference(args: Value) -> Step {
     after_model(move |app, _| {
         let Some(m) = agent_model(app) else { return fail("no model yet") };
         let include_reference = bool_arg(&args, "include_reference").unwrap_or(true);
+        if let Some(e) = &m.pose_error {
+            return fail(format!("the position could not be applied: {e}"));
+        }
+        let pos_name = position_name(&m.data, m.pose);
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             use easycad_model::assembly::{interference, AssemblyResult, InterferenceOptions};
@@ -1612,6 +1636,7 @@ fn interference(args: Value) -> Step {
                 "pairs_culled_by_bbox": rep.culled,
                 "failed": failed,
                 "verdict": if rep.pairs.is_empty() { "no interference" } else { "bodies overlap" },
+                "position": pos_name,
             });
             let _ = tx.send(Ok(vec![json_text(&v)]));
         });
@@ -1699,6 +1724,8 @@ pub struct AgentView {
     pub hidden: std::collections::HashSet<BodyId>,
     pub section: Option<AgentSection>,
     pub display: crate::viewport::gpu::DisplayMode,
+    /// Claude's position (animation state), independent of the user's.
+    pub position: Option<PositionId>,
 }
 
 impl Default for AgentView {
@@ -1710,6 +1737,7 @@ impl Default for AgentView {
             hidden: Default::default(),
             section: None,
             display: crate::viewport::gpu::DisplayMode::ShadedEdges,
+            position: None,
         }
     }
 }
@@ -2006,6 +2034,7 @@ fn view_json(app: &EasyCadApp) -> Value {
             crate::viewport::gpu::DisplayMode::ShadedEdges => "edges",
             crate::viewport::gpu::DisplayMode::Wireframe => "wireframe",
         },
+        "position": position_name(&app.doc.data, v.position),
     })
 }
 
@@ -2495,6 +2524,255 @@ fn undo(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
         let mut o = outcome_json(app, None);
         o["undone"] = json!(label);
         o["next_undo"] = json!(app.doc.undo_label());
+        done(o)
+    }))
+}
+
+// ------------------------------------------------------------------ positions
+
+fn position_name(d: &DocData, p: Option<PositionId>) -> Value {
+    match p.and_then(|p| d.position(p)) {
+        Some(p) => json!(p.name),
+        None => json!("as modeled"),
+    }
+}
+
+/// A position by name or id; null / "modeled" / "as modeled" = none.
+fn resolve_position(d: &DocData, v: &Value) -> Result<Option<PositionId>, String> {
+    let known = || d.positions.iter().map(|p| format!("{} '{}'", p.id.0, p.name)).collect::<Vec<_>>().join(", ");
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) if matches!(s.trim().to_ascii_lowercase().as_str(), "" | "modeled" | "as modeled" | "none") => Ok(None),
+        Value::String(s) => d.position_named(s.trim()).map(|p| Some(p.id)).ok_or_else(|| format!("no position named `{s}` (positions: {})", if d.positions.is_empty() { "none yet".into() } else { known() })),
+        Value::Number(n) => {
+            let id = PositionId(n.as_u64().unwrap_or(u64::MAX) as u32);
+            d.position(id).map(|_| Some(id)).ok_or_else(|| format!("no position {n} (positions: {})", known()))
+        }
+        _ => Err("`position` is a name, an id or null".into()),
+    }
+}
+
+fn target_json(d: &DocData, m: Option<&crate::worker::Output>, t: &PoseTarget) -> Value {
+    match t {
+        PoseTarget::Body(id) => json!({"body": m.and_then(|m| m.body(*id)).map(|b| b.name.clone()), "body_id": id}),
+        PoseTarget::Occurrence(p) => {
+            let names: Vec<String> = p.iter().filter_map(|o| d.occurrence(*o).map(|o| o.name.clone())).collect();
+            json!({"occurrence": names.join(" / "), "occurrence_path": p})
+        }
+    }
+}
+
+fn positions_json(app: &EasyCadApp) -> Value {
+    let d = &app.doc.data;
+    let m = agent_model(app);
+    let vals = d.values().ok();
+    let list: Vec<Value> = d
+        .positions
+        .iter()
+        .map(|p| {
+            let moves: Vec<Value> = p
+                .moves
+                .iter()
+                .map(|mv| {
+                    let mut o = target_json(d, m.as_deref(), &mv.target);
+                    o["translate"] = json!([mv.translate[0].0, mv.translate[1].0, mv.translate[2].0]);
+                    o["angle_deg"] = json!(mv.angle_deg.0);
+                    o["axis"] = v3(mv.axis);
+                    o["pivot"] = v3(mv.pivot);
+                    o
+                })
+                .collect();
+            let mut o = json!({"id": p.id.0, "name": p.name, "moves": moves});
+            if let Some(Err(e)) = vals.as_ref().map(|v| p.evaluate(v)) {
+                o["error"] = json!(e);
+            }
+            o
+        })
+        .collect();
+    json!({
+        "positions": list,
+        "claude_position": position_name(d, app.mcp.as_ref().and_then(|b| b.view.position)),
+        "user_position": position_name(d, app.pose),
+        "user_playing": app.positions.play.is_some(),
+        "revision": d.revision,
+    })
+}
+
+/// One move from JSON: `body` (name or {feature,index}) or `occurrence` (name or
+/// path of ids), `translate` [x,y,z], `angle_deg`, `axis` [x,y,z], `pivot` [x,y,z].
+fn parse_move(app: &EasyCadApp, v: &Value) -> Result<PoseMove, String> {
+    let d = &app.doc.data;
+    let m = agent_model(app).or_else(|| app.model.clone());
+    let target = if let Some(b) = v.get("body") {
+        let bodies: Vec<(BodyId, String)> = m.as_ref().map(|m| m.result.bodies.iter().map(|b| (b.id, b.name.clone())).collect()).unwrap_or_default();
+        let id = bodies
+            .iter()
+            .find(|(id, n)| body_ref_matches(*id, n, b))
+            .map(|x| x.0)
+            .ok_or_else(|| format!("no body {b} (bodies: {})", bodies.iter().map(|b| b.1.as_str()).collect::<Vec<_>>().join(", ")))?;
+        PoseTarget::Body(id)
+    } else if let Some(o) = v.get("occurrence") {
+        match o {
+            Value::String(name) => {
+                let occ = d.occurrences.iter().find(|x| &x.name == name).ok_or_else(|| format!("no top-level occurrence named `{name}`"))?;
+                PoseTarget::Occurrence(vec![occ.id])
+            }
+            p => PoseTarget::Occurrence(serde_json::from_value(p.clone()).map_err(|e| format!("bad occurrence path: {e}"))?),
+        }
+    } else if let Some(t) = v.get("target") {
+        serde_json::from_value(t.clone()).map_err(|e| format!("bad target: {e}"))?
+    } else {
+        return Err("a move needs `body` (name or {\"feature\":n,\"index\":0}) or `occurrence`".into());
+    };
+    let mut mv = PoseMove::new(target);
+    if let Some(t) = v.get("translate") {
+        mv.translate = expr3_arg(&json!({"t": t}), "t")?;
+    }
+    if let Some(a) = v.get("angle_deg") {
+        mv.angle_deg = expr_arg(a).ok_or("`angle_deg` is a number or an expression")?;
+    }
+    if let Some(a) = v.get("axis") {
+        mv.axis = vec3_val(a).ok_or("`axis` is [x, y, z]")?;
+        if mv.axis.length() < 1e-9 {
+            return Err("`axis` must not be zero".into());
+        }
+    }
+    if let Some(p) = v.get("pivot") {
+        mv.pivot = vec3_val(p).ok_or("`pivot` is [x, y, z] (a point on the rotation axis)")?;
+    }
+    Ok(mv)
+}
+
+fn parse_moves(app: &EasyCadApp, v: Option<&Value>) -> Result<Vec<PoseMove>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) => a.iter().map(|m| parse_move(app, m)).collect(),
+        Some(_) => Err("`moves` is a list of moves".into()),
+    }
+}
+
+/// Check every position still evaluates (unknown parameters etc.).
+fn check_position(d: &DocData, id: PositionId) -> Result<(), String> {
+    let vals = d.values().map_err(|e| e.to_string())?;
+    d.position(id).ok_or("position vanished")?.evaluate(&vals).map(|_| ())
+}
+
+fn add_position(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
+    can_edit(app)?;
+    check_revision(app, &args)?;
+    let name = str_arg(&args, "name").ok_or("`name` is required")?.trim().to_string();
+    if name.is_empty() {
+        return Err("`name` must not be empty".into());
+    }
+    if app.doc.data.position_named(&name).is_some() {
+        return Err(format!("there is already a position named `{name}`: use edit_position"));
+    }
+    let mut moves = match args.get("copy_from") {
+        Some(v) => resolve_position(&app.doc.data, v)?.and_then(|p| app.doc.data.position(p)).map(|p| p.moves.clone()).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    for mv in parse_moves(app, args.get("moves"))? {
+        moves.retain(|m| m.target != mv.target);
+        moves.push(mv);
+    }
+    let (id, before) = claude_edit(app, &format!("add position '{name}'"), |d| {
+        let id = d.add_position(&name);
+        d.positions.last_mut().unwrap().moves = moves;
+        check_position(d, id)?;
+        Ok(id)
+    })?;
+    if bool_arg(&args, "apply").unwrap_or(true) {
+        if let Some(b) = app.mcp.as_mut() {
+            b.view.position = Some(id);
+        }
+    }
+    Ok(after_model(move |app, _| {
+        let mut o = positions_json(app);
+        o["added"] = json!(id.0);
+        if let Some(b) = before {
+            o["user_changes_before"] = b;
+        }
+        done(o)
+    }))
+}
+
+fn edit_position(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
+    can_edit(app)?;
+    check_revision(app, &args)?;
+    let id = resolve_position(&app.doc.data, args.get("position").ok_or("`position` is required (name or id)")?)?.ok_or("`position` names no position")?;
+    let old = app.doc.data.position(id).cloned().ok_or("no such position")?;
+    if bool_arg(&args, "delete").unwrap_or(false) {
+        claude_edit(app, &format!("delete position '{}'", old.name), |d| {
+            d.positions.retain(|p| p.id != id);
+            Ok(())
+        })?;
+        if app.pose == Some(id) {
+            app.go_to_position(None);
+        }
+        return Ok(after_model(|app, _| done(positions_json(app))));
+    }
+    let rename = str_arg(&args, "name").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(n) = &rename {
+        if app.doc.data.position_named(n).is_some_and(|p| p.id != id) {
+            return Err(format!("there is already a position named `{n}`"));
+        }
+    }
+    let replace = args.get("moves").map(|_| parse_moves(app, args.get("moves"))).transpose()?;
+    let set = parse_moves(app, args.get("set"))?;
+    let mut remove = Vec::new();
+    for v in args.get("remove").and_then(Value::as_array).into_iter().flatten() {
+        remove.push(parse_move(app, &json!({"body": v})).or_else(|_| parse_move(app, &json!({"occurrence": v})))?.target);
+    }
+    let (_, before) = claude_edit(app, &format!("edit position '{}'", old.name), |d| {
+        let p = d.positions.iter_mut().find(|p| p.id == id).ok_or("position vanished")?;
+        if let Some(n) = rename {
+            p.name = n;
+        }
+        if let Some(r) = replace {
+            p.moves = r;
+        }
+        for mv in set {
+            match p.moves.iter_mut().find(|m| m.target == mv.target) {
+                Some(m) => *m = mv,
+                None => p.moves.push(mv),
+            }
+        }
+        p.moves.retain(|m| !remove.contains(&m.target));
+        check_position(d, id)
+    })?;
+    Ok(after_model(move |app, _| {
+        let mut o = positions_json(app);
+        if let Some(b) = before {
+            o["user_changes_before"] = b;
+        }
+        done(o)
+    }))
+}
+
+/// Switch Claude's view (default), the user's window, or both to a position.
+fn apply_position(app: &mut EasyCadApp, args: Value) -> Result<Step, String> {
+    let p = resolve_position(&app.doc.data, args.get("position").unwrap_or(&Value::Null))?;
+    let who = str_arg(&args, "for").unwrap_or("claude").to_ascii_lowercase();
+    match who.as_str() {
+        "claude" | "both" | "user" => {}
+        o => return Err(format!("`for` is claude, user or both, not {o}")),
+    }
+    if who != "user" {
+        if let Some(b) = app.mcp.as_mut() {
+            b.view.position = p;
+        }
+    }
+    if who != "claude" {
+        app.positions.play = None;
+        app.go_to_position(p);
+    }
+    Ok(after_model(move |app, _| {
+        let m = agent_model(app);
+        if let Some(e) = m.as_ref().and_then(|m| m.pose_error.clone()) {
+            return fail(format!("the position could not be applied: {e}"));
+        }
+        let mut o = positions_json(app);
+        o["bodies"] = bodies_json(app);
         done(o)
     }))
 }

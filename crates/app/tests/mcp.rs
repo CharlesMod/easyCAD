@@ -588,6 +588,114 @@ fn claude_and_the_user_see_independently() {
     assert!(err.contains("editing a sketch"), "{err}");
 }
 
+/// A tub, a lid hinged on x through (y 22, z 56.5) and a pile on a carriage.
+fn cart_doc() -> easycad_model::document::Document {
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    let mut doc = easycad_model::document::Document::new("Cart");
+    doc.set_param("stroke", "14").unwrap();
+    for (name, lo, hi) in [
+        ("Tub floor", [-20.0, -22.0, 0.0], [20.0, 22.0, 2.0]),
+        ("Lid", [-20.0, -22.0, 56.5], [20.0, 22.0, 58.5]),
+        ("Pile", [-10.0, -10.0, 20.0], [10.0, 10.0, 50.0]),
+    ] {
+        let mut s = easycad_model::sketch::Sketch::new(name, easycad_model::geom::Plane::XY.offset(lo[2]));
+        s.rect(glam::DVec2::new(lo[0], lo[1]), glam::DVec2::new(hi[0], hi[1]));
+        let s = doc.add_sketch(s);
+        doc.add_feature(
+            name,
+            FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: (hi[2] - lo[2]).into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+        );
+    }
+    doc
+}
+
+fn body_bbox(v: &Value, name: &str) -> Value {
+    v["bodies"].as_array().unwrap().iter().find(|b| b["name"] == name).unwrap_or_else(|| panic!("no {name} in {v}"))["bbox"].clone()
+}
+
+/// Positions through the bridge: add three, check interference and pictures in
+/// each, Claude's position independent of the user's, edit and delete.
+#[test]
+fn claude_saves_positions_and_checks_each() {
+    let _g = serial();
+    let mut h = harness(cart_doc());
+    h.state_mut().mcp = Some(Bridge::new());
+    let hinge = json!([0, 22, 56.5]);
+    for (name, dz, deg) in [("closed", json!(0), json!(0)), ("peeking", json!("stroke / 2"), json!(-25)), ("very full", json!("stroke"), json!(-100))] {
+        let r = call(
+            &mut h,
+            "add_position",
+            json!({"name": name, "moves": [{"body": "Pile", "translate": [0, 0, dz]}, {"body": "Lid", "axis": [1, 0, 0], "pivot": hinge, "angle_deg": deg}]}),
+        );
+        assert_eq!(r["claude_position"], name, "{r}");
+    }
+    assert_eq!(h.state().doc.undo_label(), Some("Claude: add position 'very full'"));
+    let err = call_err(&mut h, "add_position", json!({"name": "x", "moves": [{"body": "Nope", "translate": [0, 0, 1]}]}));
+    assert!(err.contains("no body") && err.contains("Pile"), "{err}");
+    let err = call_err(&mut h, "add_position", json!({"name": "closed"}));
+    assert!(err.contains("already"), "{err}");
+
+    // the user's window is untouched
+    assert_eq!(h.state().pose, None);
+    let l = call(&mut h, "list_positions", json!({}));
+    assert_eq!(l["positions"].as_array().unwrap().len(), 3);
+    assert_eq!(l["user_position"], "as modeled");
+    assert_eq!(l["claude_position"], "very full");
+
+    // Claude's bodies in very full: pile up 14, lid swung back past the hinge
+    let a = call(&mut h, "apply_position", json!({"position": "very full"}));
+    assert_eq!(body_bbox(&a, "Pile")["max"][2], 64.0, "{a}");
+    assert!(body_bbox(&a, "Lid")["min"][1].as_f64().unwrap() > 21.9, "{a}");
+    let m = call(&mut h, "measure", json!({"body": "Pile", "position": "closed"}));
+    assert_eq!(m["bodies"][0]["bbox"]["max"][2], 50.0, "{m}");
+
+    // interference per position; a jammed pose (pile up, lid shut) collides
+    for p in ["closed", "peeking", "very full"] {
+        let i = call(&mut h, "interference", json!({"position": p}));
+        assert_eq!(i["verdict"], "no interference", "{p}: {i}");
+        assert_eq!(i["position"], p);
+    }
+    call(&mut h, "add_position", json!({"name": "jammed", "copy_from": "very full", "moves": [{"body": "Lid"}]}));
+    let i = call(&mut h, "interference", json!({}));
+    assert_eq!(i["position"], "jammed");
+    assert_eq!(i["verdict"], "bodies overlap", "{i}");
+    assert!((i["interfering_pairs"][0]["volume_mm3"].as_f64().unwrap() - 800.0).abs() < 1e-3, "{i}");
+
+    // pictures differ between positions
+    let shot = |h: &mut Harness<'static, EasyCadApp>, p: &str| shot_image(&call_raw(h, "screenshot", json!({"position": p, "view": "right"})).unwrap());
+    let (a, b) = (shot(&mut h, "closed"), shot(&mut h, "very full"));
+    assert!(diff(&a, &b) > 0.01, "{}", diff(&a, &b));
+    assert_eq!(h.state().pose, None, "Claude's pictures never move the user's model");
+    assert!(h.state().positions.play.is_none());
+
+    // the user's playback never moves Claude's position or pictures
+    h.state_mut().toggle_play();
+    assert!(h.state().positions.play.is_some());
+    let c1 = shot(&mut h, "closed");
+    assert!(diff(&a, &c1) < 0.001, "Claude's picture of `closed` is the same during playback: {}", diff(&a, &c1));
+    let l = call(&mut h, "list_positions", json!({}));
+    assert_eq!(l["claude_position"], "closed");
+    assert_eq!(l["user_playing"], true);
+
+    // edit: rename, set, remove, delete; snap the user's window
+    let e = call(&mut h, "edit_position", json!({"position": "jammed", "name": "stuck", "remove": ["Lid"]}));
+    let stuck = e["positions"].as_array().unwrap().iter().find(|p| p["name"] == "stuck").unwrap().clone();
+    assert_eq!(stuck["moves"].as_array().unwrap().len(), 1, "{stuck}");
+    call(&mut h, "apply_position", json!({"position": "peeking", "for": "user"}));
+    let peek = h.state().doc.data.position_named("peeking").unwrap().id;
+    assert_eq!(h.state().pose, Some(peek));
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+    assert_eq!(h.state().model.as_ref().unwrap().pose, Some(peek), "the user's model shows the position");
+    call(&mut h, "edit_position", json!({"position": "stuck", "delete": true}));
+    assert!(h.state().doc.data.position_named("stuck").is_none());
+    let err = call_err(&mut h, "apply_position", json!({"position": "stuck"}));
+    assert!(err.contains("no position"), "{err}");
+}
+
 fn base64_decode(s: &str) -> Vec<u8> {
     let val = |c: u8| match c {
         b'A'..=b'Z' => c - b'A',

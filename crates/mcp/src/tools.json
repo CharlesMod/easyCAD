@@ -297,7 +297,7 @@
   },
   {
     "name": "measure",
-    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select.",
+    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select. Uses your view's position (see apply_position); `position` switches it first.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -323,6 +323,9 @@
         "limit": {
           "type": "integer",
           "description": "At most this many faces / edges per body (default 80)."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
         }
       }
     }
@@ -337,20 +340,23 @@
   },
   {
     "name": "interference",
-    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it.",
+    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Uses your view's position (see apply_position); `position` switches it first.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "include_reference": {
           "type": "boolean",
           "description": "Include reference bodies such as imported PCBs and library parts (default true)."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
         }
       }
     }
   },
   {
     "name": "screenshot",
-    "description": "A PNG of the model, rendered offscreen from your own view. It is separate from the user's window: their camera, hidden bodies, section, display mode, selection or open sketch never change your picture, and your calls never move their view. Your view (camera, hidden bodies, section, display) is kept from call to call; every reply shows it, and view_state resets it. `view` turns your camera to a view-cube direction and keeps it there: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges). \"current\" (the default) is your last view, and \"user\" copies the user's camera, to see what they are looking at. `views` takes up to 6 directions as one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]) without moving your camera: use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body (this picture only), so you can confirm what a selector picks before you use it in add_feature. `section` cuts the model with a plane (x, y or z, at a coordinate in mm) to show walls, cavities and parts inside, and stays on until `section: null`. A new cut with no view given looks straight at it. `hide`, `show` (or \"all\") and `isolate` take body names and persist. `xray` (this picture only) draws every body see-through. `display` persists: \"shaded\", \"edges\" or \"wireframe\".",
+    "description": "A PNG of the model, rendered offscreen from your own view. It is separate from the user's window: their camera, hidden bodies, section, display mode, selection or open sketch never change your picture, and your calls never move their view. Your view (camera, hidden bodies, section, display) is kept from call to call; every reply shows it, and view_state resets it. `view` turns your camera to a view-cube direction and keeps it there: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges). \"current\" (the default) is your last view, and \"user\" copies the user's camera, to see what they are looking at. `views` takes up to 6 directions as one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]) without moving your camera: use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body (this picture only), so you can confirm what a selector picks before you use it in add_feature. `section` cuts the model with a plane (x, y or z, at a coordinate in mm) to show walls, cavities and parts inside, and stays on until `section: null`. A new cut with no view given looks straight at it. `hide`, `show` (or \"all\") and `isolate` take body names and persist. `xray` (this picture only) draws every body see-through. `display` persists: \"shaded\", \"edges\" or \"wireframe\". Uses your view's position (see apply_position); `position` switches it first.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -474,6 +480,9 @@
         "reset_view": {
           "type": "boolean",
           "description": "Start from the default view (iso, fitted, everything shown, no section) before applying the rest."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
         }
       }
     }
@@ -488,6 +497,111 @@
           "type": "boolean"
         }
       }
+    }
+  },
+  {
+    "name": "list_positions",
+    "description": "List the document's positions (animation states): named poses that move bodies or components rigidly from where the history puts them, e.g. a lid open and a carriage raised. Display only: features never see them. Also says which position your view and the user's window show (they are independent).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "add_position",
+    "description": "Save a new named position. A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body. Bodies not listed stay put. `copy_from` starts from another position's moves. Your view switches to it (apply: false keeps your current one); the user's window is not changed. One undo step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "copy_from": {
+          "description": "Position name or id to copy the moves of first."
+        },
+        "apply": {
+          "type": "boolean",
+          "description": "Show it in your view (default true)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "edit_position",
+    "description": "Change a position: `name` renames, `moves` replaces every move, `set` adds or replaces the moves of the bodies it names, `remove` lists body / occurrence names to leave where the history puts them, `delete: true` deletes the position. One undo step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "description": "Name or id."
+        },
+        "name": {
+          "type": "string"
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "set": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "remove": {
+          "type": "array",
+          "description": "Body or occurrence names."
+        },
+        "delete": {
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "position"
+      ]
+    }
+  },
+  {
+    "name": "apply_position",
+    "description": "Show a position (name or id; null = as modeled). `for`: \"claude\" (default) switches only your view, which measure, interference and screenshot then use; \"user\" snaps the user's window (with its short animation); \"both\". Replies with the positions and your bodies' boxes in that pose.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "description": "Name, id, or null for the modeled pose."
+        },
+        "for": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "user",
+            "both"
+          ]
+        }
+      },
+      "required": [
+        "position"
+      ]
     }
   },
   {
