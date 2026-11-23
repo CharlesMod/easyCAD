@@ -39,6 +39,9 @@ pub struct Settings {
     /// Its port (`None` = the default, 47311).
     #[serde(default)]
     pub mcp_port: Option<u16>,
+    /// Main window position and inner size in points, [x, y, w, h], restored at startup.
+    #[serde(default)]
+    pub window: Option<[f32; 4]>,
 }
 
 fn two() -> u32 {
