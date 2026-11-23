@@ -137,6 +137,7 @@ HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl);
 MassProps mass_props(const Shape &s);
 BBox bounding_box(const Shape &s);
 rust::Vec<double> extent_along(const Shape &s, V3 origin, V3 dir);
+rust::Vec<double> min_distance(const Shape &a, uint32_t a_kind, uint32_t a_idx, const Shape &b, uint32_t b_kind, uint32_t b_idx);
 
 std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts, rust::Vec<float> &face_rgba);
 rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts, rust::Slice<const float> face_rgba);

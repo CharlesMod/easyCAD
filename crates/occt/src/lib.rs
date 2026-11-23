@@ -744,6 +744,21 @@ impl Shape {
         Ok((v[0], v[1]))
     }
 
+    /// The smallest distance between (a part of) this shape and (a part of)
+    /// `other` (BRepExtrema), with the closest points. 0 when they touch or
+    /// overlap; `inside` when one solid contains the other's nearest point.
+    pub fn min_distance(&self, part: SubShape, other: &Shape, other_part: SubShape) -> Result<Distance> {
+        let (ak, ai) = part.raw();
+        let (bk, bi) = other_part.raw();
+        let v = raw::min_distance(self.r(), ak, ai, other.r(), bk, bi)?;
+        Ok(Distance {
+            distance: v[0],
+            on_self: DVec3::new(v[1], v[2], v[3]),
+            on_other: DVec3::new(v[4], v[5], v[6]),
+            inside: v[7] != 0.0,
+        })
+    }
+
     pub fn bbox(&self) -> Result<BBox> {
         let b = raw::bounding_box(self.r())?;
         Ok(BBox { min: dv(b.min), max: dv(b.max) })
@@ -879,6 +894,26 @@ impl ShellStrategy {
     }
 }
 
+/// Which part of a shape [`Shape::min_distance`] measures from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubShape {
+    Whole,
+    /// Face index (as in `faces()` / `FaceInfo`).
+    Face(u32),
+    /// Edge index (as in `edges()` / `EdgeInfo`).
+    Edge(u32),
+}
+
+impl SubShape {
+    fn raw(self) -> (u32, u32) {
+        match self {
+            SubShape::Whole => (0, 0),
+            SubShape::Face(i) => (1, i),
+            SubShape::Edge(i) => (2, i),
+        }
+    }
+}
+
 /// A face or crease likely to stop a shell ([`Shape::shell_blockers`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShellBlocker {
@@ -924,4 +959,13 @@ impl ShellBlocker {
             }
         }
     }
+}
+
+/// [`Shape::min_distance`]'s answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Distance {
+    pub distance: f64,
+    pub on_self: DVec3,
+    pub on_other: DVec3,
+    pub inside: bool,
 }

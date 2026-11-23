@@ -66,6 +66,7 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <Bnd_Box.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
@@ -2180,6 +2181,29 @@ BBox bounding_box(const Shape &s) {
   r.min = mk(x0, y0, z0);
   r.max = mk(x1, y1, z1);
   return r;
+}
+
+namespace {
+// kind 0: the whole shape, 1: face `idx`, 2: edge `idx` (0-based, TopExp::MapShapes order).
+TopoDS_Shape subShape(const TopoDS_Shape &s, uint32_t kind, uint32_t idx, const char *what) {
+  if (kind == 0) return s;
+  auto m = mapOf(s, kind == 1 ? TopAbs_FACE : TopAbs_EDGE);
+  if (idx >= static_cast<uint32_t>(m.Extent())) fail(std::string(what) + ": " + (kind == 1 ? "face" : "edge") + " index out of range");
+  return m.FindKey(static_cast<int>(idx) + 1);
+}
+}  // namespace
+
+rust::Vec<double> min_distance(const Shape &a, uint32_t a_kind, uint32_t a_idx, const Shape &b, uint32_t b_kind, uint32_t b_idx) {
+  requireShape(a, "min_distance");
+  requireShape(b, "min_distance");
+  TopoDS_Shape sa = subShape(a.s, a_kind, a_idx, "min_distance (first)");
+  TopoDS_Shape sb = subShape(b.s, b_kind, b_idx, "min_distance (second)");
+  BRepExtrema_DistShapeShape d(sa, sb, Extrema_ExtFlag_MIN);
+  if (!d.IsDone() || d.NbSolution() < 1) fail("min_distance: the distance could not be computed");
+  gp_Pnt p = d.PointOnShape1(1), q = d.PointOnShape2(1);
+  rust::Vec<double> out;
+  for (double v : {d.Value(), p.X(), p.Y(), p.Z(), q.X(), q.Y(), q.Z(), d.InnerSolution() ? 1.0 : 0.0}) out.push_back(v);
+  return out;
 }
 
 rust::Vec<double> extent_along(const Shape &s, V3 origin, V3 dir) {

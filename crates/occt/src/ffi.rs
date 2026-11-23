@@ -244,6 +244,7 @@ pub mod bridge {
         fn mass_props(s: &Shape) -> Result<MassProps>;
         fn bounding_box(s: &Shape) -> Result<BBox>;
         fn extent_along(s: &Shape, origin: V3, dir: V3) -> Result<Vec<f64>>;
+        fn min_distance(a: &Shape, a_kind: u32, a_idx: u32, b: &Shape, b_kind: u32, b_idx: u32) -> Result<Vec<f64>>;
 
         /// STEP with assembly structure, names and colours. Returns a compound whose
         /// direct children are the leaf solids (placed), in the order of `parts`.
