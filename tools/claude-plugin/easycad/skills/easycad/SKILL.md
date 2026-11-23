@@ -32,9 +32,8 @@ view looks along +Y); right is +X.
    `problems` elsewhere in the history. A new feature that fails is taken back out
    automatically. Read the message, fix the cause, retry; do not pile features on
    top of an error.
-5. **Look at it.** `screenshot` after each significant step (`"iso"` or
-   `"top front right"`, `"front"`, `"top"`...). It moves the user's camera, so use
-   `"current"` when they are looking at something.
+5. **Look at it.** `screenshot` after each significant step (see "Seeing the
+   model" below). The user's camera is put back after each shot.
 6. **Small steps, narrated.** Say in one line what you are about to do, do one
    feature per call, and show the result. The user may interrupt and steer.
 
@@ -130,6 +129,23 @@ changes only the radius. `suppressed: true` switches a feature off.
 - `unresolved` means a stored selector no longer matches confidently (the
   geometry changed a lot). The report carries `best_candidate`: use it in
   `edit_feature` if it is the intended face or edge, or pick again with `measure`.
+
+## Seeing the model (`screenshot`)
+
+- `{"view": "iso"}` for one look; `{"views": ["front", "top", "right", "iso"]}`
+  returns one labelled contact sheet. Use it to check proportions and placement
+  in one call. Front looks along +Y (you see X across, Z up); top looks down -Z.
+- **Before using a selector, look at what it picks:**
+  `{"view": "iso", "highlight": {"edges": [<selector>]}}` paints the edges orange
+  and fades the other bodies. Faces, `features: [id]` (the faces a feature made)
+  and `bodies: ["Lid"]` work the same way. The reply counts what matched. If the
+  orange is not what you meant, change the selector before add_feature.
+- **Inside and through:** `{"section": {"axis": "y", "at": 0}}` cuts the model and
+  looks straight at the cut (cut faces are tinted orange). It shows wall thickness,
+  cavities, bosses, and whether a part inside clears the walls. `xray: true` makes
+  every body see-through, and `isolate: ["Servo"]` / `hide: [...]` choose bodies.
+- Pictures show shape and placement. They do not measure: read sizes from
+  `measure` and clearances from `interference`.
 
 ## Checking
 

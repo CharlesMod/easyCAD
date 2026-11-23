@@ -66,8 +66,8 @@ enum Step {
     Done(ToolResult),
     /// The worker's model of the current document revision.
     AfterModel(Then),
-    /// The camera animation to finish, then `n` more frames (so the viewport has drawn).
-    AfterCamera(u32, Then),
+    /// A screenshot (camera, display overrides, capture, put back).
+    Shot(Box<Shot>),
     /// A background thread (export, interference, the screenshot callback).
     Recv(Receiver<ToolResult>),
 }
@@ -189,7 +189,9 @@ pub fn poll(app: &mut EasyCadApp, ctx: &egui::Context) {
                 }
             }
             Err(s) if job.since.elapsed() > JOB_TIMEOUT => {
-                drop(s);
+                if let Step::Shot(mut sh) = s {
+                    sh.restore(app);
+                }
                 let _ = job.call.reply.send(Err(format!("`{}` timed out (regeneration still running?)", job.call.name)));
             }
             Err(s) => {
@@ -216,17 +218,7 @@ fn advance(app: &mut EasyCadApp, ctx: &egui::Context, mut step: Step) -> Result<
                     return Err(Step::AfterModel(f));
                 }
             }
-            Step::AfterCamera(n, f) => {
-                if app.camera.animating() || !model_ready(app) {
-                    return Err(Step::AfterCamera(n, f));
-                }
-                if n == 0 {
-                    f(app, ctx)
-                } else {
-                    ctx.request_repaint();
-                    return Err(Step::AfterCamera(n - 1, f));
-                }
-            }
+            Step::Shot(sh) => return sh.advance(app, ctx).map_err(Step::Shot),
             Step::Recv(rx) => match rx.try_recv() {
                 Ok(r) => return Ok(r),
                 Err(TryRecvError::Empty) => return Err(Step::Recv(rx)),
@@ -1565,6 +1557,38 @@ fn export(args: Value) -> Result<Step, String> {
 
 // ------------------------------------------------------------------ screenshot
 
+/// Highlight colours of Claude's screenshots.
+pub const SHOT_FACE: [f32; 4] = [1.0, 0.36, 0.08, 0.9];
+pub const SHOT_BODY: [f32; 4] = [1.0, 0.36, 0.08, 0.6];
+pub const SHOT_EDGE: egui::Color32 = egui::Color32::from_rgb(255, 92, 20);
+
+/// Display overrides while a screenshot is being taken (`EasyCadApp::shot`).
+#[derive(Clone, Debug, Default)]
+pub struct ShotStyle {
+    pub faces: Vec<(BodyId, u32)>,
+    pub edges: Vec<(BodyId, u32)>,
+    pub bodies: Vec<BodyId>,
+    /// Draw the bodies that are not highlighted faint.
+    pub ghost: bool,
+    /// Draw every body see-through.
+    pub xray: bool,
+    /// Draw highlighted faces through what is in front of them.
+    pub through: bool,
+    /// Caption in the viewport's corner.
+    pub label: String,
+}
+
+impl ShotStyle {
+    /// Opacity override for a body, if any.
+    pub fn alpha(&self, b: BodyId) -> Option<f32> {
+        if self.xray {
+            return Some(0.32);
+        }
+        let involved = self.bodies.contains(&b) || self.faces.iter().any(|f| f.0 == b) || self.edges.iter().any(|e| e.0 == b);
+        (self.ghost && !involved).then_some(0.16)
+    }
+}
+
 /// "top front right" → a view-cube region; "iso" → the default isometric view.
 fn parse_view(s: &str) -> Result<Option<crate::camera::CubeRegion>, String> {
     let s = s.trim().to_ascii_lowercase();
@@ -1593,56 +1617,455 @@ fn parse_view(s: &str) -> Result<Option<crate::camera::CubeRegion>, String> {
     Ok(Some(crate::camera::CubeRegion(c)))
 }
 
+/// What to highlight, as asked (resolved once the model is ready).
+#[derive(Default)]
+struct HighlightReq {
+    faces: Vec<FaceSelector>,
+    edges: Vec<EdgeSelector>,
+    features: Vec<FeatureId>,
+    bodies: Vec<Value>,
+    on: Value,
+}
+
+impl HighlightReq {
+    fn is_empty(&self) -> bool {
+        self.faces.is_empty() && self.edges.is_empty() && self.features.is_empty() && self.bodies.is_empty()
+    }
+}
+
+/// The app state a screenshot changes and puts back.
+struct Saved {
+    camera: crate::camera::Camera,
+    hidden: std::collections::HashSet<BodyId>,
+    section: Option<crate::app::SectionUi>,
+    section_bbox: Option<easycad_model::occt::BBox>,
+}
+
+enum Phase {
+    /// Waiting for the model (with the section cut) to come back.
+    Model,
+    /// Camera set; draw this many frames before capturing.
+    Frames(u32),
+    Capture(Receiver<Result<image::RgbaImage, String>>),
+}
+
+/// Faces and edges to highlight, by body, as found on the uncut model.
+type Resolved = (Vec<(BodyId, FaceInfo)>, Vec<(BodyId, EdgeInfo)>);
+
+pub struct Shot {
+    views: Vec<(Option<crate::camera::CubeRegion>, String)>,
+    fit: bool,
+    keep_view: bool,
+    max_w: u32,
+    hl: HighlightReq,
+    ghost: Option<bool>,
+    xray: bool,
+    hide: Vec<Value>,
+    isolate: Vec<Value>,
+    section: Option<(usize, Option<f64>, bool)>,
+    saved: Option<Saved>,
+    phase: Phase,
+    i: usize,
+    images: Vec<image::RgbaImage>,
+    notes: Vec<String>,
+    started: bool,
+    /// Highlights resolved on the uncut bodies, mapped onto the shown meshes later.
+    pending: Option<Resolved>,
+}
+
+fn body_ref_matches(id: BodyId, name: &str, want: &Value) -> bool {
+    match want {
+        Value::String(s) => name == s,
+        o @ Value::Object(_) => serde_json::from_value::<BodyId>(o.clone()).is_ok_and(|b| b == id),
+        _ => false,
+    }
+}
+
 fn screenshot(app: &mut EasyCadApp, ctx: &egui::Context, args: Value) -> Result<Step, String> {
-    let view = parse_view(str_arg(&args, "view").unwrap_or("current"))?;
-    let fit = bool_arg(&args, "fit").unwrap_or(view.is_some());
-    let max_w = args.get("max_width").and_then(Value::as_u64).unwrap_or(1024).clamp(128, 4096) as u32;
+    let mut views = Vec::new();
+    if let Some(a) = args.get("views").and_then(Value::as_array) {
+        for v in a {
+            let s = v.as_str().ok_or("`views` must be a list of view names")?;
+            views.push(s.to_string());
+        }
+        if views.is_empty() || views.len() > 6 {
+            return Err("`views` takes 1 to 6 views".into());
+        }
+    }
+    let section = match args.get("section") {
+        None | Some(Value::Null) => None,
+        Some(s) => {
+            let axis = match str_arg(s, "axis").map(str::to_ascii_lowercase).as_deref() {
+                Some("x") => 0,
+                Some("y") => 1,
+                Some("z") => 2,
+                _ => return Err("`section.axis` must be \"x\", \"y\" or \"z\"".into()),
+            };
+            let at = s.get("at").and_then(Value::as_f64);
+            let keep = str_arg(s, "keep").unwrap_or("below");
+            let flip = match keep {
+                "below" | "min" | "-" => false,
+                "above" | "max" | "+" => true,
+                k => return Err(format!("`section.keep` must be \"below\" or \"above\", not `{k}`")),
+            };
+            Some((axis, at, flip))
+        }
+    };
+    if views.is_empty() {
+        let v = str_arg(&args, "view").map(String::from).unwrap_or_else(|| match section {
+            // look straight at the cut face
+            Some((a, _, flip)) => {
+                let names = [["right", "left"], ["back", "front"], ["top", "bottom"]];
+                names[a][flip as usize].to_string()
+            }
+            None => "current".into(),
+        });
+        views.push(v);
+    }
+    let views: Vec<(Option<crate::camera::CubeRegion>, String)> = views
+        .iter()
+        .map(|v| {
+            let iso = matches!(v.trim().to_ascii_lowercase().as_str(), "iso" | "isometric" | "home");
+            parse_view(v).map(|r| (r, r.map(|r| if iso { "Iso".to_string() } else { r.label() }).unwrap_or_else(|| "Current view".into())))
+        })
+        .collect::<Result<_, _>>()?;
+    let any_named = views.iter().any(|v| v.0.is_some());
+    let mut hl = HighlightReq::default();
+    if let Some(h) = args.get("highlight") {
+        let list = |k: &str| h.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+        for f in list("faces") {
+            hl.faces.push(serde_json::from_value(f.clone()).map_err(|e| format!("highlight face selector {f}: {e}"))?);
+        }
+        for e in list("edges") {
+            hl.edges.push(serde_json::from_value(e.clone()).map_err(|er| format!("highlight edge selector {e}: {er}"))?);
+        }
+        for f in list("features") {
+            hl.features.push(FeatureId(f.as_u64().ok_or("`highlight.features` takes feature ids")? as u32));
+        }
+        hl.bodies = list("bodies");
+        hl.on = h.get("body").cloned().unwrap_or(Value::Null);
+    }
     if !crate::widgets::window_visible(ctx) {
         return Err("the easyCAD window is minimized or hidden, so nothing is drawn: ask the user to bring it to the front".into());
     }
     if !matches!(app.mode, Mode::Model) {
         return Err("the app is not showing the 3D model (sketch, parts or drawing screen is open)".into());
     }
-    Ok(after_model(move |app, ctx| {
-        // Claude's own step toasts would cover the model in its picture
-        app.toasts.retain(|t| !t.text.starts_with(LABEL));
-        let aspect = app.viewport_size.x / app.viewport_size.y.max(1.0);
-        match view {
-            Some(reg) => {
-                let rot = app.camera.region_rot(reg);
-                app.camera.animate_rot(rot, app.now, aspect, fit);
-            }
-            None if fit => {
-                if let Some(bb) = app.model.as_ref().and_then(|m| m.bbox) {
-                    app.camera.fit_sphere(bb.center().as_vec3(), (bb.size().length() * 0.5) as f32, aspect);
-                }
-            }
-            None => {}
-        }
-        ctx.request_repaint();
-        let label = view.map(|v| v.label()).unwrap_or_else(|| "current view".into());
-        Step::AfterCamera(
-            2,
-            Box::new(move |app, ctx| {
-                let rect = app.viewport_rect;
-                let ppp = ctx.pixels_per_point();
-                let rev = app.doc.data.revision;
-                let (tx, rx) = channel();
-                let cb = egui::ScreenshotCallback::new(move |img: Arc<egui::ColorImage>| {
-                    let _ = tx.send(encode_shot(&img, rect, ppp, max_w).map(|(png, w, h)| {
-                        vec![proto::image(&png), proto::text(format!("{label}, {w}×{h} px, document revision {rev}"))]
-                    }));
-                });
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(cb));
-                ctx.request_repaint();
-                Step::Recv(rx)
-            }),
-        )
-    }))
+    if app.shot.is_some() {
+        return Err("another screenshot is in progress".into());
+    }
+    let list = |k: &str| args.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+    Ok(Step::Shot(Box::new(Shot {
+        fit: bool_arg(&args, "fit").unwrap_or(any_named),
+        keep_view: bool_arg(&args, "keep_view").unwrap_or(false),
+        max_w: args.get("max_width").and_then(Value::as_u64).unwrap_or(1024).clamp(128, 4096) as u32,
+        views,
+        hl,
+        ghost: bool_arg(&args, "ghost"),
+        xray: bool_arg(&args, "xray").unwrap_or(false),
+        hide: list("hide"),
+        isolate: list("isolate"),
+        section,
+        saved: None,
+        phase: Phase::Model,
+        i: 0,
+        images: Vec::new(),
+        notes: Vec::new(),
+        started: false,
+        pending: None,
+    })))
 }
 
-/// Crop the window image to the viewport, downscale, encode PNG.
-fn encode_shot(img: &egui::ColorImage, rect: egui::Rect, ppp: f32, max_w: u32) -> Result<(Vec<u8>, u32, u32), String> {
+impl Shot {
+    /// Apply hide / isolate / section and the style (the model is ready).
+    fn setup(&mut self, app: &mut EasyCadApp) -> Result<(), String> {
+        let m = app.model.clone().ok_or("no model yet")?;
+        self.saved = Some(Saved { camera: app.camera.clone(), hidden: app.hidden.clone(), section: app.section, section_bbox: app.section_bbox });
+        app.toasts.retain(|t| !t.text.starts_with(LABEL));
+        let names: Vec<(BodyId, String)> = m.result.bodies.iter().map(|b| (b.id, b.name.clone())).collect();
+        let find = |want: &Value| -> Result<Vec<BodyId>, String> {
+            let v: Vec<BodyId> = names.iter().filter(|(id, n)| body_ref_matches(*id, n, want)).map(|b| b.0).collect();
+            if v.is_empty() {
+                Err(format!("no body {want} (bodies: {})", names.iter().map(|b| b.1.as_str()).collect::<Vec<_>>().join(", ")))
+            } else {
+                Ok(v)
+            }
+        };
+        for h in &self.hide {
+            app.hidden.extend(find(h)?);
+        }
+        if !self.isolate.is_empty() {
+            let mut keep = Vec::new();
+            for i in &self.isolate {
+                keep.extend(find(i)?);
+            }
+            app.hidden.extend(names.iter().map(|b| b.0).filter(|b| !keep.contains(b)));
+        }
+        // highlights, resolved on the uncut bodies of the result
+        let mut style = ShotStyle { xray: self.xray, ..Default::default() };
+        let mut faces: Vec<(BodyId, FaceInfo)> = Vec::new();
+        let mut edges: Vec<(BodyId, EdgeInfo)> = Vec::new();
+        for want in &self.hl.bodies {
+            style.bodies.extend(find(want)?);
+        }
+        let targets: Vec<&easycad_model::regen::Body> = m.result.bodies.iter().filter(|b| self.hl.on.is_null() || body_ref_matches(b.id, &b.name, &self.hl.on)).collect();
+        if targets.is_empty() && !self.hl.is_empty() {
+            find(&self.hl.on)?;
+        }
+        if !self.hl.faces.is_empty() || !self.hl.edges.is_empty() || !self.hl.features.is_empty() {
+            for b in &targets {
+                let shape = b.shape();
+                let (Ok(fi), Ok(ei)) = (shape.faces(), shape.edges()) else { continue };
+                let scale = shape.bbox().map(|x| x.size().length()).unwrap_or(1.0).max(1.0);
+                for s in &self.hl.faces {
+                    for i in s.resolve_infos(&fi, scale).unwrap_or_default() {
+                        faces.push((b.id, fi[i as usize].clone()));
+                    }
+                }
+                for s in &self.hl.edges {
+                    for i in s.resolve(shape).unwrap_or_default() {
+                        if let Some(e) = ei.iter().find(|e| e.index == i) {
+                            edges.push((b.id, e.clone()));
+                        }
+                    }
+                }
+                for (i, f) in fi.iter().enumerate() {
+                    if m.result.face_origin(b.id, i as u32).and_then(|o| o.feature).is_some_and(|id| self.hl.features.contains(&id)) {
+                        faces.push((b.id, f.clone()));
+                    }
+                }
+            }
+            if faces.is_empty() && edges.is_empty() {
+                return Err("the highlight matched no face or edge on any body: check the selectors with measure (faces/edges)".into());
+            }
+            for f in &self.hl.features {
+                if !faces.iter().any(|(b, fi)| m.result.face_origin(*b, fi.index).and_then(|o| o.feature) == Some(*f)) {
+                    self.notes.push(format!("feature {} made no face that is still in the model", f.0));
+                }
+            }
+        }
+        self.notes.insert(0, format!("highlighted (orange): {} faces, {} edges, {} bodies", faces.len(), edges.len(), style.bodies.len()));
+        style.ghost = self.ghost.unwrap_or(!faces.is_empty() || !edges.is_empty() || !style.bodies.is_empty());
+        style.through = style.ghost || style.xray;
+        if let Some((axis, at, flip)) = self.section {
+            let bb = app.section_bbox.or(m.bbox).ok_or("the model is empty")?;
+            let (lo, hi) = (bb.min[axis], bb.max[axis]);
+            let pos = at.unwrap_or((lo + hi) / 2.0);
+            if pos <= lo || pos >= hi {
+                return Err(format!("section at {pos} is outside the model ({lo:.2} .. {hi:.2} along {})", ["x", "y", "z"][axis]));
+            }
+            app.section_bbox = Some(bb);
+            app.section = Some(crate::app::SectionUi { axis, at: ((pos - lo) / (hi - lo)) as f32, flip });
+            app.request_model();
+            self.notes.push(format!("section: plane {}={pos:.2}, keeping the {} side (cut faces orange-tinted)", ["x", "y", "z"][axis], if flip { "upper" } else { "lower" }));
+        }
+        // faces/edges are mapped onto the shown (maybe cut) meshes once the model is back
+        app.shot = Some(style);
+        self.pending = Some((faces, edges));
+        Ok(())
+    }
+}
+
+impl Shot {
+    /// Map the highlights onto the meshes on screen (a section cut renumbers faces).
+    fn map_highlights(&mut self, app: &mut EasyCadApp) {
+        let (Some((faces, edges)), Some(m)) = (self.pending.take(), app.model.clone()) else { return };
+        let cut = app.section.is_some();
+        let Some(style) = app.shot.as_mut() else { return };
+        for (b, f) in faces {
+            let Some(mb) = m.meshed(b) else { continue };
+            if !cut {
+                style.faces.push((b, f.index));
+                continue;
+            }
+            let scale = scale_of(mb);
+            for i in FaceSelector::from_pick(&f).resolve_infos(&mb.faces, scale).unwrap_or_default() {
+                style.faces.push((b, i));
+            }
+        }
+        for (b, e) in edges {
+            let Some(mb) = m.meshed(b) else { continue };
+            if !cut {
+                style.edges.push((b, e.index));
+                continue;
+            }
+            for i in EdgeSelector::from_pick(&e).resolve(mb.body.shape()).unwrap_or_default() {
+                style.edges.push((b, i));
+            }
+        }
+        style.faces.sort_unstable();
+        style.faces.dedup();
+        style.edges.sort_unstable();
+        style.edges.dedup();
+    }
+
+    /// Point the camera for view `i`.
+    fn aim(&self, app: &mut EasyCadApp) {
+        let (view, label) = &self.views[self.i];
+        if let Some(s) = app.shot.as_mut() {
+            s.label = if self.views.len() > 1 || view.is_some() { label.clone() } else { String::new() };
+        }
+        let aspect = app.viewport_size.x / app.viewport_size.y.max(1.0);
+        app.camera.cancel_anim();
+        if let Some(reg) = view {
+            app.camera.rot = app.camera.region_rot(*reg);
+        }
+        if self.fit {
+            // fit what is shown (isolate / hide count)
+            let m = app.model.clone();
+            let mut bb: Option<(DVec3, DVec3)> = None;
+            for b in m.iter().flat_map(|m| m.result.bodies.iter()).filter(|b| app.body_visible(b.id)) {
+                if let Ok(x) = b.shape().bbox() {
+                    bb = Some(match bb {
+                        Some((lo, hi)) => (lo.min(x.min), hi.max(x.max)),
+                        None => (x.min, x.max),
+                    });
+                }
+            }
+            if let Some((lo, hi)) = bb {
+                let (c, r) = (((lo + hi) * 0.5).as_vec3(), ((hi - lo).length() * 0.5) as f32);
+                let (sc, sr) = (app.camera.scene_center, app.camera.scene_radius);
+                app.camera.fit_sphere(c, r, aspect);
+                // clip planes still cover the whole scene
+                app.camera.scene_center = sc;
+                app.camera.scene_radius = sr.max(r);
+            }
+        }
+    }
+
+    fn restore(&mut self, app: &mut EasyCadApp) {
+        app.shot = None;
+        if let Some(s) = self.saved.take() {
+            if !self.keep_view {
+                app.camera = s.camera;
+            }
+            app.hidden = s.hidden;
+            if app.section != s.section {
+                app.section = s.section;
+                app.section_bbox = s.section_bbox;
+                app.request_model();
+            }
+        }
+    }
+
+    /// One frame's worth of progress: `Ok` = the answer, `Err` = still going.
+    fn advance(mut self: Box<Self>, app: &mut EasyCadApp, ctx: &egui::Context) -> Result<ToolResult, Box<Self>> {
+        ctx.request_repaint();
+        loop {
+            match &mut self.phase {
+                Phase::Model => {
+                    if !model_ready(app) {
+                        return Err(self);
+                    }
+                    if !self.started {
+                        self.started = true;
+                        if let Err(e) = self.setup(app) {
+                            self.restore(app);
+                            return Ok(Err(e));
+                        }
+                        continue; // the section may need a new model
+                    }
+                    self.map_highlights(app);
+                    self.aim(app);
+                    self.phase = Phase::Frames(2);
+                }
+                Phase::Frames(n) => {
+                    if *n > 0 {
+                        *n -= 1;
+                        return Err(self);
+                    }
+                    let (rect, ppp) = (app.viewport_rect, ctx.pixels_per_point());
+                    let (tx, rx) = channel();
+                    let cb = egui::ScreenshotCallback::new(move |img: Arc<egui::ColorImage>| {
+                        let _ = tx.send(crop(&img, rect, ppp));
+                    });
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(cb));
+                    self.phase = Phase::Capture(rx);
+                    return Err(self);
+                }
+                Phase::Capture(rx) => match rx.try_recv() {
+                    Err(TryRecvError::Empty) => return Err(self),
+                    Err(TryRecvError::Disconnected) => {
+                        self.restore(app);
+                        return Ok(Err("the screenshot was not delivered".into()));
+                    }
+                    Ok(Err(e)) => {
+                        self.restore(app);
+                        return Ok(Err(e));
+                    }
+                    Ok(Ok(img)) => {
+                        self.images.push(img);
+                        self.i += 1;
+                        if self.i < self.views.len() {
+                            self.aim(app);
+                            self.phase = Phase::Frames(2);
+                            continue;
+                        }
+                        self.restore(app);
+                        return Ok(self.finish(app));
+                    }
+                },
+            }
+        }
+    }
+
+    fn finish(&mut self, app: &EasyCadApp) -> ToolResult {
+        let n = self.images.len();
+        let cols = match n {
+            1 => 1,
+            2 | 4 => 2,
+            _ => 3,
+        } as u32;
+        let rows = (n as u32).div_ceil(cols);
+        let gap = if n > 1 { 4 } else { 0 };
+        let cell_w = ((self.max_w - gap * (cols - 1)) / cols).max(64);
+        let cells: Vec<image::RgbaImage> = self
+            .images
+            .iter()
+            .map(|img| {
+                let (w, h) = img.dimensions();
+                if w > cell_w {
+                    let nh = (h as f64 * cell_w as f64 / w as f64).round().max(1.0) as u32;
+                    image::imageops::resize(img, cell_w, nh, image::imageops::FilterType::Triangle)
+                } else {
+                    img.clone()
+                }
+            })
+            .collect();
+        let (cw, ch) = cells.iter().fold((0, 0), |(a, b), c| (a.max(c.width()), b.max(c.height())));
+        let mut sheet = image::RgbaImage::from_pixel(cols * cw + gap * (cols - 1), rows * ch + gap * (rows - 1), image::Rgba([12, 13, 15, 255]));
+        for (k, c) in cells.iter().enumerate() {
+            let (x, y) = ((k as u32 % cols) * (cw + gap), (k as u32 / cols) * (ch + gap));
+            image::imageops::overlay(&mut sheet, c, x as i64, y as i64);
+        }
+        let (w, h) = sheet.dimensions();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(sheet)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| format!("PNG encoding failed: {e}"))?;
+        let order: Vec<&str> = self.views.iter().map(|v| v.1.as_str()).collect();
+        let mut text = if n > 1 {
+            format!("{n} views, {} per row, left to right then down: {} ({w}×{h} px)", cols, order.join(", "))
+        } else {
+            format!("{} ({w}×{h} px)", order[0])
+        };
+        text += &format!(", document revision {}", app.doc.data.revision);
+        let hl = !self.hl.is_empty();
+        for note in self.notes.iter().skip(if hl { 0 } else { 1 }) {
+            text += &format!("\n{note}");
+        }
+        if !self.hide.is_empty() || !self.isolate.is_empty() {
+            text += "\nsome bodies were hidden for this picture";
+        }
+        if !self.keep_view {
+            text += "\n(the user's own view was put back afterwards)";
+        }
+        Ok(vec![proto::image(&png), proto::text(text)])
+    }
+}
+
+/// The viewport part of a window screenshot.
+fn crop(img: &egui::ColorImage, rect: egui::Rect, ppp: f32) -> Result<image::RgbaImage, String> {
     let [iw, ih] = img.size;
     let full = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(iw as f32, ih as f32));
     let px = if rect.is_positive() { egui::Rect::from_min_max((rect.min.to_vec2() * ppp).to_pos2(), (rect.max.to_vec2() * ppp).to_pos2()).intersect(full) } else { full };
@@ -1658,18 +2081,7 @@ fn encode_shot(img: &egui::ColorImage, rect: egui::Rect, ppp: f32, max_w: u32) -
             buf.put_pixel(x as u32, y as u32, image::Rgba([c.r(), c.g(), c.b(), 255]));
         }
     }
-    let buf = if w as u32 > max_w {
-        let nh = (h as f64 * max_w as f64 / w as f64).round().max(1.0) as u32;
-        image::imageops::resize(&buf, max_w, nh, image::imageops::FilterType::Triangle)
-    } else {
-        buf
-    };
-    let (ow, oh) = buf.dimensions();
-    let mut png = Vec::new();
-    image::DynamicImage::ImageRgba8(buf)
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|e| format!("PNG encoding failed: {e}"))?;
-    Ok((png, ow, oh))
+    Ok(buf)
 }
 
 // ------------------------------------------------------------------ documents

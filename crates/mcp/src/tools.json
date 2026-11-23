@@ -5,7 +5,10 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "include_definitions": {"type": "boolean", "description": "Include each feature's full `kind` JSON (default true). Set false for a short overview of long histories."}
+        "include_definitions": {
+          "type": "boolean",
+          "description": "Include each feature's full `kind` JSON (default true). Set false for a short overview of long histories."
+        }
       }
     }
   },
@@ -15,16 +18,57 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "name": {"type": "string", "description": "Parameter name (letters, digits, _; not a unit or function name)."},
-        "expr": {"type": ["string", "number"], "description": "Expression or number."},
-        "comment": {"type": "string", "description": "Optional note shown next to the parameter."},
+        "name": {
+          "type": "string",
+          "description": "Parameter name (letters, digits, _; not a unit or function name)."
+        },
+        "expr": {
+          "type": [
+            "string",
+            "number"
+          ],
+          "description": "Expression or number."
+        },
+        "comment": {
+          "type": "string",
+          "description": "Optional note shown next to the parameter."
+        },
         "params": {
           "type": "array",
           "description": "Set several at once instead of name/expr.",
-          "items": {"type": "object", "properties": {"name": {"type": "string"}, "expr": {"type": ["string", "number"]}, "comment": {"type": "string"}}, "required": ["name", "expr"]}
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "expr": {
+                "type": [
+                  "string",
+                  "number"
+                ]
+              },
+              "comment": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "expr"
+            ]
+          }
         },
-        "delete": {"type": "array", "items": {"type": "string"}, "description": "Parameter names to remove (refused while anything still uses them)."},
-        "expected_revision": {"type": "integer", "description": "Refuse if the document revision moved (the user edited since you looked)."}
+        "delete": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Parameter names to remove (refused while anything still uses them)."
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "Refuse if the document revision moved (the user edited since you looked)."
+        }
       }
     }
   },
@@ -34,18 +78,84 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "name": {"type": "string"},
+        "name": {
+          "type": "string"
+        },
         "plane": {
           "description": "\"XY\" (normal +Z), \"XZ\" (front plane, normal -Y, x along +X), \"YZ\" (normal +X, x along +Y), or {origin:[x,y,z], x_dir:[..], normal:[..]}.",
-          "oneOf": [{"type": "string", "enum": ["XY", "XZ", "YZ"]}, {"type": "object"}]
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "XY",
+                "XZ",
+                "YZ"
+              ]
+            },
+            {
+              "type": "object"
+            }
+          ]
         },
-        "offset": {"type": "number", "description": "Move the plane along its normal (mm)."},
-        "elements": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string", "enum": ["rect", "rounded_rect", "circle", "line", "arc", "point"]}, "id": {"type": "string"}, "construction": {"type": "boolean"}}, "required": ["type"]}},
-        "constraints": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]}},
-        "replace": {"type": "integer", "description": "Replace the sketch with this id (features using it follow)."},
-        "expected_revision": {"type": "integer"}
+        "offset": {
+          "type": "number",
+          "description": "Move the plane along its normal (mm)."
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rect",
+                  "rounded_rect",
+                  "circle",
+                  "line",
+                  "arc",
+                  "point"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "construction": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "replace": {
+          "type": "integer",
+          "description": "Replace the sketch with this id (features using it follow)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
       },
-      "required": ["name", "plane", "elements"]
+      "required": [
+        "name",
+        "plane",
+        "elements"
+      ]
     }
   },
   {
@@ -54,13 +164,30 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "name": {"type": "string", "description": "Feature name shown in the history, e.g. \"Bin body\"."},
-        "kind": {"type": "object", "description": "Feature definition, e.g. {\"Extrude\":{...}}."},
-        "position": {"type": "integer", "description": "Insert before this history index instead of at the end."},
-        "keep_on_error": {"type": "boolean", "description": "Keep the feature even if it fails (default false)."},
-        "expected_revision": {"type": "integer"}
+        "name": {
+          "type": "string",
+          "description": "Feature name shown in the history, e.g. \"Bin body\"."
+        },
+        "kind": {
+          "type": "object",
+          "description": "Feature definition, e.g. {\"Extrude\":{...}}."
+        },
+        "position": {
+          "type": "integer",
+          "description": "Insert before this history index instead of at the end."
+        },
+        "keep_on_error": {
+          "type": "boolean",
+          "description": "Keep the feature even if it fails (default false)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
       },
-      "required": ["name", "kind"]
+      "required": [
+        "name",
+        "kind"
+      ]
     }
   },
   {
@@ -69,14 +196,28 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "id": {"type": "integer"},
-        "name": {"type": "string"},
-        "kind": {"type": "object"},
-        "suppressed": {"type": "boolean"},
-        "keep_on_error": {"type": "boolean"},
-        "expected_revision": {"type": "integer"}
+        "id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "object"
+        },
+        "suppressed": {
+          "type": "boolean"
+        },
+        "keep_on_error": {
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
       },
-      "required": ["id"]
+      "required": [
+        "id"
+      ]
     }
   },
   {
@@ -84,14 +225,26 @@
     "description": "Delete a feature by id (one undo step). Features that depended on its bodies will report errors: the reply lists them.",
     "inputSchema": {
       "type": "object",
-      "properties": {"id": {"type": "integer"}, "expected_revision": {"type": "integer"}},
-      "required": ["id"]
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ]
     }
   },
   {
     "name": "regenerate",
     "description": "Wait for the model to finish regenerating and return every feature's report: status (ok / warning / error / unresolved reference / suppressed), fillet and chamfer summaries (edges applied, reduced, failed with their largest workable size), sketch solve reports, timing, and the resulting bodies.",
-    "inputSchema": {"type": "object", "properties": {}}
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
   },
   {
     "name": "measure",
@@ -99,35 +252,161 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "body": {"description": "Body name or {feature,index}; omit for all bodies.", "oneOf": [{"type": "string"}, {"type": "object"}]},
-        "faces": {"type": "boolean", "description": "List faces (default false)."},
-        "edges": {"type": "boolean", "description": "List edges (default false)."},
-        "limit": {"type": "integer", "description": "At most this many faces / edges per body (default 80)."}
+        "body": {
+          "description": "Body name or {feature,index}; omit for all bodies.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "faces": {
+          "type": "boolean",
+          "description": "List faces (default false)."
+        },
+        "edges": {
+          "type": "boolean",
+          "description": "List edges (default false)."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "At most this many faces / edges per body (default 80)."
+        }
       }
     }
   },
   {
     "name": "get_selection",
     "description": "What the user has selected in the viewport right now (bodies, faces, edges), with geometry, what made each face, and selectors you can use directly. Use it when the user says \"this face\" or \"these edges\".",
-    "inputSchema": {"type": "object", "properties": {}}
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
   },
   {
     "name": "interference",
     "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body.",
     "inputSchema": {
       "type": "object",
-      "properties": {"include_reference": {"type": "boolean", "description": "Include reference bodies such as imported PCBs and library parts (default true)."}}
+      "properties": {
+        "include_reference": {
+          "type": "boolean",
+          "description": "Include reference bodies such as imported PCBs and library parts (default true)."
+        }
+      }
     }
   },
   {
     "name": "screenshot",
-    "description": "A PNG of the 3D viewport, as the user sees it, after regeneration finishes. `view` turns the camera like the view cube (the user sees it move): \"iso\", \"front\", \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges); \"current\" keeps the user's view. Use it to check each significant step.",
+    "description": "A PNG of the 3D viewport after regeneration finishes, the way the app draws it. The user's camera, hidden bodies and section are put back afterwards (keep_view: true leaves the camera where the shot was taken). `view` is a view-cube direction: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges); \"current\" is the user's view. `views` takes up to 6 directions and returns one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]): use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body, so you can confirm what a selector picks before using it in add_feature. `section` cuts the model with a plane (x, y or z at a coordinate in mm) to show walls, cavities and parts inside; with no view given it looks straight at the cut. `xray` draws every body see-through; `hide` / `isolate` take body names.",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "view": {"type": "string", "description": "Named view (default \"current\")."},
-        "fit": {"type": "boolean", "description": "Zoom to fit the model (default true when a view is given)."},
-        "max_width": {"type": "integer", "description": "Downscale to at most this many pixels wide (default 1024)."}
+        "view": {
+          "type": "string",
+          "description": "One view direction (default \"current\", or straight at the section cut)."
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Several directions as one contact sheet (1-6)."
+        },
+        "fit": {
+          "type": "boolean",
+          "description": "Zoom to fit the shown bodies (default true for named views)."
+        },
+        "highlight": {
+          "type": "object",
+          "description": "What to paint orange.",
+          "properties": {
+            "faces": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Face selectors, as in add_feature."
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Edge selectors."
+            },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Feature ids: the faces each one made."
+            },
+            "bodies": {
+              "type": "array",
+              "description": "Body names or {feature,index}: whole bodies."
+            },
+            "body": {
+              "description": "Resolve face/edge selectors on this body only (name or {feature,index}); default every body."
+            }
+          }
+        },
+        "ghost": {
+          "type": "boolean",
+          "description": "Fade the bodies that are not highlighted (default true when highlighting)."
+        },
+        "xray": {
+          "type": "boolean",
+          "description": "Draw every body see-through, to show parts inside others."
+        },
+        "section": {
+          "type": "object",
+          "description": "Cut view.",
+          "properties": {
+            "axis": {
+              "type": "string",
+              "enum": [
+                "x",
+                "y",
+                "z"
+              ]
+            },
+            "at": {
+              "type": "number",
+              "description": "Plane position in mm along the axis (default the middle of the model)."
+            },
+            "keep": {
+              "type": "string",
+              "enum": [
+                "below",
+                "above"
+              ],
+              "description": "Which side of the plane stays (default below, i.e. smaller coordinates)."
+            }
+          },
+          "required": [
+            "axis"
+          ]
+        },
+        "hide": {
+          "type": "array",
+          "description": "Body names (or {feature,index}) to leave out."
+        },
+        "isolate": {
+          "type": "array",
+          "description": "Show only these bodies."
+        },
+        "keep_view": {
+          "type": "boolean",
+          "description": "Leave the user's camera at this view afterwards (default false: it is put back)."
+        },
+        "max_width": {
+          "type": "integer",
+          "description": "Width of the returned PNG in pixels (default 1024)."
+        }
       }
     }
   },
@@ -137,12 +416,29 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "path": {"type": "string"},
-        "format": {"type": "string", "enum": ["stl", "3mf", "step"]},
-        "include_reference": {"type": "boolean", "description": "Include reference bodies (STEP only; default false)."},
-        "orient_to_plate": {"type": "boolean", "description": "Apply each body's build orientation (STL/3MF; default true)."}
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "stl",
+            "3mf",
+            "step"
+          ]
+        },
+        "include_reference": {
+          "type": "boolean",
+          "description": "Include reference bodies (STEP only; default false)."
+        },
+        "orient_to_plate": {
+          "type": "boolean",
+          "description": "Apply each body's build orientation (STL/3MF; default true)."
+        }
       },
-      "required": ["path"]
+      "required": [
+        "path"
+      ]
     }
   },
   {
@@ -150,8 +446,17 @@
     "description": "Open a .ecad document folder in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
     "inputSchema": {
       "type": "object",
-      "properties": {"path": {"type": "string"}, "discard_unsaved": {"type": "boolean"}},
-      "required": ["path"]
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "discard_unsaved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ]
     }
   },
   {
@@ -159,21 +464,42 @@
     "description": "Start a new empty document in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
     "inputSchema": {
       "type": "object",
-      "properties": {"name": {"type": "string"}, "discard_unsaved": {"type": "boolean"}},
-      "required": ["name"]
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "discard_unsaved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ]
     }
   },
   {
     "name": "save_document",
     "description": "Save the document: to its current .ecad folder, or to `path` (an absolute path; .ecad is added).",
-    "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      }
+    }
   },
   {
     "name": "undo",
     "description": "Undo the last step. By default only your own steps (labelled \"Claude: ...\") are undone; anything else is refused so you never undo the user's work by accident.",
     "inputSchema": {
       "type": "object",
-      "properties": {"allow_user_steps": {"type": "boolean", "description": "Also undo a step the user made (only when the user asked)."}}
+      "properties": {
+        "allow_user_steps": {
+          "type": "boolean",
+          "description": "Also undo a step the user made (only when the user asked)."
+        }
+      }
     }
   }
 ]

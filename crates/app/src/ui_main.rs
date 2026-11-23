@@ -1561,7 +1561,7 @@ fn sync_indicator(app: &mut EasyCadApp, ui: &mut Ui) {
 }
 
 fn toasts(app: &mut EasyCadApp, ui: &mut Ui) {
-    if app.toasts.is_empty() {
+    if app.toasts.is_empty() || app.shot.is_some() {
         return;
     }
     // stacked upward from just above the viewport's display-mode bar

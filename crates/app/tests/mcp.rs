@@ -334,6 +334,85 @@ fn over_http_with_a_token() {
     assert!(easycad_mcp::read_endpoint().is_none(), "the endpoint file is removed when the bridge stops");
 }
 
+/// Decode the image block of a screenshot reply.
+fn shot_image(c: &[Value]) -> image::RgbaImage {
+    assert_eq!(c[0]["type"], "image");
+    image::load_from_memory(&base64_decode(c[0]["data"].as_str().unwrap())).expect("PNG").to_rgba8()
+}
+
+/// Pixels of the highlight orange.
+fn orange(img: &image::RgbaImage) -> usize {
+    img.pixels().filter(|p| p.0[0] > 190 && p.0[1] > 50 && p.0[1] < 150 && p.0[2] < 90).count()
+}
+
+#[test]
+fn screenshots_that_help_claude_see() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("Seeing"));
+    h.state_mut().mcp = Some(Bridge::new());
+    // a hollow box with a block inside it, as two bodies
+    call(&mut h, "set_param", json!({"params": [{"name": "w", "expr": 60}, {"name": "wall", "expr": 2}]}));
+    let sk = call(&mut h, "add_sketch", json!({"name": "Base", "plane": "XY", "elements": [{"type": "rect", "center": [0, 0], "width": "w", "height": 40}]}));
+    call(&mut h, "add_feature", json!({"name": "Box", "kind": {"Extrude": {"sketch": sk["sketch_id"], "profiles": "All", "distance": 30, "op": "NewBody"}}}));
+    let shell = call(&mut h, "add_feature", json!({"name": "Hollow", "kind": {"Shell": {"open_faces": [], "thickness": "wall"}}}));
+    assert_eq!(shell["feature"]["status"], "ok", "{shell}");
+    let sk2 = call(&mut h, "add_sketch", json!({"name": "Inner", "plane": "XY", "offset": 5, "elements": [{"type": "rect", "center": [0, 0], "width": 20, "height": 10}]}));
+    call(&mut h, "add_feature", json!({"name": "Servo", "kind": {"Extrude": {"sketch": sk2["sketch_id"], "profiles": "All", "distance": 10, "op": "NewBody"}}}));
+
+    // the user's camera, selection and hidden bodies come back unchanged
+    let pose = h.state().camera.pose();
+    let sel = h.state().selection.clone();
+    let c = call_raw(&mut h, "screenshot", json!({"view": "front"})).expect("front");
+    assert_eq!(h.state().camera.pose(), pose, "camera put back");
+    assert_eq!(h.state().selection, sel);
+    assert!(h.state().shot.is_none() && h.state().hidden.is_empty());
+    assert!(c[1]["text"].as_str().unwrap().starts_with("Front"), "{}", c[1]["text"]);
+    let plain = shot_image(&c);
+
+    // a contact sheet of four views
+    let c = call_raw(&mut h, "screenshot", json!({"views": ["front", "top", "right", "iso"], "max_width": 800})).expect("sheet");
+    let sheet = shot_image(&c);
+    assert!(sheet.width() <= 800 && sheet.width() > 700, "{}", sheet.width());
+    assert!(c[1]["text"].as_str().unwrap().contains("4 views, 2 per row"), "{}", c[1]["text"]);
+    assert_eq!(h.state().camera.pose(), pose);
+
+    // the box is closed: from outside the block is invisible; x-ray and isolate show it
+    let c = call_raw(&mut h, "screenshot", json!({"view": "front", "highlight": {"bodies": ["Servo"]}})).expect("ghost");
+    let ghost = shot_image(&c);
+    assert!(orange(&ghost) > 500 && orange(&plain) < 50, "ghosted {} plain {}", orange(&ghost), orange(&plain));
+    let c = call_raw(&mut h, "screenshot", json!({"view": "iso", "isolate": ["Servo"]})).expect("isolate");
+    assert!(c[1]["text"].as_str().unwrap().contains("hidden for this picture"));
+    assert!(h.state().hidden.is_empty(), "hidden bodies put back");
+
+    // highlight what a selector picks: the top face
+    let c = call_raw(&mut h, "screenshot", json!({"view": "top front right", "highlight": {"faces": [{"Extreme": {"normal": [0, 0, 1], "which": "Max"}}], "body": "Box"}})).expect("faces");
+    assert!(orange(&shot_image(&c)) > 2000, "{}", orange(&shot_image(&c)));
+    assert!(c[1]["text"].as_str().unwrap().contains("highlighted (orange): 1 faces"), "{}", c[1]["text"]);
+    // the faces a feature made (the shell's inner skin is behind the outer one: drawn through)
+    let c = call_raw(&mut h, "screenshot", json!({"view": "iso", "highlight": {"features": [shell["feature"]["id"]]}})).expect("feature");
+    assert!(c[1]["text"].as_str().unwrap().contains("6 faces"), "{}", c[1]["text"]);
+    let err = call_err(&mut h, "screenshot", json!({"highlight": {"faces": [{"Cylinders": {"radius": 99.0, "axis": null}}]}}));
+    assert!(err.contains("matched no face"), "{err}");
+
+    // a section through the middle shows the wall and the block inside, looking at the cut
+    let c = call_raw(&mut h, "screenshot", json!({"section": {"axis": "y", "at": 0}})).expect("section");
+    let section = shot_image(&c);
+    let t = c[1]["text"].as_str().unwrap();
+    assert!(t.starts_with("Back") && t.contains("plane y=0.00"), "{t}");
+    assert!(h.state().section.is_none(), "section put back");
+    let err = call_err(&mut h, "screenshot", json!({"section": {"axis": "z", "at": 500}}));
+    assert!(err.contains("outside the model"), "{err}");
+    assert!(h.state().shot.is_none() && h.state().section.is_none());
+
+    // keep_view leaves the camera at the shot's view
+    call_raw(&mut h, "screenshot", json!({"view": "top", "keep_view": true})).expect("keep");
+    assert_ne!(h.state().camera.pose(), pose);
+    let dir = tmp("see");
+    for (name, img) in [("plain", &plain), ("sheet", &sheet), ("ghost", &ghost), ("section", &section)] {
+        img.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+}
+
 fn base64_decode(s: &str) -> Vec<u8> {
     let val = |c: u8| match c {
         b'A'..=b'Z' => c - b'A',

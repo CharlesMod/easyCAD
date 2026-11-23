@@ -151,6 +151,9 @@ pub struct EasyCadApp {
     pub show_perf: bool,
     /// The Claude bridge (MCP server), when on.
     pub mcp: Option<crate::mcp::Bridge>,
+    /// A Claude screenshot in progress: highlights and display overrides for the
+    /// frames it captures (UI overlays are hidden meanwhile).
+    pub shot: Option<crate::mcp::ShotStyle>,
     pub bench_start: Option<f64>,
 }
 
@@ -251,6 +254,7 @@ impl EasyCadApp {
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
             mcp: None,
+            shot: None,
             bench_start: None,
         }
     }
