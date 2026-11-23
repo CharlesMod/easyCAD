@@ -8,6 +8,7 @@ pub mod dialogs;
 pub mod e2e_state;
 pub mod files;
 pub mod mcp;
+pub mod mcp_sketch;
 pub mod panes;
 pub mod pickstack;
 pub mod profiler;

@@ -472,3 +472,23 @@ fn step_assembly_tree_round_trip() {
     let flat = Shape::read_step_str(&step).unwrap();
     assert_eq!(flat.solids().unwrap().len(), 6);
 }
+
+#[test]
+fn min_distance_between_boxes_faces_and_edges() {
+    use occt::SubShape;
+    let a = Shape::make_box(DVec3::ZERO, DVec3::splat(10.0)).unwrap();
+    let b = Shape::make_box(DVec3::new(13.0, 0.0, 0.0), DVec3::splat(10.0)).unwrap();
+    let d = a.min_distance(SubShape::Whole, &b, SubShape::Whole).unwrap();
+    assert!((d.distance - 3.0).abs() < 1e-9, "{d:?}");
+    assert!((d.on_self.x - 10.0).abs() < 1e-9 && (d.on_other.x - 13.0).abs() < 1e-9);
+    // the +X face of `a` against `b`: still 3; the -X face: 13
+    let faces = a.faces().unwrap();
+    let px = faces.iter().position(|f| f.normal.x > 0.9).unwrap() as u32;
+    let nx = faces.iter().position(|f| f.normal.x < -0.9).unwrap() as u32;
+    assert!((a.min_distance(SubShape::Face(px), &b, SubShape::Whole).unwrap().distance - 3.0).abs() < 1e-9);
+    assert!((a.min_distance(SubShape::Face(nx), &b, SubShape::Whole).unwrap().distance - 13.0).abs() < 1e-9);
+    // overlapping boxes touch: 0
+    let c = Shape::make_box(DVec3::splat(5.0), DVec3::splat(10.0)).unwrap();
+    assert!(a.min_distance(SubShape::Whole, &c, SubShape::Whole).unwrap().distance < 1e-9);
+    assert!(a.min_distance(SubShape::Face(999), &b, SubShape::Whole).is_err());
+}
