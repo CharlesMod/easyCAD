@@ -843,6 +843,7 @@ impl Ctx<'_> {
     /// body · end face") with a selector for each face.
     /// `thickness` is the feature's expression: when it is a plain parameter
     /// (`wall`), the message says which parameter to lower.
+    #[allow(clippy::too_many_arguments)]
     fn shell_error(&self, st: &ModelState, body: usize, shape: &Shape, open: &[u32], t: f64, thickness: &Expr, e: occt::Error) -> String {
         let blockers = shape.shell_blockers(open, t).unwrap_or_default();
         let msg = e.to_string();

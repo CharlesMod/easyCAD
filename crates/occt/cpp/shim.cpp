@@ -969,9 +969,11 @@ private:
 // passes `plausibleThick`. `strategy` gets its index; null + `why` when none does.
 TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfShape &closing, double offset,
                               uint32_t &strategy, std::string &why, uint32_t max_steps = 99,
-                              double budget_s = 6.0) {
+                              double budget_s = 12.0) {
   // the default try runs unbounded (as before); every fallback shares `budget_s`,
-  // and none gets more than 4 s
+  // and none gets more than 6 s. The caps are generous on purpose: a result must not
+  // depend on how busy the machine is, so only pathological tries (a sharp-join
+  // offset grinding 10-20 s before failing) are ever cut.
   GProp_GProps vp, ap, op;
   BRepGProp::VolumeProperties(input, vp);
   BRepGProp::SurfaceProperties(input, ap);
@@ -993,7 +995,7 @@ TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfSh
       out_of_time = true;
       break;
     }
-    Handle(DeadlineProgress) deadline = new DeadlineProgress(k == 0 ? 1e9 : std::min(left, 4.0));
+    Handle(DeadlineProgress) deadline = new DeadlineProgress(k == 0 ? 1e9 : std::min(left, 6.0));
     std::string w;
     try {
       OCC_CATCH_SIGNALS
@@ -1293,11 +1295,12 @@ double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, do
   // an error path: about 5 s in all (each failed try at a big wall is slow)
   auto t0 = std::chrono::steady_clock::now();
   auto left = [&] { return 5.0 - std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
-  auto works = [&](double t) {
+  // `budget` < 0: the ladder's own (load-independent) caps, for the confirmation
+  auto works = [&](double t, double budget) {
     uint32_t st = 0;
     std::string why;
     try {
-      return !thickSolidLadder(input, closing, sign * t, st, why, 3, std::max(0.1, left())).IsNull();
+      return !thickSolidLadder(input, closing, sign * t, st, why, 3, budget < 0 ? 12.0 : std::max(0.1, budget)).IsNull();
     } catch (const Standard_Failure &) {
     } catch (const std::exception &) {
     }
@@ -1305,13 +1308,13 @@ double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, do
   };
   for (uint32_t k = 0; k < iters && left() > 0; ++k) {
     double mid = 0.5 * (lo + hi);
-    (works(mid) ? lo : hi) = mid;
+    (works(mid, left()) ? lo : hi) = mid;
   }
   // failure is not monotone near the limit: report a value that was itself shelled
-  // (rounded down to 0.01 mm; backing off 5 % at a time)
+  // with the ladder's normal caps (rounded down to 0.01 mm; backing off 5 % at a time)
   double t = std::floor(lo * 100.0) / 100.0;
   for (int k = 0; k < 4 && t > 0; ++k) {
-    if (std::abs(t - lo) < 1e-9 || works(t)) return t;
+    if (works(t, -1.0)) return t;
     t = std::floor(t * 95.0) / 100.0;
   }
   return 0.0;

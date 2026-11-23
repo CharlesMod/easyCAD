@@ -652,13 +652,17 @@ The idle app uses no CPU (0.0 s over 20 s with the sample open).
   changing it (for example from the printer's wall calculator) re-shells everything
   in one edit. To keep that hands-off:
   - Every fallback runs under a deadline (OCCT's progress `UserBreak`): the default
-    try is unbounded as before, and the fallbacks share 6 s with at most 4 s each. The
+    try is unbounded as before, and the fallbacks share 12 s with at most 6 s each. The
     sharp-join tries used to grind 8–16 s each before failing on a wall too thick for
-    the body; a failing 20 mm wall in the cart went from 80 s to 9 s.
+    the body; a failing 20 mm wall in the cart went from 80 s to about 15 s. The caps
+    are generous on purpose: with 4 s caps a busy machine (parallel builds) once cut a
+    try that normally takes 0.1 s, so the same document regenerated differently.
+    Working fallbacks take 0.1–1 s, far from the caps.
   - On failure `Shape::shell_max_thickness` bisects (6 steps, the fast half of the
     ladder, 5 s budget) for the largest thickness that works, rounds it down to
-    0.01 mm and shells at that value to confirm it (failure is not monotone near the
-    limit: the bisection's 10.31 mm failed, the reported 9.37 mm works). The error says
+    0.01 mm and shells at that value, with the normal caps, to confirm it (failure
+    is not monotone near the limit: the bisection's 10.31 mm failed, the reported
+    9.37 mm works). The error says
     "largest workable thickness: 9.37 mm", and the model adds "(set `wall` to at most
     9.37 mm, or remove the blockers below)" when the thickness is a plain parameter,
     the same way a fillet reports its largest workable size. The test follows the
