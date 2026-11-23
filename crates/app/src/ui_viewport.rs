@@ -350,13 +350,20 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 
     // ------------------------------------------------ overlays
-    filter_bar(app, ui, rect);
-    display_bar(app, ui, rect);
     let dialog_w = if app.dialog.is_some() {
         app.dialog_card_w.max(300.0) + 12.0
     } else {
         0.0
     };
+    // the filters run up to the view cube, or across the top when the cube moved below them
+    let cube_at = cube_pos(rect, dialog_w);
+    let filter_room = if cube_at.y > rect.top() + 12.0 {
+        rect.width() - 24.0
+    } else {
+        cube_at.x - 8.0 - (rect.left() + 12.0)
+    };
+    filter_bar(app, ui, rect, filter_room);
+    display_bar(app, ui, rect);
     cube(app, ui, rect, dialog_w);
     if app.regenerating() && app.model.is_some() {
         let r = Rect::from_center_size(pos2(rect.center().x, rect.top() + 26.0), vec2(150.0, 26.0));
@@ -827,12 +834,32 @@ pub fn overlay_frame() -> Frame {
         .inner_margin(Margin::same(4))
 }
 
-fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
+/// How many of `widths` fit in `avail` (gaps between them), leaving room for a
+/// `more` button when not all do.
+fn fit_count(widths: &[f32], avail: f32, gap: f32, more: f32) -> usize {
+    let total = |k: usize| widths[..k].iter().sum::<f32>() + gap * k.saturating_sub(1) as f32;
+    if total(widths.len()) <= avail {
+        return widths.len();
+    }
+    (0..widths.len()).rev().find(|&k| total(k) + gap + more <= avail).unwrap_or(0)
+}
+
+/// Width of a `widgets::pill` / `widgets::seg` with this label.
+fn seg_w(ui: &Ui, label: &str) -> f32 {
+    ui.painter().layout_no_wrap(label.to_owned(), theme::prop(12.0), theme::TEXT).size().x
+        + 2.0 * ui.spacing().button_padding.x
+}
+
+/// Pick filters (top left). `room` is the width up to the view cube: pills
+/// that do not fit go into a » menu.
+fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, room: f32) {
     egui::Area::new(egui::Id::unique("filters"))
         .order(egui::Order::Middle)
         .fixed_pos(rect.min + vec2(12.0, 12.0))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
+                let room = (room - 10.0).max(30.0);
+                ui.set_max_width(room);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if let Some(note) = app.dialog.as_ref().and_then(|d| d.filter_note()) {
@@ -842,25 +869,45 @@ fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                             (false, true, false) => "Faces only",
                             _ => "Custom filter",
                         };
-                        widgets::pill(ui, label, true);
-                        ui.label(RichText::new(note).size(12.0).color(theme::TEXT_MUTED));
+                        let pill = widgets::pill(ui, label, true);
+                        let rest = room - pill.rect.width() - 10.0;
+                        if rest > 40.0 {
+                            ui.add_sized(
+                                vec2(rest.min(ui.painter().layout_no_wrap(note.to_string(), theme::prop(12.0), theme::TEXT).size().x + 2.0), 26.0),
+                                egui::Label::new(RichText::new(note).size(12.0).color(theme::TEXT_MUTED)).truncate(),
+                            );
+                        } else {
+                            pill.on_hover_text(note);
+                        }
                         ui.add_space(6.0);
                         return;
                     }
                     let f = &mut app.filter;
-                    for (label, on, tip) in [
+                    let items: [(&str, &mut bool, &str); 4] = [
                         ("Bodies", &mut f.bodies, "Pick whole bodies"),
                         ("Faces", &mut f.faces, "Pick faces"),
                         ("Edges", &mut f.edges, "Pick edges"),
-                        (
-                            "Sketches",
-                            &mut f.sketches,
-                            "Pick sketch geometry (in sketch mode)",
-                        ),
-                    ] {
-                        if widgets::pill(ui, label, *on).on_hover_text(tip).clicked() {
+                        ("Sketches", &mut f.sketches, "Pick sketch geometry (in sketch mode)"),
+                    ];
+                    let widths: Vec<f32> = items.iter().map(|(l, _, _)| seg_w(ui, l)).collect();
+                    let k = fit_count(&widths, room, 4.0, 26.0);
+                    let mut rest = Vec::new();
+                    for (i, (label, on, tip)) in items.into_iter().enumerate() {
+                        if i >= k {
+                            rest.push((label, on, tip));
+                        } else if widgets::pill(ui, label, *on).on_hover_text(tip).clicked() {
                             *on = !*on;
                         }
+                    }
+                    if !rest.is_empty() {
+                        let r = widgets::more_button(ui, "More filters", 26.0);
+                        egui::Popup::menu(&r)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                for (label, on, tip) in rest {
+                                    ui.checkbox(on, label).on_hover_text(tip);
+                                }
+                            });
                     }
                 });
             });
@@ -870,22 +917,25 @@ fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
 /// Section controls above the view toolbar: axis, position, flip.
 fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(mut s) = app.section else { return };
-    let w = 330.0;
-    let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 100.0);
+    let narrow = rect.width() < 360.0;
+    let slider_w = (rect.width() - 24.0 - if narrow { 150.0 } else { 220.0 }).clamp(40.0, 130.0);
     egui::Area::new(egui::Id::unique("section_bar"))
         .order(egui::Order::Middle)
-        .fixed_pos(pos)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(pos2(rect.center().x, rect.bottom() - 100.0))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
+                    if !narrow {
+                        ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
+                    }
                     for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
                         if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() {
                             s.axis = i;
                         }
                     }
-                    ui.add_sized(vec2(130.0, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
+                    ui.add_sized(vec2(slider_w, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
                         .on_hover_text("Where the plane cuts, across the model");
                     if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
                         s.flip = !s.flip;
@@ -899,19 +949,43 @@ fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     }
 }
 
+const DISPLAY_MODES: [(DisplayMode, &str, &str); 3] = [
+    (DisplayMode::Shaded, "Shaded", "1"),
+    (DisplayMode::ShadedEdges, "Shaded + edges", "2"),
+    (DisplayMode::Wireframe, "Wireframe", "3"),
+];
+
+/// The view bar (bottom centre): fit, section, overhang, explode and the display
+/// modes. It narrows with the viewport: first the three modes fold into one
+/// dropdown, then everything after fit and section goes into a » menu.
 fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     section_bar(app, ui, rect);
     crate::ui_overhang::legend(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
-    let w = if asm { 640.0 } else { 460.0 };
-    let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 54.0);
+    let explode_on = asm && (app.asm.explode_open || app.explode > 0.0);
+    let gap = 4.0;
+    let current = DISPLAY_MODES.iter().find(|m| m.0 == app.display).map_or("Shaded", |m| m.1);
+    let dropdown = format!("{current} ▾");
+    let head = 30.0 + gap + 30.0 + gap + seg_w(ui, "Overhang") + gap + 9.0 + gap
+        + if asm { seg_w(ui, "Explode") + gap + if explode_on { 110.0 + gap } else { 0.0 } + 9.0 + gap } else { 0.0 };
+    let modes: f32 = DISPLAY_MODES.iter().map(|m| seg_w(ui, m.1) + gap).sum::<f32>() - gap;
+    let avail = rect.width() - 24.0 - 10.0;
+    // 0: everything, 1: modes as a dropdown, 2: fit + section + »
+    let tier = if head + modes <= avail {
+        0
+    } else if head + seg_w(ui, &dropdown) <= avail {
+        1
+    } else {
+        2
+    };
     egui::Area::new(egui::Id::unique("display"))
         .order(egui::Order::Middle)
-        .fixed_pos(pos)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(pos2(rect.center().x, rect.bottom() - 54.0))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = gap;
                     if widgets::icon_button(ui, Icon::Fit, 30.0, "Fit all (F)", true).clicked() {
                         app.fit_all();
                     }
@@ -923,60 +997,97 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                     if r.clicked() {
                         app.toggle_section();
                     }
+                    if tier == 2 {
+                        let r = widgets::more_button(ui, "More view options", 30.0);
+                        egui::Popup::menu(&r)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                ui.set_min_width(170.0);
+                                if ui.selectable_label(app.overhang.on, "Overhang").on_hover_text("Overhang heat map").clicked() {
+                                    app.overhang.toggle();
+                                }
+                                if asm {
+                                    explode_controls(app, ui, explode_on);
+                                }
+                                ui.separator();
+                                mode_items(app, ui);
+                            });
+                        return;
+                    }
                     let on = app.overhang.on;
                     let r = widgets::seg(ui, "Overhang", on).on_hover_text("Overhang heat map: faces that lean out past the process's critical angle need support");
                     if r.clicked() {
                         app.overhang.toggle();
                     }
-                    let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
-                    ui.painter().vline(
-                        r.center().x,
-                        r.y_range(),
-                        Stroke::new(1.0, theme::BORDER_CARD),
-                    );
+                    bar_sep(ui);
                     if asm {
-                        let on = app.asm.explode_open || app.explode > 0.0;
-                        if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
-                            app.asm.explode_open = !on;
-                            app.explode = if on { 0.0 } else { 0.6 };
-                            app.request_model();
-                        }
-                        if on {
-                            let mut v = app.explode;
-                            let r = ui.add_sized(vec2(110.0, 22.0), egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
-                            app.asm_explode_rect = Some(r.rect);
-                            if r.changed() {
-                                app.explode = v;
-                                app.request_model();
+                        explode_controls(app, ui, explode_on);
+                        bar_sep(ui);
+                    }
+                    if tier == 0 {
+                        for (m, label, key) in DISPLAY_MODES {
+                            if widgets::seg(ui, label, app.display == m)
+                                .on_hover_text(format!("{label} ({key})"))
+                                .clicked()
+                            {
+                                app.display = m;
                             }
                         }
-                        let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
-                        ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_CARD));
-                    }
-                    for (m, label, key) in [
-                        (DisplayMode::Shaded, "Shaded", "1"),
-                        (DisplayMode::ShadedEdges, "Shaded + edges", "2"),
-                        (DisplayMode::Wireframe, "Wireframe", "3"),
-                    ] {
-                        if widgets::seg(ui, label, app.display == m)
-                            .on_hover_text(format!("{label} ({key})"))
-                            .clicked()
-                        {
-                            app.display = m;
-                        }
+                    } else {
+                        let r = widgets::seg(ui, &dropdown, true).on_hover_text("Display mode (1 / 2 / 3)");
+                        egui::Popup::menu(&r).show(|ui| mode_items(app, ui));
                     }
                 });
             });
         });
 }
 
+fn bar_sep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_CARD));
+}
+
+fn mode_items(app: &mut EasyCadApp, ui: &mut Ui) {
+    for (m, label, key) in DISPLAY_MODES {
+        if ui.selectable_label(app.display == m, label).on_hover_text(format!("{label} ({key})")).clicked() {
+            app.display = m;
+        }
+    }
+}
+
+/// Explode toggle and, while on, its slider.
+fn explode_controls(app: &mut EasyCadApp, ui: &mut Ui, on: bool) {
+    if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
+        app.asm.explode_open = !on;
+        app.explode = if on { 0.0 } else { 0.6 };
+        app.request_model();
+    }
+    if on {
+        let mut v = app.explode;
+        let r = ui.add_sized(vec2(110.0, 22.0), egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+        app.asm_explode_rect = Some(r.rect);
+        if r.changed() {
+            app.explode = v;
+            app.request_model();
+        }
+    }
+}
+
+/// Where the view cube goes: top right, left of a dialog card, or below the
+/// filters at the left when the card leaves no room beside it.
+fn cube_pos(rect: Rect, right_offset: f32) -> Pos2 {
+    let x = rect.right() - 16.0 - 88.0 - right_offset;
+    if x < rect.left() + 12.0 {
+        pos2(rect.left() + 12.0, rect.top() + 56.0)
+    } else {
+        pos2(x, rect.top() + 12.0)
+    }
+}
+
 fn cube(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
     let w = 88.0;
     let h = viewcube::widget_height(w);
-    let r = Rect::from_min_size(
-        pos2(rect.right() - 16.0 - w - right_offset, rect.top() + 12.0),
-        vec2(w, h),
-    );
+    let r = Rect::from_min_size(cube_pos(rect, right_offset), vec2(w, h));
     let mut action = None;
     egui::Area::new(egui::Id::unique("cube"))
         .order(egui::Order::Middle)
@@ -1207,7 +1318,7 @@ fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
         app.worker.busy_with(crate::worker::Purpose::Preview) || app.preview_dirty.is_some();
     let mut ev = DialogEvent::None;
     let card_w = app.dialog_card_w.max(300.0);
-    let pos = pos2(rect.right() - 16.0 - card_w, rect.top() + 12.0);
+    let pos = pos2((rect.right() - 16.0 - card_w).max(rect.left() + 8.0), rect.top() + 12.0);
     let shown = egui::Area::new(egui::Id::unique("dialog"))
         .order(egui::Order::Middle)
         .fixed_pos(pos)

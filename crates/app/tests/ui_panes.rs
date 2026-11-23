@@ -86,11 +86,25 @@ fn side_panes_collapse_expand_and_persist() {
     snap(&mut h, "panes_open");
 
     // the tab on the viewport's left edge closes the browser, with a slide
-    click_at(&mut h, egui::pos2(full.left() + 6.0, full.center().y));
-    h.run_steps(1);
-    let mid = h.state().viewport_rect;
-    assert!(mid.left() < full.left() && mid.left() > 20.0, "mid-slide: {mid:?}");
-    h.run_steps(20);
+    // (the harness turns animations off; egui's default time back on)
+    h.ctx.all_styles_mut(|s| s.animation_time = 1.0 / 12.0);
+    let p = egui::pos2(full.left() + 6.0, full.center().y);
+    h.hover_at(p);
+    h.step();
+    let mut lefts = Vec::new();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+        lefts.push(h.state().viewport_rect.left());
+    }
+    for _ in 0..20 {
+        h.step();
+        lefts.push(h.state().viewport_rect.left());
+    }
+    let between = lefts.iter().filter(|&&l| l < full.left() - 1.0 && l > easycad_app::panes::RAIL + 1.0).count();
+    assert!(between >= 1, "slides through in-between widths: {lefts:?}");
+    assert!(lefts.windows(2).all(|w| w[1] <= w[0]), "monotonic: {lefts:?}");
+    eprintln!("viewport left edge per frame: {lefts:?}");
     let r = h.state().viewport_rect;
     assert!((r.left() - easycad_app::panes::RAIL).abs() < 2.0, "left on its rail: {r:?}");
     assert_eq!(r.right(), full.right());
@@ -128,9 +142,33 @@ fn side_panes_collapse_expand_and_persist() {
     chord(&mut h, Key::Backslash);
     h.run_steps(20);
     assert_eq!(h.state().viewport_rect, full);
+    // a feature dialog folds the browser for itself only, as before
+    h.key_press(Key::E);
+    h.run_steps(20);
+    assert!(h.state().dialog.is_some());
+    assert!(h.state().viewport_rect.left() < 20.0, "browser folded for the dialog");
+    assert!(!h.state().settings.left_pane_collapsed, "the user's choice is untouched");
+    h.key_press(Key::Escape);
+    h.run_steps(20);
+    assert!(h.state().dialog.is_none());
+    assert_eq!(h.state().viewport_rect, full);
+
     // Cmd/Ctrl+[ toggles the browser
     chord(&mut h, Key::OpenBracket);
     h.run_steps(20);
     assert!(h.state().settings.left_pane_collapsed);
+
+    // the sketch screen's panes follow the same choice and chords
+    h.key_press(Key::S);
+    h.run_steps(20);
+    assert!(matches!(h.state().mode, easycad_app::app::Mode::Sketch(_)));
+    chord(&mut h, Key::CloseBracket);
+    h.run_steps(20);
+    assert!(h.state().settings.right_pane_collapsed);
+    snap(&mut h, "panes_sketch_closed");
+    chord(&mut h, Key::OpenBracket);
+    chord(&mut h, Key::CloseBracket);
+    h.run_steps(20);
+    assert!(!h.state().settings.left_pane_collapsed && !h.state().settings.right_pane_collapsed);
     let _ = std::fs::remove_dir_all(&config);
 }
