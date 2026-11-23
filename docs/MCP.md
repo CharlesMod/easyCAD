@@ -61,12 +61,21 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
   toast). The call then waits until the regeneration worker has returned the model
   of that exact revision, and answers with its reports. Exports and interference
   checks run on their own threads from a snapshot.
-- **Screenshots** set `EasyCadApp::shot` (highlights, faded bodies, a caption; the
-  viewport hides its bars, the toasts and the pick popover meanwhile), move the
-  camera without animation, capture after two frames through
-  `ViewportCommand::Screenshot`, and put the camera, hidden bodies and section
-  back. Highlights are resolved on the uncut bodies and mapped by geometry onto a
-  section's cut faces. The user sees the view jump for a fraction of a second.
+- **Claude sees its own model.** The tools read a regeneration of their own
+  (`worker::Purpose::Agent`, asked for on demand when the revision moved): the
+  whole committed document, whatever the user's window shows. The user's dialog
+  rollback, section view, hidden bodies, display mode, selection, camera and
+  active component do not change what `get_document`, `regenerate`, `measure`,
+  `interference` or `screenshot` see. Only the document (and its rollback marker)
+  is shared. `get_selection` matches what the user clicked in their (maybe cut or
+  rolled-back) view onto that model by geometry.
+- **Screenshots render offscreen** with a `ViewportGpu` of the bridge's own (its own
+  mesh cache and target on the app's wgpu device; `render_to_image` reads it back),
+  from Claude's own view (`mcp::AgentView`: camera, hidden bodies, section, display),
+  which lasts across calls (`view_state` reads or resets it). Sections are cut with
+  `worker::cut_body` on a thread. Highlighted faces and bodies are GPU highlights;
+  highlighted edges and the caption (a 5×7 bitmap font) are drawn on the image. The
+  user's window is never touched, and pictures work while it is covered.
 - **No stale state.** Every call reads the live document. The app keeps the
   revision Claude last saw. When the user changed anything since, `get_document`
   (and the next edit's reply, as `user_changes_before`) lists those steps from the
@@ -94,7 +103,8 @@ Claude Code ──stdio──▶ easycad-mcp (shim) ──HTTP POST /mcp, Bearer
 | `measure` | per body: bbox, volume, area; optionally faces and edges with what made them and a ready selector (`Extreme` / `Cylinders` / `Between` when unique, else `Hint`) |
 | `get_selection` | the user's viewport selection, same format |
 | `interference` | overlapping body pairs with common volume (parts or assemblies) |
-| `screenshot` | viewport PNG after regeneration, the user's camera, hidden bodies and section put back afterwards (`keep_view` to leave it). `view`: view-cube directions (`iso`, `front`, `top front right`, ...) or `current`. `views`: up to 6 as one labelled contact sheet. `highlight`: faces / edges (selectors), `features` (the faces each made) or `bodies` painted orange with the rest faded (`ghost`). `section`: plane cut (`axis`, `at` mm, `keep`), looking straight at the cut. `xray`, `hide`, `isolate`. Downscaled to `max_width` |
+| `screenshot` | offscreen PNG from Claude's own view (kept across calls). `view`: view-cube directions (`iso`, `front`, `top front right`, ...), `current` or `user` (the user's camera). `views`: up to 6 as one labelled contact sheet. `highlight`: faces / edges (selectors), `features` (the faces each made) or `bodies` painted orange with the rest faded (`ghost`). `section`: plane cut (`axis`, `at` mm, `keep`) until `null`. `hide` / `show` / `isolate`, `display` (kept), `xray` (this picture), `reset_view`. `max_width` |
+| `view_state` | Claude's view state; `reset` |
 | `export` | STL / 3MF / STEP to an absolute path (active process profile, build orientation) |
 | `open_document`, `new_document`, `save_document` | refuse to drop unsaved changes unless `discard_unsaved` |
 | `undo` | Claude's last step only, unless `allow_user_steps` |
@@ -115,7 +125,12 @@ feature JSON gives serde's message plus an example.
   a hand edit shows in `user_changes`, a stale `expected_revision` and an open dialog
   are refused, the selection gives a selector, STL export works, and the history
   undoes one Claude step at a time. A second test goes through HTTP with the token.
-  A third takes screenshots of a closed box with a block inside: the user's camera,
-  selection, hidden bodies and section come back; contact sheets, ghosted body
-  highlights, selector and feature highlights and section cuts render (checked by
-  pixel colour); bad selectors and sections out of range are refused.
+  A third takes screenshots of a closed box with a block inside: contact sheets
+  (cell orientation checked), ghosted body highlights, selector, edge and feature
+  highlights and section cuts render (checked by pixel colour), Claude's view state
+  persists and resets, and bad selectors and sections out of range are refused. A
+  fourth changes everything about the user's view (hidden body, section, wireframe,
+  selection, orbit, a dialog rolling back the shell, sketch mode): Claude's picture
+  stays pixel-identical, `measure`, `interference` and `get_document` give the
+  same answers, and Claude's own hide / section / display / views never change the
+  user's camera, section, hidden bodies or display.

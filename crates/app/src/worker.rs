@@ -28,6 +28,9 @@ pub enum Purpose {
     Preview,
     /// A drawing sheet (HLR views + annotations) for the Drawing screen.
     Drawing,
+    /// The Claude bridge's own model: the whole committed document, whatever the
+    /// user's viewport shows (dialog rollback, section, active component).
+    Agent,
 }
 
 pub struct Request {
@@ -227,6 +230,7 @@ fn pkey(p: Purpose) -> PurposeKey {
         Purpose::Model => 0,
         Purpose::Preview => 1,
         Purpose::Drawing => 2,
+        Purpose::Agent => 3,
     })
 }
 
@@ -660,7 +664,7 @@ fn process(
 }
 
 /// One body cut at a plane: the kept half (meshed, with its topology) and the cap.
-fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
+pub fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
     let sv = b.section_view(o, n, q).ok()?;
     let kept = match sv.kept {
         Some(k) => k,

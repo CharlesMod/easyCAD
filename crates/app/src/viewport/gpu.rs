@@ -121,6 +121,8 @@ struct Target {
     msaa_color: Option<wgpu::TextureView>,
     depth: wgpu::TextureView,
     resolve: wgpu::TextureView,
+    /// The texture behind `resolve` (read back for offscreen screenshots).
+    resolve_tex: wgpu::Texture,
     blit_bind: wgpu::BindGroup,
     /// `size / cap`: the blit reads only the part in use
     blit_uv: wgpu::Buffer,
@@ -674,12 +676,17 @@ impl ViewportGpu {
                     .create_view(&Default::default())
             };
         let rt = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let resolve = tex(
-            "viewport resolve",
-            COLOR_FORMAT,
-            1,
-            rt | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-        );
+        let resolve_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport resolve"),
+            size: ext,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: rt | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let resolve = resolve_tex.create_view(&Default::default());
         let msaa_color = (self.msaa > 1).then(|| tex("viewport msaa", COLOR_FORMAT, self.msaa, rt));
         let depth = tex("viewport depth", DEPTH_FORMAT, self.msaa, rt);
         let blit_uv = device.create_buffer(&wgpu::BufferDescriptor {
@@ -714,8 +721,53 @@ impl ViewportGpu {
             msaa_color,
             depth,
             resolve,
+            resolve_tex,
             blit_bind,
         });
+    }
+
+    /// Render `f` and read the image back, blocking until the GPU is done
+    /// (Claude's screenshots: a renderer of their own, never the window's).
+    /// Returns sRGB-encoded RGBA rows, `f.size_px` big.
+    pub fn render_to_image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, f: &Frame3D) -> Result<Vec<u8>, String> {
+        let [w, h] = [f.size_px[0].max(1), f.size_px[1].max(1)];
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen shot") });
+        self.render(device, queue, &mut enc, f);
+        let t = self.target.as_ref().ok_or("no render target")?;
+        let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen shot readback"),
+            size: row as u64 * h as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &t.resolve_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let idx = queue.submit([enc.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buf.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: Some(std::time::Duration::from_secs(10)) })
+            .map_err(|e| format!("GPU readback: {e}"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "GPU readback timed out".to_string())?
+            .map_err(|e| format!("GPU readback: {e}"))?;
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        {
+            let data = buf.get_mapped_range(..).map_err(|e| format!("GPU readback: {e:?}"))?;
+            for y in 0..h as usize {
+                out.extend_from_slice(&data[y * row as usize..y * row as usize + w as usize * 4]);
+            }
+        }
+        buf.unmap();
+        // the next render must not take this image for the window's
+        self.last = None;
+        Ok(out)
     }
 
     /// Render `f` unless the offscreen image already shows exactly it: a frame
