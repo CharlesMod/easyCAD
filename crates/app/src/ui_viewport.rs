@@ -355,16 +355,25 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     } else {
         0.0
     };
-    // the filters run up to the view cube, or across the top when the cube moved below them
+    // the filters run up to the Section checkbox beside the cube, or across the
+    // top when the cube moved below them
     let cube_at = cube_pos(rect, dialog_w);
-    let filter_room = if cube_at.y > rect.top() + 12.0 {
-        rect.width() - 24.0
+    let toggle = section_toggle_rect(ui, rect, cube_at);
+    let (filter_y, filter_room) = if cube_at.y > rect.top() + 12.0 {
+        (rect.top() + 12.0, rect.width() - 24.0)
     } else {
-        cube_at.x - 8.0 - (rect.left() + 12.0)
+        let beside = toggle.left().min(cube_at.x) - 8.0 - (rect.left() + 12.0);
+        if beside >= 70.0 {
+            (rect.top() + 12.0, beside)
+        } else {
+            // a narrow view: the filters take the row under the checkbox
+            (toggle.bottom() + 6.0, cube_at.x - 8.0 - (rect.left() + 12.0))
+        }
     };
-    filter_bar(app, ui, rect, filter_room);
+    filter_bar(app, ui, rect, filter_y, filter_room);
     display_bar(app, ui, rect);
     cube(app, ui, rect, dialog_w);
+    section_toggle(app, ui, rect, cube_at, toggle);
     if app.regenerating() && app.model.is_some() {
         let r = Rect::from_center_size(pos2(rect.center().x, rect.top() + 26.0), vec2(150.0, 26.0));
         painter.rect(
@@ -852,10 +861,10 @@ fn seg_w(ui: &Ui, label: &str) -> f32 {
 
 /// Pick filters (top left). `room` is the width up to the view cube: pills
 /// that do not fit go into a » menu.
-fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, room: f32) {
+fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, y: f32, room: f32) {
     egui::Area::new(egui::Id::unique("filters"))
         .order(egui::Order::Middle)
-        .fixed_pos(rect.min + vec2(12.0, 12.0))
+        .fixed_pos(pos2(rect.left() + 12.0, y))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
                 let room = (room - 10.0).max(30.0);
@@ -914,31 +923,99 @@ fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, room: f32) {
         });
 }
 
-/// Section controls above the view toolbar: axis, position, flip.
-fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
-    let Some(mut s) = app.section else { return };
-    let narrow = rect.width() < 360.0;
-    let slider_w = (rect.width() - 24.0 - if narrow { 150.0 } else { 220.0 }).clamp(40.0, 130.0);
-    egui::Area::new(egui::Id::unique("section_bar"))
+const CUBE_W: f32 = 88.0;
+/// The Section checkbox's size.
+const TOGGLE_H: f32 = 24.0;
+
+fn toggle_w(ui: &Ui) -> f32 {
+    ui.painter().layout_no_wrap("Section".into(), theme::prop(12.0), theme::TEXT).size().x + 16.0 + 6.0 + 16.0
+}
+
+/// Where the Section checkbox sits: left of the cube's home button, level with
+/// it; right of it when the cube was pushed to the viewport's left edge.
+fn section_toggle_rect(ui: &Ui, rect: Rect, cube_at: Pos2) -> Rect {
+    let w = toggle_w(ui);
+    let y = cube_at.y - 4.0;
+    let left = cube_at.x - 8.0 - w;
+    let x = if left >= rect.left() + 12.0 { left } else { cube_at.x + CUBE_W + 8.0 };
+    Rect::from_min_size(pos2(x, y), vec2(w, TOGGLE_H))
+}
+
+/// The floating "Section" checkbox by the view cube's home button and, while
+/// on, the cut's controls in a card under the cube's rotate buttons: axis,
+/// position (drag, or nudge a millimetre at a time), which half to keep.
+fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, cube_at: Pos2, at: Rect) {
+    let mut on = app.section.is_some();
+    egui::Area::new(egui::Id::unique("section_toggle"))
         .order(egui::Order::Middle)
-        .pivot(egui::Align2::CENTER_TOP)
-        .fixed_pos(pos2(rect.center().x, rect.bottom() - 100.0))
+        .fixed_pos(at.min)
         .show(ui.ctx(), |ui| {
-            overlay_frame().show(ui, |ui| {
+            let resp = Frame::new()
+                .fill(if on { theme::ACCENT_BG } else { theme::CARD.gamma_multiply(0.92) })
+                .stroke(Stroke::new(1.0, if on { theme::ACCENT } else { theme::BORDER_INPUT }))
+                .corner_radius(6.0)
+                .inner_margin(Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    ui.spacing_mut().icon_spacing = 6.0;
+                    ui.checkbox(&mut on, RichText::new("Section").size(12.0).color(theme::TEXT_STRONG))
+                })
+                .inner;
+            resp.on_hover_text("Cut the model in half to look inside (section view)");
+        });
+    if on != app.section.is_some() {
+        app.toggle_section();
+    }
+    let Some(mut s) = app.section else { return };
+    let bb = app.section_bbox.or_else(|| app.model.as_ref()?.bbox);
+    // under the cube's step grid, right-aligned with the cube (left-aligned when
+    // the cube sits at the viewport's left edge); never over the rotate buttons
+    let top = cube_at.y + viewcube::widget_height(CUBE_W) + 8.0;
+    let room = (rect.width() - 24.0).max(120.0);
+    let w = room.min(236.0);
+    let cube_left = cube_at.x < rect.left() + 13.0;
+    let x = if cube_left { cube_at.x } else { (cube_at.x + CUBE_W - w).max(rect.left() + 12.0) };
+    let narrow = w < 200.0;
+    egui::Area::new(egui::Id::unique("section_card"))
+        .order(egui::Order::Middle)
+        .fixed_pos(pos2(x, top))
+        .show(ui.ctx(), |ui| {
+            overlay_frame().inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_width(w - 14.0);
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
                     if !narrow {
-                        ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
+                        ui.label(RichText::new("CUT").size(10.5).color(theme::TEXT_LABEL));
                     }
                     for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
-                        if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() {
+                        if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() && s.axis != i {
                             s.axis = i;
+                            s.at = 0.5;
                         }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
+                            s.flip = !s.flip;
+                        }
+                    });
+                });
+                // position: the slider, a millimetre nudge each side, the value
+                let span = bb.map_or(1.0, |b| (b.max[s.axis] - b.min[s.axis]).max(1e-6)) as f32;
+                let step = 1.0 / span;
+                ui.horizontal(|ui| {
+                    if widgets::seg(ui, "−", false).on_hover_text("Nudge the cut 1 mm back").clicked() {
+                        s.at = (s.at - step).clamp(0.0, 1.0);
+                    }
+                    let mm_w = if narrow { 0.0 } else { 58.0 };
+                    let slider_w = (ui.available_width() - 34.0 - mm_w).max(30.0);
                     ui.add_sized(vec2(slider_w, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
-                        .on_hover_text("Where the plane cuts, across the model");
-                    if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
-                        s.flip = !s.flip;
+                        .on_hover_text("Drag the cut across the model");
+                    if widgets::seg(ui, "+", false).on_hover_text("Nudge the cut 1 mm on").clicked() {
+                        s.at = (s.at + step).clamp(0.0, 1.0);
+                    }
+                    if let (Some(b), false) = (bb, narrow) {
+                        let v = b.min[s.axis] as f32 + s.at * span;
+                        ui.label(RichText::new(crate::units::len_u(v as f64)).font(theme::mono(11.0)).color(theme::TEXT_DIM))
+                            .on_hover_text(format!("{} = this, in the model's frame", ["X", "Y", "Z"][s.axis]));
                     }
                 });
             });
@@ -959,7 +1036,6 @@ const DISPLAY_MODES: [(DisplayMode, &str, &str); 3] = [
 /// modes. It narrows with the viewport: first the three modes fold into one
 /// dropdown, then everything after fit and section goes into a » menu.
 fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
-    section_bar(app, ui, rect);
     crate::ui_overhang::legend(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
     let explode_on = asm && (app.asm.explode_open || app.explode > 0.0);
@@ -1076,7 +1152,7 @@ fn explode_controls(app: &mut EasyCadApp, ui: &mut Ui, on: bool) {
 /// Where the view cube goes: top right, left of a dialog card, or below the
 /// filters at the left when the card leaves no room beside it.
 fn cube_pos(rect: Rect, right_offset: f32) -> Pos2 {
-    let x = rect.right() - 16.0 - 88.0 - right_offset;
+    let x = rect.right() - 16.0 - CUBE_W - right_offset;
     if x < rect.left() + 12.0 {
         pos2(rect.left() + 12.0, rect.top() + 56.0)
     } else {
