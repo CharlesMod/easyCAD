@@ -469,11 +469,31 @@ impl Shape {
             Ok(p) => Ok((wrap(Ok(p))?, ShellStrategy::from_code(code))),
             Err(e) => {
                 let Error(mut msg) = Error::from(e);
+                msg += &self.shell_max_note(open_faces, thickness, outward);
                 if let Ok(b) = self.shell_blockers(open_faces, thickness) {
                     msg += &ShellBlocker::summarize(&b, thickness.abs(), |i| format!("face {i}"));
                 }
                 Err(Error(msg))
             }
+        }
+    }
+    /// Largest wall thickness below `thickness` that shells with `open_faces`
+    /// (bisection to about 1/64 of `thickness` with the fast half of the ladder, ~5 s
+    /// budget, rounded down to 0.01 mm and itself shelled), or `None` when none was
+    /// found. Only worth calling after a failure.
+    pub fn shell_max_thickness(&self, open_faces: &[u32], thickness: f64, outward: bool) -> Option<f64> {
+        let off = if outward { thickness.abs() } else { -thickness.abs() };
+        let t = raw::shell_max_thickness(self.r(), open_faces, off, 6).ok()?;
+        (t > 0.0).then_some(t)
+    }
+    /// "; largest workable thickness: 0.62 mm" (or that none was found).
+    fn shell_max_note(&self, open_faces: &[u32], thickness: f64, outward: bool) -> String {
+        if open_faces.is_empty() {
+            return String::new();
+        }
+        match self.shell_max_thickness(open_faces, thickness, outward) {
+            Some(t) => format!("; largest workable thickness: {t:.2} mm"),
+            None => format!("; no thickness down to {:.2} mm works", thickness.abs() / 64.0),
         }
     }
     /// Faces narrower than the wall and near-tangent creases (under 8°), the two

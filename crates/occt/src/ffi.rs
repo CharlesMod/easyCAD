@@ -202,6 +202,7 @@ pub mod bridge {
         /// `strategy`: index into the shim's thick-solid ladder (0 = default); closed
         /// shells: 0 direct offset, 100 + k open-and-close with ladder step k.
         fn shell(s: &Shape, faces: &[u32], offset: f64, strategy: &mut u32) -> Result<UniquePtr<Shape>>;
+        fn shell_max_thickness(s: &Shape, faces: &[u32], offset: f64, iters: u32) -> Result<f64>;
         fn shell_blockers(s: &Shape, open: &[u32], offset: f64) -> Result<Vec<ShellBlocker>>;
         fn draft(
             s: &Shape,

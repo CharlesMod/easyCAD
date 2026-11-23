@@ -153,6 +153,11 @@ fn shell_failure_names_blockers() {
             eprintln!("{e}");
             assert!(!e.to_string().contains("fillet radius"), "{e}");
             assert!(e.to_string().contains("likely blockers: face "), "{e}");
+            // the largest thickness that works is reported, and does work
+            let max = j.shell_max_thickness(&[top_face(&j)], 2.0, false).expect("some thickness works");
+            assert!(e.to_string().contains(&format!("largest workable thickness: {max:.2} mm")), "{e}");
+            assert!(max > 0.3 && max < 2.0, "{max}");
+            j.shell(&[top_face(&j)], max, false).unwrap();
         }
     }
 }

@@ -647,6 +647,33 @@ The idle app uses no CPU (0.0 s over 20 s with the sample open).
   0; a boss flush with a drafted wall; a side pocket; collar + pocket; the error),
   and `crates/model/tests/shell_robust.rs` (the cart's feature tree, the note, the
   named blockers).
+- **Shell: time budget, largest workable thickness, parameter advice.** A shell's
+  thickness should be a parameter (`wall`, `lid_wall`; any `Expr` works), so
+  changing it (for example from the printer's wall calculator) re-shells everything
+  in one edit. To keep that hands-off:
+  - Every fallback runs under a deadline (OCCT's progress `UserBreak`): the default
+    try is unbounded as before, and the fallbacks share 6 s with at most 4 s each. The
+    sharp-join tries used to grind 8–16 s each before failing on a wall too thick for
+    the body; a failing 20 mm wall in the cart went from 80 s to 9 s.
+  - On failure `Shape::shell_max_thickness` bisects (6 steps, the fast half of the
+    ladder, 5 s budget) for the largest thickness that works, rounds it down to
+    0.01 mm and shells at that value to confirm it (failure is not monotone near the
+    limit: the bisection's 10.31 mm failed, the reported 9.37 mm works). The error says
+    "largest workable thickness: 9.37 mm", and the model adds "(set `wall` to at most
+    9.37 mm, or remove the blockers below)" when the thickness is a plain parameter,
+    the same way a fillet reports its largest workable size. The test follows the
+    advice and re-shells.
+  - The cart's lid (a rounded-rect extrude ∩ a YZ profile ∩ an XZ profile, open at the
+    bottom) failed at 0.8 mm; it shells now with complete intersection (~1 s, the note
+    says so), and at 0.4, 1.0, 1.2 and 1.6 mm too. With the lid lengthened 1.3 in at
+    the front (the side profile then trims its rounded front corners), the default
+    offset at 0.6 mm returned the body unshelled (10 300 mm³) and the old code
+    reported it `Ok`; the checks reject that, and complete intersection gives the
+    1 630 mm³ shell.
+  - Not done: per-face thickness reduction (thinner only where a feature blocks it),
+    and an exact inner solid for bodies built as an intersection of extruded profiles
+    (each profile inset by t, intersected). The offset-and-cut step uses OCCT's 3D
+    offset of the whole body instead, which covers the lid.
 
 ## Concurrency contract
 
@@ -1028,8 +1055,11 @@ verified on load.
     need `note: None` (only `regen.rs` builds them).
   - A failed Shell's `FeatureStatus::Error` now lists likely blockers, each with
     its face label and a `FaceSelector::Hint` in JSON, plus what to change.
-  - occt: `Shape::shell_report`, `Shape::shell_blockers`, `ShellStrategy`,
-    `ShellBlocker`. `Shape::shell` keeps its signature.
+  - occt: `Shape::shell_report`, `Shape::shell_blockers`, `Shape::shell_max_thickness`,
+    `ShellStrategy`, `ShellBlocker`. `Shape::shell` keeps its signature.
+  - A failed shell's message includes "largest workable thickness: X mm", plus "set
+    `param` to at most X mm" when its thickness is a plain parameter. A GUI can parse
+    it to offer "Use X mm"; it takes up to ~10 s to compute, on the error path only.
 
 - **Kernel batch (todo-kernel).**
   - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to

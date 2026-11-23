@@ -841,11 +841,18 @@ fn tidy(s: Shape) -> Shape {
 impl Ctx<'_> {
     /// A failed shell's message, its blockers named by feature and role ("Lower
     /// body · end face") with a selector for each face.
-    fn shell_error(&self, st: &ModelState, body: usize, shape: &Shape, open: &[u32], t: f64, e: occt::Error) -> String {
+    /// `thickness` is the feature's expression: when it is a plain parameter
+    /// (`wall`), the message says which parameter to lower.
+    fn shell_error(&self, st: &ModelState, body: usize, shape: &Shape, open: &[u32], t: f64, thickness: &Expr, e: occt::Error) -> String {
         let blockers = shape.shell_blockers(open, t).unwrap_or_default();
         let msg = e.to_string();
         // the kernel's own list names bare indices; replace it
-        let head = msg.split("; likely blockers:").next().unwrap_or(&msg).trim_start_matches("kernel: ").to_string();
+        let mut head = msg.split("; likely blockers:").next().unwrap_or(&msg).trim_start_matches("kernel: ").to_string();
+        let name = thickness.0.trim();
+        let is_param = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && name.parse::<f64>().is_err();
+        if let (true, Some(max)) = (is_param, head.split("largest workable thickness: ").nth(1).and_then(|r| r.split(" mm").next())) {
+            head += &format!(" (set `{name}` to at most {max} mm, or remove the blockers below)");
+        }
         if blockers.is_empty() {
             return format!("{head} (no narrow face or shallow crease found; try a thinner wall)");
         }
@@ -1172,7 +1179,7 @@ impl Ctx<'_> {
                         }
                         st.bodies[i].geom = BodyGeom::new(out);
                     }
-                    Err(e) => return fail(self.shell_error(st, i, &shape, &faces, t, e)),
+                    Err(e) => return fail(self.shell_error(st, i, &shape, &faces, t, thickness, e)),
                 }
             }
             FeatureKind::Draft { body, faces, neutral, pull, angle_deg, offset } => {

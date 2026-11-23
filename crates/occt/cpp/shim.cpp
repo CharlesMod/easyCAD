@@ -101,6 +101,8 @@
 #include <ShapeFix_Wire.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <ShapeBuild_ReShape.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
 #include <BRepTools_History.hxx>
 #include <StlAPI_Writer.hxx>
 #include <TopExp.hxx>
@@ -948,10 +950,27 @@ bool plausibleThick(const TopoDS_Shape &r, int solids_in, double V, double A_wal
   return true;
 }
 
+// Progress indicator that asks the algorithm to stop after a deadline (OCCT's offset
+// polls UserBreak between stages): bounds a fallback that would grind for 10-20 s.
+class DeadlineProgress : public Message_ProgressIndicator {
+public:
+  explicit DeadlineProgress(double seconds)
+      : until_(std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                      std::chrono::duration<double>(seconds))) {}
+  Standard_Boolean UserBreak() override { return std::chrono::steady_clock::now() > until_; }
+  void Show(const Message_ProgressScope &, const Standard_Boolean) override {}
+
+private:
+  std::chrono::steady_clock::time_point until_;
+};
+
 // Thick solid of `input` with `closing` faces open: the first strategy whose result
 // passes `plausibleThick`. `strategy` gets its index; null + `why` when none does.
 TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfShape &closing, double offset,
-                              uint32_t &strategy, std::string &why) {
+                              uint32_t &strategy, std::string &why, uint32_t max_steps = 99,
+                              double budget_s = 6.0) {
+  // the default try runs unbounded (as before); every fallback shares `budget_s`,
+  // and none gets more than 4 s
   GProp_GProps vp, ap, op;
   BRepGProp::VolumeProperties(input, vp);
   BRepGProp::SurfaceProperties(input, ap);
@@ -963,9 +982,17 @@ TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfSh
   TopoDS_Shape healed;
   TopTools_ListOfShape healed_closing;
   std::string first;
-  for (uint32_t k = 0; k < sizeof(kThickTries) / sizeof(kThickTries[0]); ++k) {
+  const auto ladder_t0 = std::chrono::steady_clock::now();
+  bool out_of_time = false;
+  for (uint32_t k = 0; k < sizeof(kThickTries) / sizeof(kThickTries[0]) && k < max_steps; ++k) {
     const ThickTry &tr = kThickTries[k];
     auto t0 = std::chrono::steady_clock::now();
+    const double left = budget_s - std::chrono::duration<double>(t0 - ladder_t0).count();
+    if (k > 0 && left <= 0.05) {
+      out_of_time = true;
+      break;
+    }
+    Handle(DeadlineProgress) deadline = new DeadlineProgress(k == 0 ? 1e9 : std::min(left, 4.0));
     std::string w;
     try {
       OCC_CATCH_SIGNALS
@@ -998,9 +1025,10 @@ TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfSh
       }
       BRepOffsetAPI_MakeThickSolid mk;
       mk.MakeThickSolidByJoin(in, *cl, offset, tr.tol, BRepOffset_Skin, tr.complete ? Standard_True : Standard_False,
-                              Standard_False, tr.join);
-      mk.Build();
-      if (!mk.IsDone()) {
+                              Standard_False, tr.join, Standard_False, deadline->Start());
+      if (!mk.IsDone() && deadline->UserBreak()) {
+        w = "stopped after its time budget";
+      } else if (!mk.IsDone()) {
         w = "the offset did not close";
       } else {
         TopoDS_Shape r = mk.Shape();
@@ -1028,6 +1056,11 @@ TopoDS_Shape thickSolidLadder(const TopoDS_Shape &input, const TopTools_ListOfSh
       std::fprintf(stderr, "  thick solid try %u: %s, %.1f ms\n", k, w.c_str(),
                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     if (k == 0) first = w;
+  }
+  if (max_steps < 99 || out_of_time) {
+    why = std::string(out_of_time ? "the offset strategies ran out of time" : "every offset strategy tried failed") +
+          " (default: " + first + ")";
+    return TopoDS_Shape();
   }
   // Last: offset and cut (inward, planar open faces only). The cavity is the body's
   // inner 3D offset; under each open face the wall is punched out by the face's
@@ -1238,6 +1271,49 @@ std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, 
   TopoDS_Shape r = thickSolidLadder(input, closing, offset, strategy, why_open);
   if (r.IsNull()) fail("shell failed: " + why_open);
   return wrap(r);
+}
+
+// Largest thickness (same sign as `offset`, below |offset|) that shells: bisection
+// with the fast half of the ladder (default, complete intersection, loose
+// tolerance), `iters` steps. 0 when even |offset| / 2^iters fails.
+double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t iters) {
+  requireShape(s, "shell_max_thickness");
+  TopoDS_Shape copy = privateCopy(s.s);
+  auto m = mapOf(copy, TopAbs_FACE);
+  TopTools_ListOfShape closing;
+  for (uint32_t i : faces) {
+    if (i >= static_cast<uint32_t>(m.Extent())) fail("shell: face index out of range");
+    closing.Append(m.FindKey(static_cast<int>(i) + 1));
+  }
+  if (closing.IsEmpty()) return 0.0;
+  TopoDS_Shape input = simplify(copy);
+  double lo = 0.0, hi = std::abs(offset);
+  const double sign = offset < 0 ? -1.0 : 1.0;
+  // an error path: about 5 s in all (each failed try at a big wall is slow)
+  auto t0 = std::chrono::steady_clock::now();
+  auto left = [&] { return 5.0 - std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+  auto works = [&](double t) {
+    uint32_t st = 0;
+    std::string why;
+    try {
+      return !thickSolidLadder(input, closing, sign * t, st, why, 3, std::max(0.1, left())).IsNull();
+    } catch (const Standard_Failure &) {
+    } catch (const std::exception &) {
+    }
+    return false;
+  };
+  for (uint32_t k = 0; k < iters && left() > 0; ++k) {
+    double mid = 0.5 * (lo + hi);
+    (works(mid) ? lo : hi) = mid;
+  }
+  // failure is not monotone near the limit: report a value that was itself shelled
+  // (rounded down to 0.01 mm; backing off 5 % at a time)
+  double t = std::floor(lo * 100.0) / 100.0;
+  for (int k = 0; k < 4 && t > 0; ++k) {
+    if (std::abs(t - lo) < 1e-9 || works(t)) return t;
+    t = std::floor(t * 95.0) / 100.0;
+  }
+  return 0.0;
 }
 
 std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, V3 pull,

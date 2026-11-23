@@ -44,22 +44,31 @@ fn trash_cart_shell_succeeds_and_reports_the_fallback() {
 }
 
 #[test]
-fn impossible_shell_names_the_blocking_faces() {
-    // a 0.3 mm step under a 1 mm-tall straight collar, 2 mm wall: cannot be shelled
-    let d = 46.57 * 2.083f64.to_radians().tan();
-    let mut doc = Document::new("Cart");
-    let lower = extrude(&mut doc, "Lower body", 0.0, 34.4, 9.17, 46.57, -2.083, BoolOp::NewBody);
-    extrude(&mut doc, "Collar", 46.57, 34.4 + 2.0 * d + 0.6, 9.17 + d + 0.3, 1.0, 0.0, BoolOp::Join);
-    let shell = doc.add_feature("Shell", FeatureKind::Shell { body: None, open_faces: vec![FaceSelector::top()], thickness: 2.0.into(), outward: false });
-    let _ = lower;
+fn impossible_shell_reports_largest_thickness_and_parameter() {
+    // a 20 mm wall in a body 34 mm across cannot be built; the error gives the
+    // largest thickness that works and names the parameter to lower
+    let (mut doc, _, shell) = cart(37.82, 10.87, 1.2);
+    doc.set_param("wall", "20").unwrap();
+    doc.edit("wall param", |d| {
+        if let Some(f) = d.features.iter_mut().find(|f| f.id == shell) {
+            if let FeatureKind::Shell { thickness, .. } = &mut f.kind {
+                *thickness = "wall".into();
+            }
+        }
+        Ok::<_, ()>(())
+    })
+    .unwrap();
     let r = doc.regenerate();
     let rep = r.reports.iter().find(|x| x.feature == shell).unwrap();
-    let FeatureStatus::Error(msg) = &rep.status else {
-        eprintln!("built anyway: {:?}", rep.note);
-        return;
-    };
-    eprintln!("{msg}");
+    let FeatureStatus::Error(msg) = &rep.status else { panic!("built a 20 mm wall: {:?}", rep.note) };
+    eprintln!("{msg}\n({:.0} ms)", rep.elapsed_ms);
     assert!(!msg.contains("fillet radius"), "{msg}");
-    assert!(msg.contains("likely blockers:") && msg.contains("{\"Hint\""), "{msg}");
-    assert!(msg.contains("Collar ·") || msg.contains("Lower body ·"), "{msg}");
+    assert!(msg.contains("largest workable thickness: ") && msg.contains("set `wall` to at most "), "{msg}");
+    // following the advice works: one parameter edit re-shells
+    let max: f64 = msg.split("set `wall` to at most ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+    assert!(max > 5.0 && max < 20.0, "{max}");
+    doc.set_param("wall", &*format!("{max}")).unwrap();
+    let r = doc.regenerate();
+    let rep = r.reports.iter().find(|x| x.feature == shell).unwrap();
+    assert!(matches!(rep.status, FeatureStatus::Ok), "{:?}", rep.status);
 }
