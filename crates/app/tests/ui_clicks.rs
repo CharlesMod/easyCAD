@@ -2269,6 +2269,34 @@ fn face_key(app: &EasyCadApp, n: glam::DVec3) -> easycad_app::pickstack::PickKey
     PickKey { body: b.body.id, kind: PickKind::Face(f.index) }
 }
 
+/// Fillet dialog open (faces and edges both pickable): a cursor a couple of pixels
+/// from a top edge has that edge as the current candidate, not the face it borders;
+/// mid-face the face is current.
+#[test]
+fn fillet_dialog_hover_near_an_edge_prefers_the_edge() {
+    use easycad_app::pickstack::PickKind;
+    let _serial = serial();
+    let mut h = harness(box_doc());
+    top_view(&mut h);
+    h.state_mut().open_dialog(easycad_app::dialogs::DialogKind::Fillet);
+    h.run_steps(2);
+    let f = h.state().filter;
+    assert!(f.faces && f.edges);
+    // top edge at x = 30 (the block is -30..30 x -20..20 x 0..20): hover 2 px inside it
+    let on = screen_of(&h, glam::Vec3::new(30.0, 0.0, 20.0));
+    let p = egui::pos2(on.x - 2.0, on.y);
+    h.hover_at(p);
+    h.run_steps(3);
+    let cur = h.state().stack.current().cloned().expect("a candidate under the cursor");
+    assert!(matches!(cur.key.kind, PickKind::Edge(_)), "{:?} of {:?}", cur, h.state().stack.items);
+    // mid-face: the face
+    let mid = screen_of(&h, glam::Vec3::new(0.0, 0.0, 20.0));
+    h.hover_at(mid);
+    h.run_steps(3);
+    let cur = h.state().stack.current().cloned().expect("a candidate under the cursor");
+    assert!(matches!(cur.key.kind, PickKind::Face(_)), "{:?}", cur);
+}
+
 #[test]
 fn fillet_dialog_takes_face_picks() {
     use easycad_model::feature::FeatureKind;
