@@ -236,7 +236,7 @@ pub struct SketchSession {
     pub projected: Vec<Vec<DVec2>>,
     /// The model edge each projected polyline comes from (exact projection), with
     /// its 3D samples.
-    pub projected_src: Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
+    pub projected_src: Vec<Option<(easycad_model::feature::BodyId, easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
     /// The model faces seen in the sketch plane (empty in slice mode).
     pub projected_faces: Vec<ProjFace>,
     /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
@@ -769,9 +769,9 @@ impl SketchSession {
         let mut done = 0;
         for i in todo {
             let n0 = self.sketch.entities.len();
-            if let Some((info, samples)) = self.projected_src.get(i).cloned().flatten() {
+            if let Some((body, info, samples)) = self.projected_src.get(i).cloned().flatten() {
                 // exact: lines stay lines, circles facing the plane stay circles
-                self.sketch.project_edge(&info, Some(&samples), false);
+                self.sketch.project_edge_from(body, &info, Some(&samples), false);
             } else if let Some(pl) = self.projected.get(i).cloned() {
                 let first = self.sketch.points.len() as u32;
                 let mut prev = None;
@@ -2012,7 +2012,7 @@ fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
     (edges, caps, outline)
 }
 
-type Projected = (Vec<Vec<DVec2>>, Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
+type Projected = (Vec<Vec<DVec2>>, Vec<Option<(easycad_model::feature::BodyId, easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
 
 /// Model edges seen in the sketch plane (mesh polylines for display) with the edge
 /// each comes from, for exact projection.
@@ -2027,7 +2027,7 @@ fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Projected {
                     .map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
                     .collect();
                 v.push(p3.iter().map(|p| plane.to_local(*p)).collect());
-                src.push(b.edges.get(e.edge as usize).cloned().map(|info| (info, p3)));
+                src.push(b.edges.get(e.edge as usize).cloned().map(|info| (b.body.id, info, p3)));
             }
         }
     }
@@ -4344,6 +4344,44 @@ mod tests {
         assert_eq!(back.constraints, s.sketch.constraints);
         s.delete_dimension(i);
         assert!(!s.sketch.constraints.iter().any(|c| matches!(c, Constraint::LineDistance(..))));
+    }
+
+    #[test]
+    fn editor_opens_on_relinked_projection() {
+        use easycad_model::document::Document;
+        use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+        let extrude = |sketch, d: f64| FeatureKind::Extrude {
+            sketch,
+            profiles: ProfileSel::All,
+            distance: d.into(),
+            symmetric: false,
+            reverse: false,
+            draft_deg: 0.0.into(),
+            op: BoolOp::NewBody,
+            target: None,
+        };
+        let mut doc = Document::new("Link");
+        let mut a = Sketch::new("A", Plane::XY);
+        a.circle(DVec2::new(20.0, 15.0), 5.0);
+        let sa = doc.add_sketch(a);
+        let fa = doc.add_feature("A", extrude(sa, 10.0));
+        let edges = doc.regenerate().body_by_id(BodyId::of(fa)).unwrap().shape().edges().unwrap();
+        let top = edges.iter().find(|e| e.circle.is_some_and(|(c, _, _)| (c.z - 10.0).abs() < 1e-6)).unwrap();
+        let mut b = Sketch::new("B", Plane::XY.offset(10.0));
+        b.project_edge_from(BodyId::of(fa), top, None, false);
+        let sb = doc.add_sketch(b);
+        doc.add_feature("B", extrude(sb, 5.0));
+        // move the source circle in A, regenerate as the app does, then open B
+        doc.edit("Move", |d| {
+            d.sketch_mut(sa).unwrap().points.iter_mut().for_each(|p| *p += DVec2::new(40.0, -30.0));
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        let res = doc.regenerate().clone();
+        doc.data.apply_relinked(&res);
+        let s = SketchSession::edit(sb, doc.data.sketch(sb).unwrap().clone(), &doc.data);
+        let Geom::Circle { center, .. } = s.sketch.entities[0].geom else { panic!() };
+        assert!((s.sketch.point(center) - DVec2::new(60.0, -15.0)).length() < 1e-6);
     }
 
     #[test]

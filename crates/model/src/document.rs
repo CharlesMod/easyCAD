@@ -308,6 +308,28 @@ impl DocData {
         changed
     }
 
+    /// Write back the geometry regen re-linked projections to (points, entities,
+    /// constraints; the plane is `refresh_sketch_planes`' job), so the stored
+    /// sketch, the editor and regen agree. Returns whether anything changed. (A
+    /// cache update like `refresh_sketch_planes`: no undo step, no revision bump.)
+    pub fn apply_relinked(&mut self, res: &RegenResult) -> bool {
+        let mut changed = false;
+        for (id, sk) in res.reports.iter().flat_map(|r| &r.relinked) {
+            if let Some(e) = self.sketches.iter_mut().find(|e| e.id == *id) {
+                if e.sketch.points != sk.points || e.sketch.entities != sk.entities || e.sketch.constraints != sk.constraints
+                    || e.sketch.proj_srcs != sk.proj_srcs
+                {
+                    e.sketch.points = sk.points.clone();
+                    e.sketch.entities = sk.entities.clone();
+                    e.sketch.constraints = sk.constraints.clone();
+                    e.sketch.proj_srcs = sk.proj_srcs.clone();
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn import(&self, id: ImportId) -> Option<&Import> {
         self.imports.iter().find(|s| s.id == id).map(|s| &s.import)
     }

@@ -87,6 +87,28 @@ pub struct Sketch {
     /// datum's current plane, and `plane` is only a cache / fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane_src: Option<crate::feature::FeatureId>,
+    /// Where each projected model edge came from, so regen can re-project it when
+    /// the model changes. Entities projected before this existed stay frozen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proj_srcs: Vec<ProjSrc>,
+}
+
+/// The model edge a projection was made from (associative projection).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjSrc {
+    pub body: crate::feature::BodyId,
+    /// Built from the pick like a fillet's edge reference.
+    pub edge: crate::select::EdgeSelector,
+    /// Kind, size and axis of the edge: finds it again after a large move.
+    #[serde(default)]
+    pub sig: Option<crate::select::EdgeSig>,
+    /// The edge midpoint at projection time (shifts `samples` when it moves).
+    pub mid: glam::DVec3,
+    /// 3D samples of a polyline projection (empty for exact lines and circles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<glam::DVec3>,
+    /// The sketch entities this projection made, in creation order.
+    pub entities: Vec<EntityId>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -130,7 +152,7 @@ pub struct SketchProfiles {
 
 impl Sketch {
     pub fn new(name: impl Into<String>, plane: Plane) -> Self {
-        Sketch { name: name.into(), plane, points: Vec::new(), entities: Vec::new(), constraints: Vec::new(), plane_src: None }
+        Sketch { name: name.into(), plane, points: Vec::new(), entities: Vec::new(), constraints: Vec::new(), plane_src: None, proj_srcs: Vec::new() }
     }
 
     pub fn point(&self, p: PointId) -> DVec2 {

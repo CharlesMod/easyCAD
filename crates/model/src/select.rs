@@ -227,6 +227,69 @@ impl FaceSelector {
     }
 }
 
+/// What an edge is regardless of where it sits: kind, intrinsic size (circle radius
+/// or line length), axis (circle axis or line tangent) and an anchor (circle
+/// centre or line midpoint). Lets a projection find its edge again after a move
+/// too large for the hint to accept.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeSig {
+    pub kind: EdgeKind,
+    pub size: f64,
+    pub axis: DVec3,
+    pub anchor: DVec3,
+}
+
+impl EdgeSig {
+    /// `None` for edges with no simple intrinsic size (splines, ellipses).
+    pub fn of(e: &EdgeInfo) -> Option<Self> {
+        match (e.kind, e.circle) {
+            (CurveKind::Line, _) => Some(EdgeSig { kind: EdgeKind::Line, size: e.length, axis: e.tangent, anchor: e.midpoint }),
+            (CurveKind::Circle, Some((c, ax, r))) => Some(EdgeSig { kind: EdgeKind::Circle, size: r, axis: ax, anchor: c }),
+            _ => None,
+        }
+    }
+
+    /// The edge with this signature (size within 0.1 %, axis parallel) after the
+    /// model moved. Edges that left the plane (normal `n`) of the original are
+    /// dropped when any stays in it. One match is taken; several are told apart by
+    /// distance from the old anchor (across the edge for lines, so sliding along
+    /// it costs nothing) and the nearest wins only if clearly nearer (1.5x).
+    pub fn find_like(&self, edges: &[EdgeInfo], n: DVec3) -> Option<u32> {
+        let mut hits: Vec<(u32, DVec3)> = edges
+            .iter()
+            .filter_map(|e| {
+                let o = EdgeSig::of(e)?;
+                let same = o.kind == self.kind
+                    && (o.size - self.size).abs() <= 1e-3 * self.size.abs().max(1e-6)
+                    && o.axis.normalize_or_zero().dot(self.axis.normalize_or_zero()).abs() > PARALLEL_COS;
+                same.then_some((e.index, o.anchor))
+            })
+            .collect();
+        let n = n.normalize_or_zero();
+        let coplanar: Vec<_> = hits.iter().copied().filter(|(_, a)| (*a - self.anchor).dot(n).abs() < 1e-4).collect();
+        if !coplanar.is_empty() {
+            hits = coplanar;
+        }
+        if hits.len() == 1 {
+            return Some(hits[0].0);
+        }
+        let t = self.axis.normalize_or_zero();
+        let dist = |a: DVec3| {
+            let d = a - self.anchor;
+            if self.kind == EdgeKind::Line {
+                (d - t * d.dot(t)).length()
+            } else {
+                d.length()
+            }
+        };
+        hits.sort_by(|x, y| dist(x.1).total_cmp(&dist(y.1)));
+        match hits.as_slice() {
+            [a, b, ..] if dist(b.1) > 1.5 * dist(a.1) => Some(a.0),
+            _ => None,
+        }
+    }
+}
+
 impl EdgeSelector {
     /// Selector for an edge picked in the viewport.
     pub fn from_pick(e: &EdgeInfo) -> Self {
