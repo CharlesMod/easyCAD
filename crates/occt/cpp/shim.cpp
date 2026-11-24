@@ -280,6 +280,8 @@ template <class F> auto withStepLock(F &&f) -> decltype(f()) {
 
 // ---- one-time process setup (called from shim.h before the first kernel call) --
 
+#ifndef _WIN32
+// POSIX only: Windows has no sigaction; there OCCT's own SEH translation is used as is.
 namespace {
 struct sigaction gPrevSegv, gPrevBus, gOccSegv, gOccBus;
 
@@ -313,8 +315,12 @@ void chainedFault(int sig, siginfo_t *info, void *ctx) {
   else forwardSignal(inKernel ? gOccBus : gPrevBus, sig, info, ctx);
 }
 } // namespace
+#endif
 
 void initKernelOnce() {
+#ifdef _WIN32
+  OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
+#else
   sigaction(SIGSEGV, nullptr, &gPrevSegv);
   sigaction(SIGBUS, nullptr, &gPrevBus);
   OSD::SetSignal(OSD_SignalMode_Set, Standard_False);
@@ -327,6 +333,7 @@ void initKernelOnce() {
   sigemptyset(&ch.sa_mask);
   sigaction(SIGSEGV, &ch, nullptr);
   sigaction(SIGBUS, &ch, nullptr);
+#endif
   // OCCT prints through a shared messenger; silence it once, before any algorithm can
   // be iterating its printer list on another thread.
   Handle(Message_Messenger) msgr = Message::DefaultMessenger();
