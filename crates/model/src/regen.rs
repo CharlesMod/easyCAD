@@ -816,7 +816,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn sketch(&mut self, id: SketchId) -> R<Sketch> {
+    fn sketch(&mut self, id: SketchId, st: &ModelState) -> R<Sketch> {
         let mut sk = self.doc.sketch(id).cloned().ok_or_else(|| Fail::msg(format!("sketch {id:?} does not exist")))?;
         if let Some(src) = sk.plane_src {
             match self.cur_datums.iter().find(|(f, _)| *f == src) {
@@ -828,6 +828,7 @@ impl Ctx<'_> {
                 }
             }
         }
+        self.relink_projections(&mut sk, st);
         if !sk.constraints.is_empty() {
             let rep = sk.solve(self.vals)?;
             let ok = rep.converged;
@@ -839,8 +840,32 @@ impl Ctx<'_> {
         Ok(sk)
     }
 
-    fn profiles(&mut self, id: SketchId, sel: &ProfileSel) -> R<(Plane, Vec<Profile>)> {
-        let sk = self.sketch(id)?;
+    /// Re-project the sketch's associative projections from the model state just
+    /// before the consuming feature. A projection whose edge cannot be found keeps
+    /// its last good geometry and puts a warning on the feature.
+    fn relink_projections(&mut self, sk: &mut Sketch, st: &ModelState) {
+        let mut lost: Vec<String> = Vec::new();
+        for i in 0..sk.proj_srcs.len() {
+            if let Err(why) = relink_one(sk, i, st) {
+                lost.push(format!("{} ({why})", sk.proj_srcs[i].body.feature.0));
+            }
+        }
+        if !lost.is_empty() {
+            let msg = format!(
+                "sketch `{}`: lost {} projected model edge(s) from feature id {}; keeping their last geometry",
+                sk.name,
+                lost.len(),
+                lost.join(", ")
+            );
+            self.warning = Some(match self.warning.take() {
+                Some(w) => format!("{w}; {msg}"),
+                None => msg,
+            });
+        }
+    }
+
+    fn profiles(&mut self, id: SketchId, sel: &ProfileSel, st: &ModelState) -> R<(Plane, Vec<Profile>)> {
+        let sk = self.sketch(id, st)?;
         if let ProfileSel::Containing(pts) = sel {
             let regions = sk.regions();
             if regions.is_empty() {
@@ -920,7 +945,7 @@ impl Ctx<'_> {
         };
         match kind {
             FeatureKind::Extrude { sketch, profiles, distance, symmetric, reverse, draft_deg, op, target } => {
-                let (plane, prs) = self.profiles(*sketch, profiles)?;
+                let (plane, prs) = self.profiles(*sketch, profiles, st)?;
                 let d = self.ev(distance)?;
                 let draft = self.ev(draft_deg)?;
                 let dir = if *reverse { -plane.normal } else { plane.normal };
@@ -949,7 +974,7 @@ impl Ctx<'_> {
                 self.apply_op(st, fid, name, *op, Some(st.bodies[ti].id), tool)?;
             }
             FeatureKind::Revolve { sketch, profiles, axis, angle_deg, op, target } => {
-                let (plane, prs) = self.profiles(*sketch, profiles)?;
+                let (plane, prs) = self.profiles(*sketch, profiles, st)?;
                 let a = self.ev(angle_deg)?;
                 let mut tools = Vec::new();
                 for pr in &prs {
@@ -1036,7 +1061,7 @@ impl Ctx<'_> {
                 st.bodies[i].geom = BodyGeom::new(shape.draft(&ids, *pull, a, &frame(neutral))?);
             }
             FeatureKind::Rib { sketch, thickness, height, draft_deg, flip, body, extent } => {
-                let sk = self.sketch(*sketch)?;
+                let sk = self.sketch(*sketch, st)?;
                 let (t, dr) = (self.ev(thickness)?, self.ev(draft_deg)?);
                 let chains = sk.profiles().open;
                 if chains.is_empty() {
@@ -1951,4 +1976,23 @@ fn teardrop_body(b: &Body, profile: &ProcessProfile, doc: &DocData, rep: &mut Pr
         return Err(occt::Error("teardrop cut produced an invalid solid".into()));
     }
     Ok(Some(r))
+}
+
+/// Re-resolve projection `i` of `sk` against `st` and re-project it. The stored
+/// hint is tried first (as for fillets); when the edge has moved too far for it,
+/// the one edge with the same kind, size and axis is taken instead.
+fn relink_one(sk: &mut Sketch, i: usize, st: &ModelState) -> Result<(), String> {
+    let src = sk.proj_srcs[i].clone();
+    let body = st.bodies.iter().find(|b| b.id == src.body).ok_or("its body no longer exists")?;
+    let shape = body.shape();
+    let edges = shape.edges().map_err(|e| e.to_string())?;
+    let idx = match src.edge.resolve(shape) {
+        Ok(v) if !v.is_empty() => v[0],
+        Ok(_) | Err(crate::select::SelectError::Unresolved { .. }) => {
+            src.sig.and_then(|s| s.find_like(&edges, sk.plane.normal)).ok_or("no matching edge")?
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let info = edges.iter().find(|e| e.index == idx).ok_or("edge missing")?;
+    sk.relink_projection(i, info)
 }

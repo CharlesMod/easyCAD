@@ -236,7 +236,7 @@ pub struct SketchSession {
     pub projected: Vec<Vec<DVec2>>,
     /// The model edge each projected polyline comes from (exact projection), with
     /// its 3D samples.
-    pub projected_src: Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
+    pub projected_src: Vec<Option<(easycad_model::feature::BodyId, easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>,
     /// The model faces seen in the sketch plane (empty in slice mode).
     pub projected_faces: Vec<ProjFace>,
     /// "Slice body at sketch plane": cut faces (triangles) and their outlines, in
@@ -769,9 +769,9 @@ impl SketchSession {
         let mut done = 0;
         for i in todo {
             let n0 = self.sketch.entities.len();
-            if let Some((info, samples)) = self.projected_src.get(i).cloned().flatten() {
+            if let Some((body, info, samples)) = self.projected_src.get(i).cloned().flatten() {
                 // exact: lines stay lines, circles facing the plane stay circles
-                self.sketch.project_edge(&info, Some(&samples), false);
+                self.sketch.project_edge_from(body, &info, Some(&samples), false);
             } else if let Some(pl) = self.projected.get(i).cloned() {
                 let first = self.sketch.points.len() as u32;
                 let mut prev = None;
@@ -2012,7 +2012,7 @@ fn slice_model(m: &crate::worker::Output, plane: &Plane) -> Slice {
     (edges, caps, outline)
 }
 
-type Projected = (Vec<Vec<DVec2>>, Vec<Option<(easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
+type Projected = (Vec<Vec<DVec2>>, Vec<Option<(easycad_model::feature::BodyId, easycad_model::occt::EdgeInfo, Vec<glam::DVec3>)>>);
 
 /// Model edges seen in the sketch plane (mesh polylines for display) with the edge
 /// each comes from, for exact projection.
@@ -2027,7 +2027,7 @@ fn project_edges(m: &crate::worker::Output, plane: &Plane) -> Projected {
                     .map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
                     .collect();
                 v.push(p3.iter().map(|p| plane.to_local(*p)).collect());
-                src.push(b.edges.get(e.edge as usize).cloned().map(|info| (info, p3)));
+                src.push(b.edges.get(e.edge as usize).cloned().map(|info| (b.body.id, info, p3)));
             }
         }
     }

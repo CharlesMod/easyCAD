@@ -9,7 +9,7 @@
 use glam::{DVec2, DVec3};
 
 use crate::params::{Expr, Values};
-use crate::sketch::{Constraint, EntityId, Geom, PointId, Sketch};
+use crate::sketch::{Constraint, Entity, EntityId, Geom, PointId, Sketch};
 
 /// Old id → new id after a removal (`None` = removed).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -701,6 +701,78 @@ impl Sketch {
             self.entities[i].projected = true;
         }
         made
+    }
+
+    /// `project_edge`, remembering the source (`body` + a selector built from the
+    /// pick) so regen can re-project it when the model changes.
+    pub fn project_edge_from(
+        &mut self,
+        body: crate::feature::BodyId,
+        e: &occt::EdgeInfo,
+        samples: Option<&[DVec3]>,
+        construction: bool,
+    ) -> Vec<EntityId> {
+        let made = self.project_edge(e, samples, construction);
+        if !made.is_empty() {
+            self.proj_srcs.push(crate::sketch::ProjSrc {
+                body,
+                edge: crate::select::EdgeSelector::from_pick(e),
+                sig: crate::select::EdgeSig::of(e),
+                mid: e.midpoint,
+                samples: if made.len() > 1 { samples.map(<[DVec3]>::to_vec).unwrap_or_default() } else { Vec::new() },
+                entities: made.clone(),
+            });
+        }
+        made
+    }
+
+    /// Re-project projection `i` from the (moved) edge `e`: the entities it made
+    /// keep their ids, constraints and profiles, and take the new geometry and Fix
+    /// targets. Errors, leaving the sketch untouched, if the edge now projects to a
+    /// different shape (e.g. a circle that tilted away).
+    pub fn relink_projection(&mut self, i: usize, e: &occt::EdgeInfo) -> Result<(), String> {
+        let src = self.proj_srcs.get(i).ok_or("no such projection")?.clone();
+        let shifted: Vec<DVec3> = src.samples.iter().map(|p| *p + (e.midpoint - src.mid)).collect();
+        let mut fresh = Sketch::new("", self.plane);
+        let new = fresh.project_edge(e, (!shifted.is_empty()).then_some(shifted.as_slice()), false);
+        if new.len() != src.entities.len() {
+            return Err("the edge now projects to a different shape".into());
+        }
+        let mut pts: Vec<(PointId, DVec2)> = Vec::new();
+        let mut radii: Vec<(EntityId, f64)> = Vec::new();
+        for (o, n) in src.entities.iter().zip(&new) {
+            let (go, gn) = (self.entities.get(o.0 as usize).map(|x| x.geom), fresh.entities[n.0 as usize].geom);
+            match (go, gn) {
+                (Some(Geom::Line { a, b }), Geom::Line { a: na, b: nb }) => pts.extend([(a, fresh.point(na)), (b, fresh.point(nb))]),
+                (Some(Geom::Arc { center, start, end }), Geom::Arc { center: nc, start: ns, end: ne }) => {
+                    pts.extend([(center, fresh.point(nc)), (start, fresh.point(ns)), (end, fresh.point(ne))])
+                }
+                (Some(Geom::Circle { center, .. }), Geom::Circle { center: nc, radius }) => {
+                    pts.push((center, fresh.point(nc)));
+                    radii.push((*o, radius));
+                }
+                _ => return Err("the edge now projects to a different shape".into()),
+            }
+        }
+        for (p, q) in pts {
+            self.points[p.0 as usize] = q;
+            for c in &mut self.constraints {
+                if matches!(c, Constraint::Fix(f, _) if *f == p) {
+                    *c = Constraint::Fix(p, q);
+                }
+            }
+        }
+        for (id, r) in radii {
+            if let Some(Entity { geom: Geom::Circle { radius, .. }, .. }) = self.entities.get_mut(id.0 as usize) {
+                *radius = r;
+            }
+            for c in &mut self.constraints {
+                if matches!(c, Constraint::Radius(x, _) if *x == id) {
+                    *c = Constraint::Radius(id, Expr::from(r));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn project_edge_inner(&mut self, e: &occt::EdgeInfo, samples: Option<&[DVec3]>, construction: bool) -> Vec<EntityId> {
