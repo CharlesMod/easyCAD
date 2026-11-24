@@ -951,7 +951,7 @@ impl Ctx<'_> {
         // edges and faces
         let placed;
         let kind = match kind {
-            FeatureKind::Fillet { .. } | FeatureKind::Chamfer { .. } | FeatureKind::Draft { .. } if !self.xf.is_empty() => {
+            FeatureKind::Fillet { .. } | FeatureKind::Chamfer { .. } | FeatureKind::Draft { .. } | FeatureKind::DeleteFace { .. } if !self.xf.is_empty() => {
                 placed = self.placed_selectors(kind, name)?;
                 &placed
             }
@@ -1065,6 +1065,12 @@ impl Ctx<'_> {
                 let shape = st.bodies[i].shape().clone();
                 let faces = resolve_faces(&shape, open_faces)?;
                 st.bodies[i].geom = BodyGeom::new(shape.shell(&faces, t, *outward)?);
+            }
+            FeatureKind::DeleteFace { body, faces } => {
+                let i = self.target(st, *body)?;
+                let shape = st.bodies[i].shape().clone();
+                let ids = resolve_faces(&shape, faces)?;
+                st.bodies[i].geom = BodyGeom::new(shape.remove_faces(&ids)?);
             }
             FeatureKind::Draft { body, faces, neutral, pull, angle_deg, offset } => {
                 let i = self.target(st, *body)?;
@@ -1754,6 +1760,9 @@ impl Ctx<'_> {
                 *e = edges(e)?;
                 *s = sets(s)?;
                 *skipped = edges(skipped)?;
+            }
+            FeatureKind::DeleteFace { faces, .. } => {
+                *faces = faces.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<_>>()?;
             }
             FeatureKind::Draft { faces, neutral, pull, .. } => {
                 *faces = faces.iter().map(|s| s.placed(&pl).map_err(global)).collect::<R<_>>()?;
