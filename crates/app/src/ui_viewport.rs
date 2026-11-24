@@ -1530,6 +1530,10 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
             app.open_sketch_on_selection();
             ui.close();
         }
+        if ui.button("Delete face   Del").clicked() {
+            app.delete_selected_faces();
+            ui.close();
+        }
         if ui.button("Shell (remove faces)…").clicked() {
             app.open_dialog(crate::dialogs::DialogKind::Shell);
             ui.close();
