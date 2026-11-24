@@ -154,6 +154,17 @@ pub enum FeatureKind {
         #[serde(default)]
         target: Option<BodyId>,
     },
+    /// Extrude an existing planar face of a body: the face (with its holes) is the
+    /// profile, its outward normal is +direction. `distance` is signed along that
+    /// normal: positive grows out of the body, negative goes into it.
+    ExtrudeFace {
+        face: FaceSelector,
+        distance: Expr,
+        op: BoolOp,
+        /// Body the face belongs to and the op acts on (`None` = the last solid body).
+        #[serde(default)]
+        target: Option<BodyId>,
+    },
     Revolve {
         sketch: SketchId,
         profiles: ProfileSel,
@@ -489,6 +500,7 @@ impl FeatureKind {
     pub fn label(&self) -> &'static str {
         match self {
             FeatureKind::Extrude { .. } => "Extrude",
+            FeatureKind::ExtrudeFace { .. } => "Extrude face",
             FeatureKind::Revolve { .. } => "Revolve",
             FeatureKind::Fillet { .. } => "Fillet",
             FeatureKind::Chamfer { .. } => "Chamfer",

@@ -931,6 +931,23 @@ impl Ctx<'_> {
                 let tool = self.tx(fuse_many(&tools)?)?;
                 self.apply_op(st, fid, name, *op, *target, tool)?;
             }
+            FeatureKind::ExtrudeFace { face, distance, op, target } => {
+                let d = self.ev(distance)?;
+                let ti = self.target(st, *target)?;
+                let body = st.bodies[ti].shape();
+                let idx = *resolve_faces(&body, std::slice::from_ref(face))?.first().ok_or_else(|| Fail::msg("the face no longer exists"))?;
+                let info = body.faces()?.into_iter().find(|f| f.index == idx).ok_or_else(|| Fail::msg("the face no longer exists"))?;
+                if info.kind != SurfaceKind::Plane {
+                    return fail("extrude face: the picked face is not planar");
+                }
+                let n = info.normal.normalize_or_zero();
+                let x = if n.dot(DVec3::Z).abs() < 0.9 { DVec3::Z.cross(n) } else { DVec3::X.cross(n) }.normalize_or_zero();
+                let fr = Frame { origin: info.point, x_dir: x, normal: n };
+                let tool = body.face_shape(idx)?.extrude_ext(&fr, n, d, false, 0.0)?;
+                let tool = self.tx(tool)?;
+                // A cut must act on the body the face belongs to, even when it is not the last solid.
+                self.apply_op(st, fid, name, *op, Some(st.bodies[ti].id), tool)?;
+            }
             FeatureKind::Revolve { sketch, profiles, axis, angle_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles)?;
                 let a = self.ev(angle_deg)?;
