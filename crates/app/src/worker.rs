@@ -131,6 +131,9 @@ pub struct Output {
     /// (or occurrence) key, in its own mesh frame. The viewport draws it as a
     /// wireframe, so the cut-away half stays visible as context.
     pub cut_away: HashMap<BodyId, Arc<Mesh>>,
+    /// Section view: bodies whose B-rep cut failed (or came back poking through the
+    /// plane); their meshes were clipped at the plane instead, with no cap.
+    pub section_clipped: Vec<BodyId>,
     /// The position the bodies are shown in (`None` = as modeled).
     pub pose: Option<PositionId>,
     /// The position the request asked for (even when it failed).
@@ -649,14 +652,18 @@ fn process(
     }
     let mut caps = Vec::new();
     let mut cut_away = HashMap::new();
+    let mut section_clipped: Vec<BodyId> = Vec::new();
     let (mut bodies, mut picker) = (bodies, picker);
     let mut ctx = ctx;
     if let Some((o, n)) = r.cut {
         // section view (GUI_NEEDS #9): keep what is behind the plane, add the caps
         for b in &mut bodies {
-            if let Some((mb, cap)) = cut_body(&b.body, o, n, r.quality) {
-                if let Some(whole) = b.mesh.clone().filter(|_| !kept_whole(&mb, b)) {
+            if let Some((mb, cap, clipped)) = cut_body_ex(&b.body, o, n, r.quality) {
+                if let Some(whole) = b.mesh.clone().filter(|_| clipped || !kept_whole(&mb, b)) {
                     cut_away.insert(b.body.id, whole);
+                }
+                if clipped {
+                    section_clipped.push(b.body.id);
                 }
                 *b = mb;
                 if let Some(c) = cap {
@@ -671,9 +678,12 @@ fn process(
         for c in &mut ctx {
             let inv = c.xf.inverse();
             let (lo, ln) = (inv.transform_point3(o), inv.transform_vector3(n));
-            if let Some((mb, cap)) = cut_body(&c.mb.body, lo, ln, r.quality) {
-                if let Some(whole) = c.mb.mesh.clone().filter(|_| !kept_whole(&mb, &c.mb)) {
+            if let Some((mb, cap, clipped)) = cut_body_ex(&c.mb.body, lo, ln, r.quality) {
+                if let Some(whole) = c.mb.mesh.clone().filter(|_| clipped || !kept_whole(&mb, &c.mb)) {
                     cut_away.insert(c.key, whole);
+                }
+                if clipped {
+                    section_clipped.push(c.key);
                 }
                 c.picker = mb.mesh.as_ref().map(|m| Arc::new(BodyPicker::new(mb.body.id, m)));
                 c.mb = mb;
@@ -701,6 +711,7 @@ fn process(
         ctx_pickable,
         caps,
         cut_away,
+        section_clipped,
         pose: pose_id.filter(|_| pose_error.is_none()),
         pose_requested: pose_id,
         pose_error,
@@ -718,30 +729,146 @@ pub fn kept_whole(cut: &MeshedBody, whole: &MeshedBody) -> bool {
 
 /// One body cut at a plane: the kept half (meshed, with its topology) and the cap.
 pub fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
-    let sv = b.section_view(o, n, q).ok()?;
-    let kept = match sv.kept {
-        Some(k) => k,
-        // all of it is in front of the plane: nothing left to show
-        None => {
-            return Some((
-                MeshedBody { body: b.clone(), mesh: None, error: None, colors: None, faces: Vec::new(), edges: Vec::new() },
-                None,
+    cut_body_ex(b, o, n, q).map(|(mb, cap, _)| (mb, cap))
+}
+
+/// Like [`cut_body`], and says whether the B-rep cut failed (an error, or a kept half
+/// that still pokes through the plane) so the body's mesh was clipped at the plane
+/// instead: no cap, but nothing is ever drawn past the plane.
+pub fn cut_body_ex(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>, bool)> {
+    match b.section_view(o, n, q) {
+        Ok(sv) => {
+            let kept = match sv.kept {
+                Some(k) => k,
+                // all of it is in front of the plane: nothing left to show
+                None => {
+                    return Some((
+                        MeshedBody { body: b.clone(), mesh: None, error: None, colors: None, faces: Vec::new(), edges: Vec::new() },
+                        None,
+                        false,
+                    ))
+                }
+            };
+            let mesh = kept.mesh_quality(q).ok();
+            if mesh.as_ref().is_some_and(|m| pokes_through(m, o, n)) {
+                return clip_fallback(b, o, n, q);
+            }
+            Some((
+                MeshedBody {
+                    faces: kept.shape().faces().unwrap_or_default(),
+                    edges: kept.shape().edges().unwrap_or_default(),
+                    mesh,
+                    error: None,
+                    colors: None,
+                    body: kept,
+                },
+                // references (a PCB) are cut but get no cap: they draw translucent
+                if b.reference { None } else { sv.cap_mesh },
+                false,
             ))
         }
-    };
-    let mesh = kept.mesh_quality(q).ok();
-    Some((
-        MeshedBody {
-            faces: kept.shape().faces().unwrap_or_default(),
-            edges: kept.shape().edges().unwrap_or_default(),
-            mesh,
-            error: None,
-            colors: None,
-            body: kept,
-        },
-        // references (a PCB) are cut but get no cap: they draw translucent
-        if b.reference { None } else { sv.cap_mesh },
-    ))
+        Err(_) => clip_fallback(b, o, n, q),
+    }
+}
+
+fn clip_fallback(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>, bool)> {
+    let whole = b.mesh_quality(q).ok()?;
+    let (faces, edges) = (b.shape().faces().unwrap_or_default(), b.shape().edges().unwrap_or_default());
+    let mesh = clip_mesh(&whole, o, n);
+    Some((MeshedBody { body: b.clone(), mesh: mesh.map(Arc::new), error: None, colors: None, faces, edges }, None, true))
+}
+
+/// Does any vertex lie in front of the plane (along `n`) by more than a hair?
+pub fn pokes_through(m: &Mesh, o: DVec3, n: DVec3) -> bool {
+    let n = n.normalize_or_zero();
+    let diag = mesh_diag(m);
+    let tol = 1e-4 * diag + 1e-3;
+    m.positions.iter().any(|p| (DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) - o).dot(n) > tol)
+}
+
+fn mesh_diag(m: &Mesh) -> f64 {
+    let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+    for p in &m.positions {
+        let v = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    if m.positions.is_empty() { 0.0 } else { (hi - lo).length() }
+}
+
+/// The part of a mesh behind the plane (against `n`): triangles are cut at the plane
+/// (positions and normals interpolated, face ids kept), edge polylines likewise.
+/// `None` when nothing is left.
+pub fn clip_mesh(m: &Mesh, o: DVec3, n: DVec3) -> Option<Mesh> {
+    let n = n.normalize_or_zero();
+    // signed distance, negative = kept side
+    let d = |p: [f32; 3]| (DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) - o).dot(n);
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let mut out = Mesh::default();
+    for (ti, t) in m.indices.iter().enumerate() {
+        // polygon of (position, normal) behind the plane
+        let v: Vec<([f32; 3], [f32; 3], f64)> = t
+            .iter()
+            .map(|&i| {
+                let p = m.positions[i as usize];
+                (p, m.normals.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0]), d(p))
+            })
+            .collect();
+        let mut poly: Vec<([f32; 3], [f32; 3])> = Vec::new();
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            if a.2 <= 0.0 {
+                poly.push((a.0, a.1));
+            }
+            if (a.2 <= 0.0) != (b.2 <= 0.0) {
+                let f = (a.2 / (a.2 - b.2)) as f32;
+                poly.push((lerp(a.0, b.0, f), lerp(a.1, b.1, f)));
+            }
+        }
+        if poly.len() < 3 {
+            continue;
+        }
+        let base = out.positions.len() as u32;
+        for (p, nm) in &poly {
+            out.positions.push(*p);
+            out.normals.push(*nm);
+        }
+        for k in 1..poly.len() as u32 - 1 {
+            out.indices.push([base, base + k, base + k + 1]);
+            out.tri_face.push(m.tri_face.get(ti).copied().unwrap_or(0));
+        }
+    }
+    for e in &m.edges {
+        let mut run: Vec<[f32; 3]> = Vec::new();
+        let mut flush = |run: &mut Vec<[f32; 3]>, out: &mut Mesh| {
+            if run.len() >= 2 {
+                out.edges.push(easycad_model::occt::EdgePolyline { edge: e.edge, points: std::mem::take(run) });
+            } else {
+                run.clear();
+            }
+        };
+        for w in 0..e.points.len() {
+            let a = e.points[w];
+            if d(a) <= 0.0 {
+                run.push(a);
+            }
+            if let Some(&b) = e.points.get(w + 1) {
+                if (d(a) <= 0.0) != (d(b) <= 0.0) {
+                    let f = (d(a) / (d(a) - d(b))) as f32;
+                    run.push(lerp(a, b, f));
+                    if d(a) <= 0.0 {
+                        flush(&mut run, &mut out);
+                    }
+                }
+            }
+        }
+        flush(&mut run, &mut out);
+    }
+    if out.indices.is_empty() && out.edges.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// The other occurrences' bodies, placed in the view frame (with the explode).

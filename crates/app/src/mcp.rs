@@ -2251,9 +2251,9 @@ impl Shot {
                             std::thread::spawn(move || {
                                 let mut sc = Scene { bodies: Vec::new(), caps: Vec::new(), cut_away: Vec::new() };
                                 for b in visible {
-                                    match crate::worker::cut_body(&b.body, o, n, q) {
-                                        Some((mb, cap)) => {
-                                            if let Some(whole) = b.mesh.clone().filter(|_| !crate::worker::kept_whole(&mb, &b)) {
+                                    match crate::worker::cut_body_ex(&b.body, o, n, q) {
+                                        Some((mb, cap, clipped)) => {
+                                            if let Some(whole) = b.mesh.clone().filter(|_| clipped || !crate::worker::kept_whole(&mb, &b)) {
                                                 sc.cut_away.push(whole);
                                             }
                                             sc.bodies.push(mb);

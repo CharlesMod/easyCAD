@@ -349,7 +349,7 @@ void initKernelOnce() {
 
 namespace {
 
-TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op) {
+TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op, double fuzzy = 0.0) {
   TopTools_ListOfShape args, tools;
   args.Append(a);
   tools.Append(b);
@@ -365,6 +365,7 @@ TopoDS_Shape doBoolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op
   alg->SetNonDestructive(Standard_True);
   alg->SetRunParallel(parallelBop());
   alg->SetUseOBB(useObb());
+  if (fuzzy > 0.0) alg->SetFuzzyValue(fuzzy);
   alg->Build();
   if (!alg->IsDone() || alg->HasErrors()) {
     std::ostringstream ss;
@@ -1467,16 +1468,91 @@ std::unique_ptr<Shape> half_space_side(const Shape &s, V3 origin, V3 normal, boo
   gp_Dir n = D(normal, "split normal");
   gp_Pnt o = P(origin);
   double dist = gp_Vec(o, c).Dot(gp_Vec(n));
+  // the cutting box reaches L from the plane: a small body far from the plane must
+  // still be inside it (else a body wholly on the cut side survives the cut)
+  L += 2.0 * std::abs(dist);
   gp_Pnt oc = c.Translated(gp_Vec(n) * -dist); // centre projected onto plane
   gp_Ax2 ax(oc, n);
   gp_Vec x(ax.XDirection()), y(ax.YDirection());
   gp_Pnt corner = oc.Translated(x * -L).Translated(y * -L);
   BRepPrimAPI_MakeBox mb(gp_Ax2(corner, n, ax.XDirection()), 2 * L, 2 * L, L);
   TopoDS_Shape halfBox = mb.Solid();
-  TopoDS_Shape r = doBoolean(s.s, halfBox, above ? 2u : 1u);
-  r = simplify(r);
-  if (count_sub(Shape(r), TopAbs_SOLID) == 0) fail("split: nothing on that side of the plane");
-  return wrap(r);
+  // The kept half must lie on its side of the plane. Some solids (thin sheet metal
+  // touching the plane tangentially) come back from the boolean almost whole, with
+  // no error; that is caught by the side check and retried: first as is, then with a
+  // fuzzy tolerance, then healed (ShapeFix) with fuzzy tolerances.
+  double diag = std::sqrt(bb.SquareExtent());
+  auto onSide = [&](const TopoDS_Shape &r) {
+    // vertices, not the axis-aligned box: for a slanted plane the box corners
+    // always stick out
+    double tol = 1e-4 * diag + 1e-3;
+    for (TopExp_Explorer ex(r, TopAbs_VERTEX); ex.More(); ex.Next()) {
+      gp_Pnt q = BRep_Tool::Pnt(TopoDS::Vertex(ex.Current()));
+      double d = gp_Vec(o, q).Dot(gp_Vec(n));
+      if (above ? d < -tol : d > tol) return false;
+    }
+    return true;
+  };
+  // One solid (or the whole shape): the tries above. Returns a null shape when nothing
+  // of it lies on the wanted side, throws when every try fails.
+  auto cutOne = [&](const TopoDS_Shape &in) -> TopoDS_Shape {
+    TopoDS_Shape healed;
+    auto input = [&](bool heal) -> const TopoDS_Shape & {
+      if (!heal) return in;
+      if (healed.IsNull()) {
+        try {
+          BRepBuilderAPI_Copy cp(in);
+          Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(cp.Shape());
+          fix->Perform();
+          healed = fix->Shape();
+        } catch (...) {
+        }
+        if (healed.IsNull()) healed = in;
+      }
+      return healed;
+    };
+    struct Try { bool heal; double fuzzy; };
+    const Try tries[] = {{false, 0.0}, {false, 1e-6 * diag + 1e-7}, {false, 1e-4 * diag}, {true, 0.0}, {true, 1e-5 * diag}, {true, 1e-4 * diag}, {true, 1e-3 * diag}};
+    std::string lastErr;
+    for (const Try &t : tries) {
+      try {
+        TopoDS_Shape r = simplify(doBoolean(input(t.heal), halfBox, above ? 2u : 1u, t.fuzzy));
+        if (count_sub(Shape(r), TopAbs_SOLID) == 0) {
+          // Nothing on this side: believable only when no earlier try saw a problem.
+          if (lastErr.empty()) return TopoDS_Shape();
+          continue;
+        }
+        if (!onSide(r)) {
+          lastErr = "the cut left geometry on the wrong side of the plane";
+          continue;
+        }
+        return r;
+      } catch (const std::exception &e) {
+        lastErr = e.what();
+      }
+    }
+    fail("split: " + lastErr);
+  };
+  // A compound of several (touching or overlapping) solids is cut one solid at a
+  // time: as a single argument the boolean can return it nearly whole with no error.
+  TopoDS_Shape out;
+  if (count_sub(s, TopAbs_SOLID) > 1) {
+    BRep_Builder bld;
+    TopoDS_Compound comp;
+    bld.MakeCompound(comp);
+    int kept = 0;
+    for (TopExp_Explorer ex(s.s, TopAbs_SOLID); ex.More(); ex.Next()) {
+      TopoDS_Shape part = cutOne(ex.Current());
+      if (part.IsNull()) continue;
+      bld.Add(comp, part);
+      kept++;
+    }
+    if (kept > 0) out = comp;
+  } else {
+    out = cutOne(s.s);
+  }
+  if (out.IsNull() || count_sub(Shape(out), TopAbs_SOLID) == 0) fail("split: nothing on that side of the plane");
+  return wrap(out);
 }
 
 // ---------------------------------------------------------------- planar regions
