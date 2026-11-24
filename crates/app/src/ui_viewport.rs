@@ -340,6 +340,13 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         ui.data_mut(|d| d.insert_temp(ctx_key, hit));
         if let Some(s) = hit {
             app.hist_sel = vec![crate::hist_sel::HistItem::Sketch(s)];
+        } else if let Some(k) = app.stack.current().map(|c| c.key) {
+            // right-click acts on what is under the cursor: an unselected pick
+            // replaces the selection (as a left click would), a selected one keeps it
+            if !app.selection.contains(&k) {
+                select(app, Some(k), false);
+                app.hist_sel.clear();
+            }
         }
     }
     let mut opened = false;
@@ -1530,7 +1537,8 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
             app.open_sketch_on_selection();
             ui.close();
         }
-        if ui.button("Delete face   Del").clicked() {
+        let only_faces_one_body = sel.iter().all(|k| matches!(k.kind, PickKind::Face(_)) && k.body == sel[0].body);
+        if only_faces_one_body && ui.button("Delete face   Del").clicked() {
             app.delete_selected_faces();
             ui.close();
         }
