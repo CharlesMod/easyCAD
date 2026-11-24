@@ -122,6 +122,16 @@ namespace cw {
 
 namespace {
 
+// OCCT's type registry (a function-local static in Standard_Type.cxx) must be
+// built before any static that holds type handles, so that it is destroyed after
+// them. OCCT touches it from a static in Standard_Type.cxx for this, but ld64 runs
+// static initializers in link order and TKernel links last, after e.g.
+// StepAP214_Protocol.cxx's `types` map: at exit that map released its handles into
+// an already destroyed registry and every quit crashed (SIGSEGV in
+// ~Standard_Type, from NSApplication terminate: -> exit). This shim links before
+// every OCCT library, so this initializer runs first.
+const Handle(Standard_Type) gTypeRegistryFirst = STANDARD_TYPE(Standard_Transient);
+
 constexpr double kTol = 1e-7;
 
 [[noreturn]] void fail(const std::string &msg) { throw std::runtime_error(msg); }

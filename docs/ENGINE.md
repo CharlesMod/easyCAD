@@ -496,6 +496,14 @@ What changed for it:
   the stacked tongue, holes drilled into the bosses before the join, a rim that does
   not share the outer wall faces, and turning off boolean history.
 
+**macOS (Apple M4, 10 cores, idle; best of 3, release).** Wizard enclosure: `wall` edit
+113–117 ms, `lid_split` 81–86 ms, cold 115–119 ms, undo 0.05 ms. The occt crate links
+mimalloc on macOS (it overrides malloc process-wide, OCCT's C++ included): the system
+allocator cost ~4 % (`wall` 122 → 117 ms). Measured there without gain: `CW_PARALLEL_BOP=1`
+(~30 % slower, as on Linux), fat LTO with one codegen unit (~1 %, the time is in OCCT), and
+`operator new`/`delete` bound to mimalloc directly on top of the zone override (0 %).
+The idle app uses no CPU (0.0 s over 20 s with the sample open).
+
 ## Robustness
 
 - Hardware signals inside the kernel (null dereferences in OCCT algorithms on

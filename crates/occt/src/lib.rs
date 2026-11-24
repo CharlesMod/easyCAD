@@ -6,6 +6,10 @@
 //!
 //! Units are millimetres, angles are degrees unless a name says `_rad`.
 
+// links mimalloc in, which overrides malloc process-wide (see Cargo.toml)
+#[cfg(target_os = "macos")]
+use libmimalloc_sys as _;
+
 mod ffi;
 pub mod dressup;
 pub mod thread;
