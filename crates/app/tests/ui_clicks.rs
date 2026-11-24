@@ -2383,3 +2383,38 @@ fn a_failing_delete_face_leaves_nothing_behind_and_says_why() {
     assert!(h.state().toasts.iter().any(|t| t.warn && t.text.starts_with("Delete face failed")), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     assert!(h.state().doc.data.features.iter().all(|f| h.state().feature_status(f.id).map_or(true, |s| !matches!(s, easycad_model::regen::FeatureStatus::Error(_)))));
 }
+
+#[test]
+fn right_click_a_face_then_delete_face_from_the_menu() {
+    use easycad_model::feature::FeatureKind;
+    use easycad_model::occt::SurfaceKind;
+    let _serial = serial();
+    let mut h = harness(filleted_box_doc());
+    let m = h.state().model.clone().unwrap();
+    let b = m.bodies.iter().find(|b| !b.body.reference).unwrap();
+    let cyl = b.faces.iter().find(|f| f.kind == SurfaceKind::Cylinder).expect("fillet face");
+    // look straight at the fillet strip and zoom in, so the cursor sits on the face, clear of its edges
+    let n = cyl.normal.as_vec3().normalize();
+    let up = if n.z.abs() > 0.9 { glam::Vec3::Y } else { glam::Vec3::Z };
+    h.state_mut().camera.rot = easycad_app::camera::look_rot(n, up);
+    h.state_mut().camera.target = cyl.centroid.as_vec3();
+    h.state_mut().camera.distance *= 0.15;
+    h.run_steps(3);
+    let p = screen_of(&h, cyl.centroid.as_vec3());
+    assert!(h.state().selection.is_empty(), "nothing selected before the right-click");
+    h.hover_at(p);
+    h.run_steps(3);
+    let n = h.state().doc.data.features.len();
+    click_at(&mut h, p, egui::PointerButton::Secondary);
+    h.run_steps(3);
+    assert!(
+        h.state().selection.iter().any(|k| matches!(k.kind, easycad_app::pickstack::PickKind::Face(f) if f == cyl.index)),
+        "right-click selects the face under the cursor: {:?}",
+        h.state().selection
+    );
+    h.get_by_label("Delete face   Del").click();
+    settle(&mut h);
+    let feats = &h.state().doc.data.features;
+    assert_eq!(feats.len(), n + 1);
+    assert!(matches!(feats.last().unwrap().kind, FeatureKind::DeleteFace { .. }));
+}
