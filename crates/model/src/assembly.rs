@@ -98,6 +98,15 @@ impl Transform {
         }
         Ok(out)
     }
+
+    /// A whole body (solid or mesh) moved by this transform.
+    pub fn apply_body(&self, b: &Body) -> Result<Body, String> {
+        if self.is_identity() {
+            return Ok(b.clone());
+        }
+        let (axis, angle) = self.rotation.to_axis_angle();
+        b.moved(axis, angle.to_degrees(), self.translation)
+    }
 }
 
 /// One placement of a component inside its parent.
@@ -1619,15 +1628,19 @@ pub struct InterferenceOptions {
     pub include_hidden: bool,
     /// Smallest common volume reported (mm³). Default 1e-3.
     pub min_volume: f64,
+    /// Also test bodies of the same occurrence against each other (a multi-body
+    /// part, e.g. `AssemblyResult::flat`). Default false: only different occurrences.
+    pub within_occurrence: bool,
 }
 
 impl Default for InterferenceOptions {
     fn default() -> Self {
-        InterferenceOptions { include_reference: true, include_hidden: false, min_volume: 1e-3 }
+        InterferenceOptions { include_reference: true, include_hidden: false, min_volume: 1e-3, within_occurrence: false }
     }
 }
 
-/// Interference between instances of different occurrences: bounding-box cull, then
+/// Interference between instances of different occurrences (and, with
+/// `within_occurrence`, between bodies of one occurrence): bounding-box cull, then
 /// the exact common volume (pairs run on parallel threads).
 pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions) -> InterferenceReport {
     let inst: Vec<&Instance> = r.instances.iter().filter(|i| (opts.include_hidden || i.visible) && (opts.include_reference || !i.body.reference)).collect();
@@ -1635,15 +1648,16 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     let mut rep = InterferenceReport::default();
     for i in &inst {
         let rf = InstanceRef { path: i.path.clone(), body: i.body.id, label: i.label(d) };
-        match i.world_shape().and_then(|s| s.bbox().map(|b| (s, b))) {
-            Ok((s, b)) => placed.push((rf, s, b)),
-            Err(e) => rep.failed.push((rf.clone(), rf, e.to_string())),
+        match i.transform.apply_body(&i.body).and_then(|w| w.bbox().map(|b| (w, b))) {
+            Ok((w, b)) => placed.push((rf, w, b)),
+            Err(e) => rep.failed.push((rf.clone(), rf, e)),
         }
     }
     let mut todo = Vec::new();
     for x in 0..placed.len() {
         for y in x + 1..placed.len() {
-            if placed[x].0.path == placed[y].0.path {
+            let same_occ = placed[x].0.path == placed[y].0.path;
+            if same_occ && (!opts.within_occurrence || placed[x].0.body == placed[y].0.body) {
                 continue;
             }
             let (a, b) = (&placed[x].2, &placed[y].2);
@@ -1659,7 +1673,7 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 8);
     let chunk = todo.len().div_ceil(threads).max(1);
     let placed = &placed;
-    type PairResult = (usize, usize, Result<(f64, Option<Shape>), String>);
+    type PairResult = (usize, usize, Result<(f64, Option<Arc<crate::regen::BodyGeom>>), String>);
     let results: Vec<PairResult> = std::thread::scope(|sc| {
         let hs: Vec<_> = todo
             .chunks(chunk)
@@ -1667,8 +1681,7 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
                 sc.spawn(move || {
                     ch.iter()
                         .map(|&(x, y)| {
-                            let v = placed[x].1.common(&placed[y].1).and_then(|c| if c.count(occt::ShapeKind::Solid) == 0 { Ok((0.0, None)) } else { c.volume().map(|v| (v, Some(c))) });
-                            (x, y, v.map_err(|e| e.to_string()))
+                            (x, y, common_volume(&placed[x].1, &placed[y].1))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1679,7 +1692,7 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
     for (x, y, v) in results {
         match v {
             Ok((v, c)) if v > opts.min_volume => {
-                let common = c.map(|c| Overlap(Body { id: placed[x].0.body, name: "overlap".into(), reference: true, part: None, geom: crate::regen::BodyGeom::new(c) }));
+                let common = c.map(|geom| Overlap(Body { id: placed[x].0.body, name: "overlap".into(), reference: true, part: None, geom }));
                 rep.pairs.push(Interference { a: placed[x].0.clone(), b: placed[y].0.clone(), volume: v, common })
             }
             Ok(_) => {}
@@ -1687,6 +1700,29 @@ pub fn interference(d: &DocData, r: &AssemblyResult, opts: &InterferenceOptions)
         }
     }
     rep
+}
+
+/// Common volume of two placed bodies (kernel for two solids, Manifold when either
+/// is a mesh body) and the overlap geometry.
+fn common_volume(a: &Body, b: &Body) -> Result<(f64, Option<Arc<crate::regen::BodyGeom>>), String> {
+    use crate::meshbody::MeshSolid;
+    if !a.is_mesh() && !b.is_mesh() {
+        let c = a.shape().common(b.shape()).map_err(|e| e.to_string())?;
+        if c.count(occt::ShapeKind::Solid) == 0 {
+            return Ok((0.0, None));
+        }
+        let v = c.volume().map_err(|e| e.to_string())?;
+        return Ok((v, Some(crate::regen::BodyGeom::new(c))));
+    }
+    let m = |x: &Body| match x.mesh_solid() {
+        Some(m) => Ok(m.clone()),
+        None => MeshSolid::from_shape(x.shape()).map_err(|e| e.to_string()),
+    };
+    match crate::meshbody::boolean(&m(a)?, &[m(b)?], crate::feature::BoolOp::Intersect) {
+        Ok(c) => Ok((c.volume(), Some(crate::regen::BodyGeom::from_mesh(c)))),
+        Err(crate::meshbody::MeshError::EmptyResult) => Ok((0.0, None)),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 impl Document {

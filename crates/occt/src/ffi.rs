@@ -134,6 +134,18 @@ pub mod bridge {
         max: V3,
     }
 
+    /// A face or crease likely to stop a shell (see `Shape::shell_blockers`).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct ShellBlocker {
+        face: u32,
+        /// The other face of a crease, -1 for a narrow face.
+        other: i32,
+        /// 0 face narrower than the wall (`value` = width, mm); 1 near-tangent
+        /// crease (`value` = angle between the faces' normals, degrees).
+        kind: u8,
+        value: f64,
+    }
+
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct MassProps {
         volume: f64,
@@ -188,7 +200,11 @@ pub mod bridge {
         fn fillet(s: &Shape, edges: &[u32], radii: &[f64]) -> Result<UniquePtr<Shape>>;
         fn chamfer(s: &Shape, edges: &[u32], dists: &[f64]) -> Result<UniquePtr<Shape>>;
         fn remove_faces(s: &Shape, faces: &[u32]) -> Result<UniquePtr<Shape>>;
-        fn shell(s: &Shape, faces: &[u32], offset: f64) -> Result<UniquePtr<Shape>>;
+        /// `strategy`: index into the shim's thick-solid ladder (0 = default); closed
+        /// shells: 0 direct offset, 100 + k open-and-close with ladder step k.
+        fn shell(s: &Shape, faces: &[u32], offset: f64, strategy: &mut u32) -> Result<UniquePtr<Shape>>;
+        fn shell_max_thickness(s: &Shape, faces: &[u32], offset: f64, iters: u32) -> Result<f64>;
+        fn shell_blockers(s: &Shape, open: &[u32], offset: f64) -> Result<Vec<ShellBlocker>>;
         fn draft(
             s: &Shape,
             faces: &[u32],
@@ -229,6 +245,7 @@ pub mod bridge {
         fn mass_props(s: &Shape) -> Result<MassProps>;
         fn bounding_box(s: &Shape) -> Result<BBox>;
         fn extent_along(s: &Shape, origin: V3, dir: V3) -> Result<Vec<f64>>;
+        fn min_distance(a: &Shape, a_kind: u32, a_idx: u32, b: &Shape, b_kind: u32, b_idx: u32) -> Result<Vec<f64>>;
 
         /// STEP with assembly structure, names and colours. Returns a compound whose
         /// direct children are the leaf solids (placed), in the order of `parts`.

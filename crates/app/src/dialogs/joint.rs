@@ -102,7 +102,7 @@ impl JointD {
             .into_iter()
             .flat_map(|m| m.bodies.iter())
             .filter(|b| !b.body.reference)
-            .filter_map(|b| b.body.shape().bbox().ok())
+            .filter_map(|b| b.body.bbox().ok())
             .fold(None, |acc: Option<(f64, f64)>, b| {
                 Some(match acc {
                     None => (b.min.z, b.max.z),
@@ -170,6 +170,7 @@ impl JointD {
                 plane,
                 new_name,
                 offset,
+                keep: SplitKeep::Both,
             } if !f.suppressed && plane.normal.z.abs() > 0.999 => {
                 Some((f, *body, (*plane, offset.clone()), new_name.clone()))
             }

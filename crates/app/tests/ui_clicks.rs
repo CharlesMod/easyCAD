@@ -2400,7 +2400,8 @@ fn right_click_a_face_then_delete_face_from_the_menu() {
     h.state_mut().camera.target = cyl.centroid.as_vec3();
     h.state_mut().camera.distance *= 0.15;
     h.run_steps(3);
-    let p = screen_of(&h, cyl.centroid.as_vec3());
+    // a few px off the strip's centre: the exact middle can fall on a seam between two triangles
+    let p = screen_of(&h, cyl.centroid.as_vec3()) + egui::vec2(4.0, 3.0);
     assert!(h.state().selection.is_empty(), "nothing selected before the right-click");
     h.hover_at(p);
     h.run_steps(3);
@@ -2417,4 +2418,73 @@ fn right_click_a_face_then_delete_face_from_the_menu() {
     let feats = &h.state().doc.data.features;
     assert_eq!(feats.len(), n + 1);
     assert!(matches!(feats.last().unwrap().kind, FeatureKind::DeleteFace { .. }));
+}
+
+/// Play loops through the positions until the view moves: a middle-drag orbit stops
+/// it, and the model stays at the position it reached (no snap back).
+#[test]
+fn play_positions_until_the_view_moves() {
+    use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::positions::{PoseMove, PoseTarget};
+    let _serial = serial();
+    let mut doc = easycad_model::document::Document::new("Cart");
+    let mut s = easycad_model::sketch::Sketch::new("Pile", easycad_model::geom::Plane::XY);
+    s.rect(glam::DVec2::new(-10.0, -10.0), glam::DVec2::new(10.0, 10.0));
+    let s = doc.add_sketch(s);
+    let pile = BodyId::of(doc.add_feature(
+        "Pile",
+        FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: 20.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    ));
+    let ids = doc
+        .edit("positions", |d| {
+            let mut ids = Vec::new();
+            for (name, dz) in [("closed", "0"), ("peeking", "7"), ("very full", "14")] {
+                ids.push(d.add_position(name));
+                d.positions.last_mut().unwrap().moves = vec![PoseMove { translate: ["0".into(), "0".into(), dz.into()], ..PoseMove::new(PoseTarget::Body(pile)) }];
+            }
+            Ok::<_, ()>(ids)
+        })
+        .unwrap();
+    let mut h = harness(doc);
+    {
+        let app = h.state_mut();
+        app.positions.open = true;
+        app.positions.dwell_s = 0.1;
+        app.positions.travel_s = 0.1;
+    }
+    h.run_steps(2);
+    // ▶ sits inline with the state numbers
+    h.get_by_label("▶").click();
+    h.run_steps(1);
+    assert!(h.state().positions.play.is_some());
+    // it visits every position, in order, and loops
+    let mut seen = Vec::new();
+    for _ in 0..400 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+        let shown = h.state().model.as_ref().and_then(|m| m.pose);
+        if let Some(p) = shown {
+            if seen.last() != Some(&p) {
+                seen.push(p);
+            }
+        }
+        if seen.len() >= 5 {
+            break;
+        }
+    }
+    assert!(seen.len() >= 5, "played {seen:?}");
+    assert_eq!(seen[..4], [ids[0], ids[1], ids[2], ids[0]], "in list order, looping: {seen:?}");
+    // orbit the view: playback stops where it is
+    drag_view(&mut h, egui::PointerButton::Middle, egui::Modifiers::NONE, egui::vec2(120.0, 40.0));
+    assert!(h.state().positions.play.is_none(), "a camera move stops Play");
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.state_mut().settle(Duration::from_secs(60)));
+    let at = h.state().pose;
+    assert!(at.is_some_and(|p| ids.contains(&p)), "it stays at a saved position, not as modeled: {at:?}");
+    h.run_steps(20);
+    assert_eq!(h.state().pose, at, "and stays there");
+    assert_eq!(h.state().model.as_ref().unwrap().pose, at);
 }

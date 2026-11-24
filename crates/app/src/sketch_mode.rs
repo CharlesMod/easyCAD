@@ -1940,45 +1940,79 @@ pub fn screen(app: &mut EasyCadApp, ui: &mut Ui) {
                     .size(11.0)
                     .color(theme::TEXT_MUTED),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("Pan MMB · Zoom wheel · F fit · Ctrl+Z undo in sketch")
-                            .size(11.0)
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
+                if ui.ctx().content_rect().width() >= 860.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new("Pan MMB · Zoom wheel · F fit · Ctrl+Z undo in sketch")
+                                .size(11.0)
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
+                }
             });
         });
-    egui::Panel::left("sk_left")
-        .default_size(260.0)
-        .min_size(220.0)
-        .max_size(280.0)
-        .frame(
-            Frame::new()
+    // side panes fold to rails like the model screen's (crate::panes)
+    use crate::panes::{self, Pane, Side};
+    let (left_was, right_was) = panes::fit(
+        ui.ctx(),
+        true,
+        (!app.settings.left_pane_collapsed, !app.settings.right_pane_collapsed),
+    );
+    let (mut left, mut right) = (left_was, right_was);
+    panes::show(
+        ui,
+        Pane {
+            id: "sk_left",
+            side: Side::Left,
+            name: "sketch tools",
+            default: 260.0,
+            min: 220.0,
+            max: 280.0,
+            frame: Frame::new()
                 .fill(theme::PANEL)
                 .inner_margin(Margin::symmetric(0, 12)),
-        )
-        .show(ui, |ui| left_panel(s, ui));
-    egui::Panel::right("sk_right")
-        .default_size(300.0)
-        .min_size(260.0)
-        .max_size(320.0)
-        .frame(
-            Frame::new()
+        },
+        &mut left,
+        |ui| left_panel(s, ui),
+    );
+    panes::show(
+        ui,
+        Pane {
+            id: "sk_right",
+            side: Side::Right,
+            name: "sketch properties",
+            default: 300.0,
+            min: 260.0,
+            max: 320.0,
+            frame: Frame::new()
                 .fill(theme::PANEL)
                 .inner_margin(Margin::symmetric(14, 12)),
-        )
-        .show(ui, |ui| {
+        },
+        &mut right,
+        |ui| {
             if right_panel(s, ui) {
                 s.commit_move();
                 finish = true;
             }
-        });
+        },
+    );
+    let mut tab_closed = (false, false);
     egui::CentralPanel::no_frame().show(ui, |ui| {
         if canvas(s, ui) {
             cancel = true;
         }
+        let rect = ui.max_rect();
+        tab_closed.0 = left && panes::edge_tab(ui, rect, Side::Left, "sketch tools");
+        tab_closed.1 = right && panes::edge_tab(ui, rect, Side::Right, "sketch properties");
     });
+    if tab_closed.0 {
+        left = false;
+    }
+    if tab_closed.1 {
+        right = false;
+    }
+    panes::sync(app, Side::Left, left_was, left);
+    panes::sync(app, Side::Right, right_was, right);
     if finish {
         app.finish_sketch();
     } else if cancel {

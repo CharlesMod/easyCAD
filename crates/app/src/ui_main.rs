@@ -19,6 +19,7 @@ fn bar_frame(fill: Color32) -> Frame {
 
 pub fn show(app: &mut EasyCadApp, ui: &mut Ui) {
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::GROUND);
+    crate::panes::shortcuts(app, ui.ctx());
     title_bar(app, ui);
     match &app.mode {
         Mode::Model => model_screen(app, ui),
@@ -86,35 +87,53 @@ fn model_screen(app: &mut EasyCadApp, ui: &mut Ui) {
     if !in_dialog {
         history(app, ui);
     }
-    if in_dialog && !app.browser_open {
-        egui::Panel::left("browser_strip")
-            .exact_size(52.0)
-            .resizable(false)
-            .frame(Frame::new().fill(theme::PANEL))
-            .show(ui, |ui| {
-                ui.add_space(10.0);
-                ui.vertical_centered(|ui| {
-                    if widgets::icon_button(ui, Icon::Menu, 36.0, "Expand browser", true).clicked()
-                    {
-                        app.browser_open = true;
-                    }
-                });
-            });
-    } else {
-        egui::Panel::left("browser")
-            .default_size(250.0)
-            .min_size(220.0)
-            .max_size(300.0)
-            .frame(Frame::new().fill(theme::PANEL))
-            .show(ui, |ui| browser(app, ui));
-    }
-    egui::Panel::right("params")
-        .default_size(if in_dialog { 280.0 } else { 300.0 })
-        .min_size(260.0)
-        .max_size(340.0)
-        .frame(Frame::new().fill(theme::PANEL))
-        .show(ui, |ui| params_panel(app, ui));
-    egui::CentralPanel::no_frame().show(ui, |ui| crate::ui_viewport::viewport(app, ui));
+    // side panes fold to rails (crate::panes); the viewport takes what they free
+    use crate::panes::{self, Pane, Side};
+    let (left_was, right_was) = panes::shown(app, ui.ctx());
+    let was = left_was;
+    let mut open = was;
+    panes::show(
+        ui,
+        Pane {
+            id: "browser",
+            side: Side::Left,
+            name: "browser",
+            default: 250.0,
+            min: 220.0,
+            max: 300.0,
+            frame: Frame::new().fill(theme::PANEL),
+        },
+        &mut open,
+        |ui| browser(app, ui),
+    );
+    panes::sync(app, Side::Left, was, open);
+    let was = right_was;
+    let mut open = was;
+    panes::show(
+        ui,
+        Pane {
+            id: "params",
+            side: Side::Right,
+            name: "parameters",
+            default: if in_dialog { 280.0 } else { 300.0 },
+            min: 260.0,
+            max: 340.0,
+            frame: Frame::new().fill(theme::PANEL),
+        },
+        &mut open,
+        |ui| params_panel(app, ui),
+    );
+    panes::sync(app, Side::Right, was, open);
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        crate::ui_viewport::viewport(app, ui);
+        let rect = app.viewport_rect;
+        let (l, r) = panes::shown(app, ui.ctx());
+        for (side, name, open) in [(Side::Left, "browser", l), (Side::Right, "parameters", r)] {
+            if open && panes::edge_tab(ui, rect, side, name) {
+                panes::set(app, side, false);
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------- title bar
@@ -124,12 +143,17 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
         .exact_size(40.0)
         .frame(bar_frame(theme::BAR))
         .show(ui, |ui| {
+            // narrow windows (down to 480): drop the words first, never the controls
+            let w = ui.available_width();
+            let (narrow, tiny) = (w < 720.0, w < 560.0);
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.spacing_mut().item_spacing.x = if narrow { 6.0 } else { 10.0 };
                 file_menu(app, ui);
                 widgets::icon(ui, Icon::Logo, 20.0, theme::ACCENT);
-                ui.label(RichText::new("easyCAD").strong());
-                ui.label(RichText::new("/").color(theme::TEXT_FAINT));
+                if !narrow {
+                    ui.label(RichText::new("easyCAD").strong());
+                    ui.label(RichText::new("/").color(theme::TEXT_FAINT));
+                }
                 ui.label(RichText::new(app.title()).strong());
                 if !app.active.is_empty() && app.mode.is_model() {
                     ui.label(RichText::new("·").color(theme::TEXT_FAINT));
@@ -137,11 +161,12 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                 }
                 match &app.mode {
                     Mode::Sketch(s) => {
-                        chip(
-                            ui,
-                            &format!("Sketch · {} · {}", s.sketch.name, s.plane_name()),
-                            theme::ACCENT_DEEP,
-                        );
+                        let text = if tiny {
+                            format!("Sketch · {}", s.plane_name())
+                        } else {
+                            format!("Sketch · {} · {}", s.sketch.name, s.plane_name())
+                        };
+                        chip(ui, &text, theme::ACCENT_DEEP);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if widgets::primary(ui, "Finish sketch")
                                 .on_hover_text("Enter on an empty tool")
@@ -157,7 +182,7 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                     }
                     Mode::Parts(_) => {
                         ui.label(
-                            RichText::new("Parts library · press P")
+                            RichText::new(if tiny { "Parts library" } else { "Parts library · press P" })
                                 .size(12.0)
                                 .color(theme::TEXT_MUTED),
                         );
@@ -174,11 +199,12 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                             .as_ref()
                             .map(|x| x.name.clone())
                             .unwrap_or_else(|| "Sheet 1".into());
-                        chip(
-                            ui,
-                            &format!("Drawing · {name} · {}", d.sheet_label()),
-                            theme::hex(0x2a2f37),
-                        );
+                        let text = if tiny {
+                            format!("Drawing · {name}")
+                        } else {
+                            format!("Drawing · {name} · {}", d.sheet_label())
+                        };
+                        chip(ui, &text, theme::hex(0x2a2f37));
                         let mut back = false;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             back = widgets::button(ui, "Back to model").clicked();
@@ -226,8 +252,16 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                 } else {
                     ("Saved locally", theme::TEXT_MUTED)
                 };
-                ui.label(RichText::new(state).size(12.0).color(col));
-                ui.add_space(8.0);
+                if tiny {
+                    // the state as a dot, the words in its tooltip
+                    let (r, resp) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                    let dot = if state == "Saved locally" { theme::hex(0x4caf72) } else { col };
+                    ui.painter().circle_filled(r.center(), 3.0, dot);
+                    resp.on_hover_text(state);
+                } else {
+                    ui.label(RichText::new(state).size(12.0).color(col));
+                    ui.add_space(if narrow { 2.0 } else { 8.0 });
+                }
                 let undo_tip = match app.doc.undo_label() {
                     Some(l) => format!("Undo {l} (Ctrl+Z)"),
                     None => "Undo (Ctrl+Z)".into(),
@@ -271,7 +305,9 @@ pub fn title_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                         st.save();
                         app.cache.usage.clear();
                     }
-                    ui.label(RichText::new("Units").size(12.0).color(theme::TEXT_MUTED));
+                    if !narrow {
+                        ui.label(RichText::new("Units").size(12.0).color(theme::TEXT_MUTED));
+                    }
                 });
             });
         });
@@ -310,8 +346,14 @@ fn file_menu(app: &mut EasyCadApp, ui: &mut Ui) {
             app.save(true);
         }
         ui.separator();
-        if item(ui, "Import STEP / DXF…", "Ctrl+I").clicked() {
+        if item(ui, "Import STEP / DXF / mesh…", "Ctrl+I").clicked() {
             app.import_file();
+        }
+        if item(ui, "Combine bodies…", "").clicked() {
+            app.open_dialog(DialogKind::Combine);
+        }
+        if item(ui, "Move / copy body…", "").clicked() {
+            app.open_dialog(DialogKind::MoveBody);
         }
         if item(ui, "Export…", "").clicked() {
             app.export = Some(crate::dialogs::export::ExportDialog::new(&app.doc.data));
@@ -404,6 +446,8 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                                 "Split a body at a plane",
                                 Cmd::Dialog(DialogKind::Split),
                             ),
+
+
                         ],
                     ),
                     (
@@ -534,7 +578,7 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                             (
                                 Icon::Import,
                                 "Import",
-                                "Import STEP or DXF (Ctrl+I)",
+                                "Import STEP, DXF or a mesh (STL / OBJ / GLB) (Ctrl+I)",
                                 Cmd::Import,
                             ),
                             (
@@ -552,55 +596,152 @@ fn toolbar(app: &mut EasyCadApp, ui: &mut Ui) {
                         ],
                     ),
                 ];
-                let n = groups.len();
-                for (gi, (name, items)) in groups.into_iter().enumerate() {
-                    // width of the group's buttons (same rule as tool_button)
-                    let bw: f32 = items
-                        .iter()
-                        .map(|(_, l, _, _)| {
-                            (ui.painter()
-                                .layout_no_wrap(l.to_string(), theme::prop(11.0), theme::TEXT)
-                                .size()
-                                .x
-                                + 12.0)
-                                .max(52.0)
-                        })
-                        .sum::<f32>()
-                        + 2.0 * (items.len() as f32 - 1.0)
-                        + 16.0;
-                    let (rect, _) = ui.allocate_exact_size(vec2(bw, 72.0), Sense::hover());
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(rect)
-                            .layout(egui::Layout::left_to_right(egui::Align::Min)),
-                    );
-                    child.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    child.add_space(8.0);
-                    for (ic, label, tip, cmd) in items {
-                        let r = widgets::tool_button(&mut child, ic, label, tip, false);
-                        match cmd {
-                            Cmd::Menu(g) => construct_menu(app, &r, g),
-                            _ if r.clicked() => run(app, cmd),
-                            _ => {}
-                        }
-                    }
-                    ui.painter().text(
-                        egui::pos2(rect.center().x, rect.bottom() - 7.0),
-                        egui::Align2::CENTER_CENTER,
-                        name,
-                        theme::prop(10.0),
-                        theme::TEXT_LABEL,
-                    );
-                    if gi + 1 < n {
-                        ui.painter().vline(
-                            rect.right(),
-                            rect.y_range(),
-                            Stroke::new(1.0, theme::hex(0x2c3037)),
-                        );
-                    }
+                if let Some(cmd) = tool_rows(app, ui, &groups) {
+                    run(app, cmd);
                 }
             });
         });
+}
+
+type Tool = (Icon, &'static str, &'static str, Cmd);
+
+/// Width of a group of labelled buttons (same rule as `widgets::tool_button`).
+fn group_w_labelled(ui: &Ui, items: &[Tool]) -> f32 {
+    items
+        .iter()
+        .map(|(_, l, _, _)| {
+            (ui.painter()
+                .layout_no_wrap(l.to_string(), theme::prop(11.0), theme::TEXT)
+                .size()
+                .x
+                + 12.0)
+                .max(52.0)
+        })
+        .sum::<f32>()
+        + 2.0 * (items.len() as f32 - 1.0)
+        + 16.0
+}
+
+/// Icon-only buttons (the narrow toolbar) and their gaps.
+const ICON_W: f32 = 34.0;
+const ICON_GAP: f32 = 2.0;
+const GROUP_SEP: f32 = 11.0;
+
+/// The toolbar's tools, laid out for the width there is: labelled groups when
+/// they fit, else one row of icons (name in the tooltip), and what still does
+/// not fit goes into the » menu at the end. Returns the tool clicked.
+fn tool_rows(app: &mut EasyCadApp, ui: &mut Ui, groups: &[(&'static str, Vec<Tool>)]) -> Option<Cmd> {
+    let avail = ui.available_width();
+    let labelled: f32 = groups.iter().map(|(_, it)| group_w_labelled(ui, it)).sum();
+    let mut hit = None;
+    if labelled <= avail {
+        let n = groups.len();
+        for (gi, (name, items)) in groups.iter().enumerate() {
+            let bw = group_w_labelled(ui, items);
+            let (rect, _) = ui.allocate_exact_size(vec2(bw, 72.0), Sense::hover());
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Min)),
+            );
+            child.spacing_mut().item_spacing = vec2(2.0, 0.0);
+            child.add_space(8.0);
+            for &(ic, label, tip, cmd) in items {
+                let r = widgets::tool_button(&mut child, ic, label, tip, false);
+                match cmd {
+                    Cmd::Menu(g) => construct_menu(app, &r, g),
+                    _ if r.clicked() => hit = Some(cmd),
+                    _ => {}
+                }
+            }
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 7.0),
+                egui::Align2::CENTER_CENTER,
+                *name,
+                theme::prop(10.0),
+                theme::TEXT_LABEL,
+            );
+            if gi + 1 < n {
+                ui.painter().vline(rect.right(), rect.y_range(), Stroke::new(1.0, theme::hex(0x2c3037)));
+            }
+        }
+        return hit;
+    }
+    // icons: how many fit, keeping room for the » button when some do not
+    let all: Vec<(usize, Tool)> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(gi, (_, it))| it.iter().map(move |t| (gi, *t)))
+        .collect();
+    let width_of = |k: usize| -> f32 {
+        // the first k tools, with separators between groups
+        let mut w = 0.0;
+        for i in 0..k {
+            if i > 0 {
+                w += if all[i].0 != all[i - 1].0 { GROUP_SEP } else { ICON_GAP };
+            }
+            w += ICON_W;
+        }
+        w
+    };
+    let fits = if width_of(all.len()) <= avail {
+        all.len()
+    } else {
+        (0..all.len())
+            .rev()
+            .find(|&k| width_of(k) + GROUP_SEP + ICON_W <= avail)
+            .unwrap_or(0)
+    };
+    ui.spacing_mut().item_spacing.x = 0.0;
+    for (i, &(gi, (ic, label, tip, cmd))) in all.iter().take(fits).enumerate() {
+        if i > 0 {
+            if gi != all[i - 1].0 {
+                let (r, _) = ui.allocate_exact_size(vec2(GROUP_SEP, ICON_W), Sense::hover());
+                ui.painter().vline(r.center().x, r.shrink2(vec2(0.0, 6.0)).y_range(), Stroke::new(1.0, theme::hex(0x2c3037)));
+            } else {
+                ui.add_space(ICON_GAP);
+            }
+        }
+        let r = widgets::tool_icon(ui, ic, label, &format!("{label} · {tip}"), ICON_W);
+        match cmd {
+            Cmd::Menu(g) => construct_menu(app, &r, g),
+            _ if r.clicked() => hit = Some(cmd),
+            _ => {}
+        }
+    }
+    if fits < all.len() {
+        if fits > 0 {
+            ui.add_space(GROUP_SEP);
+        }
+        let r = widgets::more_button(ui, "More tools", ICON_W);
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(190.0);
+            let mut group = usize::MAX;
+            for &(gi, (ic, label, tip, cmd)) in &all[fits..] {
+                if gi != group {
+                    if group != usize::MAX {
+                        ui.separator();
+                    }
+                    ui.label(RichText::new(groups[gi].0).size(10.0).color(theme::TEXT_LABEL));
+                    group = gi;
+                }
+                if let Cmd::Menu(g) = cmd {
+                    ui.menu_button(label, |ui| {
+                        for k in construct_kinds(g) {
+                            if ui.button(k.title()).clicked() {
+                                app.open_dialog(DialogKind::Datum(*k));
+                                ui.close();
+                            }
+                        }
+                    });
+                } else if widgets::menu_tool(ui, ic, label).on_hover_text(tip).clicked() {
+                    hit = Some(cmd);
+                    ui.close();
+                }
+            }
+        });
+    }
+    hit
 }
 
 #[derive(Clone, Copy)]
@@ -621,13 +762,17 @@ enum Cmd {
 }
 
 /// The Plane / Axis / Point dropdown of the CONSTRUCT group.
-fn construct_menu(app: &mut EasyCadApp, r: &egui::Response, g: crate::datum_ui::Group) {
+fn construct_kinds(g: crate::datum_ui::Group) -> &'static [crate::datum_ui::DatumKind] {
     use crate::datum_ui::{DatumKind, Group};
-    let kinds: &[DatumKind] = match g {
+    match g {
         Group::Plane => &DatumKind::PLANES,
         Group::Axis => &DatumKind::AXES,
         Group::Point => &DatumKind::POINTS,
-    };
+    }
+}
+
+fn construct_menu(app: &mut EasyCadApp, r: &egui::Response, g: crate::datum_ui::Group) {
+    let kinds = construct_kinds(g);
     egui::Popup::menu(r).show(|ui| {
         ui.set_min_width(230.0);
         for k in kinds {
@@ -681,7 +826,7 @@ pub fn browser(app: &mut EasyCadApp, ui: &mut Ui) {
         if app.dialog.is_some() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("«").on_hover_text("Collapse").clicked() {
-                    app.browser_open = false;
+                    crate::panes::set(app, crate::panes::Side::Left, false);
                 }
             });
         }
@@ -1212,6 +1357,9 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::DatumPlane { .. } => ("PL", crate::datum_ui::AXIS_COLOR),
         FeatureKind::DatumAxis { .. } => ("AX", crate::datum_ui::AXIS_COLOR),
         FeatureKind::DatumPoint { .. } => ("PN", crate::datum_ui::AXIS_COLOR),
+        FeatureKind::ImportMesh { .. } => ("MS", theme::GREEN),
+        FeatureKind::TransformBody { .. } => ("MV", theme::TEXT_DIM),
+        FeatureKind::MeshBoolean { .. } => ("CB", theme::ORANGE_SOFT),
     }
 }
 
@@ -1342,14 +1490,15 @@ fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
         .exact_size(28.0)
         .frame(bar_frame(theme::BAR))
         .show(ui, |ui| {
+            let w = ui.available_width();
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
+                ui.spacing_mut().item_spacing.x = if w < 720.0 { 10.0 } else { 16.0 };
                 let small = |t: &str| RichText::new(t).size(11.0).color(theme::TEXT_MUTED);
                 ui.label(small(&status_text(app)));
                 if app.regenerating() {
                     crate::widgets::spinner(ui, 10.0, Some(theme::TEXT_MUTED));
                 }
-                if let Some(m) = &app.model {
+                if let Some(m) = app.model.as_ref().filter(|_| w >= 640.0) {
                     ui.label(small(&format!(
                         "regen {:.0} ms · {} tris · ui {:.1} ms",
                         app.last_regen_ms,
@@ -1367,9 +1516,12 @@ fn status_bar(app: &mut EasyCadApp, ui: &mut Ui) {
                     {
                         app.show_keys = true;
                     }
-                    ui.label(small("Zoom wheel"));
-                    ui.label(small(&format!("Pan {pan}")));
-                    ui.label(small(&format!("Orbit {orbit}")));
+                    // the mouse hints are in the cheat sheet too
+                    if w >= 860.0 {
+                        ui.label(small("Zoom wheel"));
+                        ui.label(small(&format!("Pan {pan}")));
+                        ui.label(small(&format!("Orbit {orbit}")));
+                    }
                     if !app.gpu {
                         ui.label(
                             RichText::new("no GPU: viewport disabled")

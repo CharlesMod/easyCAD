@@ -57,6 +57,9 @@ pub enum DialogKind {
     Datum(crate::datum_ui::DatumKind),
     /// The one inferred Construct tool.
     Construct,
+    Combine,
+    MoveBody,
+    ImportMesh,
 }
 
 impl DialogKind {
@@ -78,6 +81,9 @@ impl DialogKind {
             DialogKind::Joint => "Parting joint",
             DialogKind::Datum(k) => k.title(),
             DialogKind::Construct => "Construct",
+            DialogKind::Combine => "Combine",
+            DialogKind::MoveBody => "Move / copy body",
+            DialogKind::ImportMesh => "Mesh import",
         }
     }
     /// Title-bar accent: modify = orange, enclosure = green, create = blue.
@@ -88,7 +94,9 @@ impl DialogKind {
             | DialogKind::Shell
             | DialogKind::DeleteFace
             | DialogKind::Draft
-            | DialogKind::Split => theme::ORANGE_SOFT,
+            | DialogKind::Split
+            | DialogKind::Combine
+            | DialogKind::MoveBody => theme::ORANGE_SOFT,
             DialogKind::Boss | DialogKind::Rib | DialogKind::Standoffs | DialogKind::Joint => {
                 theme::GREEN
             }
@@ -284,6 +292,38 @@ pub struct SplitD {
     pub body: Option<BodyId>,
     pub z: Field,
     pub new_name: String,
+    pub keep: SplitKeep,
+}
+
+/// `MeshBoolean`: either side may be a mesh body.
+pub struct CombineD {
+    pub target: Option<BodyId>,
+    pub tools: Vec<BodyId>,
+    pub op: Op,
+    pub clearance: Field,
+    /// Target positions to clear, `x, y, z; x, y, z` (empty = where it is).
+    pub positions: String,
+    pub keep_tools: bool,
+}
+
+/// `TransformBody`.
+pub struct MoveD {
+    pub body: Option<BodyId>,
+    pub t: [Field; 3],
+    pub rot: [Field; 3],
+    pub scale: Field,
+    pub copy: bool,
+    pub new_name: String,
+}
+
+/// `ImportMesh` (edit only: new imports come from File → Import).
+pub struct MeshD {
+    pub import: ImportId,
+    pub scale: Field,
+    pub up_y: bool,
+    pub rot: [Field; 3],
+    pub t: [Field; 3],
+    pub reference: bool,
 }
 
 pub struct BossD {
@@ -335,6 +375,9 @@ pub enum Body {
     Standoffs(standoffs::StandoffsD),
     Joint(joint::JointD),
     Datum(datum::DatumD),
+    Combine(CombineD),
+    Move(MoveD),
+    Mesh(MeshD),
 }
 
 pub struct Dialog {
@@ -394,6 +437,37 @@ fn last_solid(m: Option<&Output>) -> Option<BodyId> {
             .find(|b| !b.body.reference)
             .map(|b| b.body.id)
     })
+}
+
+fn last_mesh(m: Option<&Output>) -> Option<BodyId> {
+    m.and_then(|m| m.bodies.iter().rev().find(|b| !b.body.reference && b.body.is_mesh()).map(|b| b.body.id))
+}
+
+fn fields3(v: &[Expr; 3]) -> [Field; 3] {
+    [Field::from_expr(&v[0], None), Field::from_expr(&v[1], None), Field::from_expr(&v[2], None)]
+}
+
+fn nums3(v: DVec3) -> [Field; 3] {
+    [Field::new(fmt(v.x)), Field::new(fmt(v.y)), Field::new(fmt(v.z))]
+}
+
+fn exprs3(f: &[Field; 3]) -> [Expr; 3] {
+    [f[0].expr(None), f[1].expr(None), f[2].expr(None)]
+}
+
+/// `x, y, z; x, y, z` → expression triples.
+fn parse_positions(s: &str) -> Result<Vec<[Expr; 3]>, String> {
+    s.split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let c: Vec<&str> = p.split(',').map(str::trim).collect();
+            if c.len() != 3 {
+                return Err(format!("position `{p}` needs x, y, z"));
+            }
+            Ok([0, 1, 2].map(|i| Expr::new(crate::units::normalize_input(c[i]))))
+        })
+        .collect()
 }
 
 fn sel_body(sel: &[PickKey], m: Option<&Output>) -> Option<BodyId> {
@@ -605,7 +679,35 @@ impl Dialog {
                     "10"
                 }),
                 new_name: "Lid".into(),
+                keep: SplitKeep::Both,
             }),
+            DialogKind::Combine => {
+                // a picked mesh body is the usual target; other picked bodies are tools
+                let picked: Vec<BodyId> = {
+                    let mut v: Vec<BodyId> = sel.iter().map(|k| k.body).collect();
+                    v.dedup();
+                    v
+                };
+                let is_mesh = |b: &BodyId| model.and_then(|m| m.body(*b)).is_some_and(|b| b.is_mesh());
+                let target = picked.iter().copied().find(|b| is_mesh(b)).or(picked.first().copied()).or(last_mesh(model)).or(last_solid(model));
+                Body::Combine(CombineD {
+                    target,
+                    tools: picked.into_iter().filter(|b| Some(*b) != target).collect(),
+                    op: Op::Cut,
+                    clearance: Field::new("0"),
+                    positions: String::new(),
+                    keep_tools: true,
+                })
+            }
+            DialogKind::MoveBody => Body::Move(MoveD {
+                body: sel.first().map(|k| k.body).or(last_mesh(model)).or(last_solid(model)),
+                t: [Field::new("0"), Field::new("0"), Field::new("0")],
+                rot: [Field::new("0"), Field::new("0"), Field::new("0")],
+                scale: Field::new("1"),
+                copy: false,
+                new_name: String::new(),
+            }),
+            DialogKind::ImportMesh => return Err("import a mesh with File → Import".into()),
             DialogKind::Boss => {
                 let pts = boss_points_from_selection(model, sel);
                 Body::Boss(BossD {
@@ -811,12 +913,47 @@ impl Dialog {
                 plane,
                 new_name,
                 offset,
+                keep,
             } => (
                 DialogKind::Split,
                 Body::Split(SplitD {
                     body: *body,
                     z: Field::new(plane_text(plane, offset)),
                     new_name: new_name.clone(),
+                    keep: *keep,
+                }),
+            ),
+            FeatureKind::MeshBoolean { target, tools, op, clearance, positions, keep_tools } => (
+                DialogKind::Combine,
+                Body::Combine(CombineD {
+                    target: *target,
+                    tools: tools.clone(),
+                    op: Op::from(*op),
+                    clearance: Field::from_expr(clearance, None),
+                    positions: positions.iter().map(|p| format!("{}, {}, {}", p[0].0, p[1].0, p[2].0)).collect::<Vec<_>>().join("; "),
+                    keep_tools: *keep_tools,
+                }),
+            ),
+            FeatureKind::TransformBody { body, translate, rotate_deg, scale, copy, new_name, .. } => (
+                DialogKind::MoveBody,
+                Body::Move(MoveD {
+                    body: Some(*body),
+                    t: fields3(translate),
+                    rot: nums3(*rotate_deg),
+                    scale: Field::from_expr(scale, None),
+                    copy: *copy,
+                    new_name: new_name.clone(),
+                }),
+            ),
+            FeatureKind::ImportMesh { import, scale, up, rotate_deg, translate, reference } => (
+                DialogKind::ImportMesh,
+                Body::Mesh(MeshD {
+                    import: *import,
+                    scale: Field::from_expr(scale, None),
+                    up_y: *up == MeshUp::Y,
+                    rot: nums3(*rotate_deg),
+                    t: fields3(translate),
+                    reference: *reference,
                 }),
             ),
             FeatureKind::ScrewBoss {
@@ -1099,6 +1236,59 @@ impl Dialog {
                     plane: Plane::XY,
                     new_name: s.new_name.clone(),
                     offset: z_expr(&s.z),
+                    keep: s.keep,
+                })
+            }
+            Body::Combine(c) => {
+                if c.tools.is_empty() {
+                    return Err("tick at least one tool body".into());
+                }
+                if c.op == Op::NewBody {
+                    return Err("pick Join, Cut or Intersect".into());
+                }
+                num(&c.clearance)?;
+                one(FeatureKind::MeshBoolean {
+                    target: c.target,
+                    tools: c.tools.clone(),
+                    op: c.op.to(),
+                    clearance: c.clearance.expr(None),
+                    positions: parse_positions(&c.positions)?,
+                    keep_tools: c.keep_tools,
+                })
+            }
+            Body::Move(m) => {
+                let mut rot = [0.0; 3];
+                for (i, f) in m.rot.iter().enumerate() {
+                    rot[i] = num(f)?;
+                }
+                for f in m.t.iter().chain([&m.scale]) {
+                    num(f)?;
+                }
+                one(FeatureKind::TransformBody {
+                    body: m.body.ok_or("pick a body")?,
+                    translate: exprs3(&m.t),
+                    rotate_deg: DVec3::from_array(rot),
+                    pivot: DVec3::ZERO,
+                    scale: m.scale.expr(None),
+                    copy: m.copy,
+                    new_name: m.new_name.clone(),
+                })
+            }
+            Body::Mesh(m) => {
+                let mut rot = [0.0; 3];
+                for (i, f) in m.rot.iter().enumerate() {
+                    rot[i] = num(f)?;
+                }
+                for f in m.t.iter().chain([&m.scale]) {
+                    num(f)?;
+                }
+                one(FeatureKind::ImportMesh {
+                    import: m.import,
+                    scale: m.scale.expr(None),
+                    up: if m.up_y { MeshUp::Y } else { MeshUp::Z },
+                    rotate_deg: DVec3::from_array(rot),
+                    translate: exprs3(&m.t),
+                    reference: m.reference,
                 })
             }
             Body::Boss(b) => {
@@ -1487,6 +1677,16 @@ impl Dialog {
                 ch |= body_combo(ui, id.with("b"), &mut s.body, &solids, "last solid");
                 ch |= s.z.row(ui, id.with("z"), "Split plane z", env);
                 ui.horizontal(|ui| {
+                    ui.label(RichText::new("Keep").size(12.0).color(theme::TEXT_DIM));
+                    for (k, n) in [(SplitKeep::Both, "Both"), (SplitKeep::Below, "Below"), (SplitKeep::Above, "Above")] {
+                        if widgets::pill(ui, n, s.keep == k).clicked() {
+                            s.keep = k;
+                            ch = true;
+                        }
+                    }
+                });
+                if s.keep == SplitKeep::Both {
+                ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("Upper body")
                             .size(12.0)
@@ -1496,6 +1696,83 @@ impl Dialog {
                         .add(egui::TextEdit::singleline(&mut s.new_name).desired_width(132.0))
                         .changed();
                 });
+                }
+            }
+            Body::Combine(c) => {
+                let all: Vec<(BodyId, String)> = cx
+                    .model
+                    .map(|m| m.bodies.iter().map(|b| (b.body.id, format!("{}{}", b.body.name, if b.body.is_mesh() { " (mesh)" } else { "" }))).collect())
+                    .unwrap_or_default();
+                ch |= body_combo(ui, id.with("t"), &mut c.target, &all, "last body");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Operation").size(12.0).color(theme::TEXT_DIM));
+                    for (o, n) in [(Op::Join, "Join"), (Op::Cut, "Cut"), (Op::Intersect, "Intersect")] {
+                        if widgets::pill(ui, n, c.op == o).clicked() {
+                            c.op = o;
+                            ch = true;
+                        }
+                    }
+                });
+                ui.label(RichText::new("Tool bodies").size(12.0).color(theme::TEXT_DIM));
+                egui::ScrollArea::vertical().id_salt(id.with("tools")).max_height(120.0).show(ui, |ui| {
+                    for (bid, n) in all.iter().filter(|b| Some(b.0) != c.target) {
+                        let mut on = c.tools.contains(bid);
+                        if ui.checkbox(&mut on, n).changed() {
+                            if on {
+                                c.tools.push(*bid);
+                            } else {
+                                c.tools.retain(|x| x != bid);
+                            }
+                            ch = true;
+                        }
+                    }
+                });
+                if c.op != Op::Join {
+                    ch |= c.clearance.row(ui, id.with("c"), "Clearance", env);
+                }
+                ui.label(RichText::new("Clear at target positions (x, y, z; …)").size(12.0).color(theme::TEXT_DIM));
+                ch |= ui
+                    .add(egui::TextEdit::singleline(&mut c.positions).font(theme::mono(12.0)).hint_text("0, 0, 0; 0, 0, 14").desired_width(f32::INFINITY))
+                    .changed();
+                ch |= ui.checkbox(&mut c.keep_tools, "Keep tool bodies").changed();
+                ui.label(widgets::muted("Runs on triangle meshes; the result is a mesh body unless every body is a solid."));
+            }
+            Body::Move(m) => {
+                let all: Vec<(BodyId, String)> = cx.model.map(|o| o.bodies.iter().map(|b| (b.body.id, b.body.name.clone())).collect()).unwrap_or_default();
+                ch |= body_combo(ui, id.with("b"), &mut m.body, &all, "pick a body");
+                for (i, a) in ["X", "Y", "Z"].iter().enumerate() {
+                    ch |= m.t[i].row(ui, id.with(("t", i)), &format!("Move {a}"), env);
+                }
+                for (i, a) in ["X", "Y", "Z"].iter().enumerate() {
+                    ch |= m.rot[i].row(ui, id.with(("r", i)), &format!("Rotate {a} (deg)"), env);
+                }
+                ch |= m.scale.row(ui, id.with("s"), "Scale (mesh)", env);
+                ch |= ui.checkbox(&mut m.copy, "Copy (keep the original)").changed();
+                if m.copy {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Copy name").size(12.0).color(theme::TEXT_DIM));
+                        ch |= ui.add(egui::TextEdit::singleline(&mut m.new_name).desired_width(132.0)).changed();
+                    });
+                }
+            }
+            Body::Mesh(m) => {
+                ch |= m.scale.row(ui, id.with("s"), "Scale", env);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("File up axis").size(12.0).color(theme::TEXT_DIM));
+                    for (y, n) in [(false, "Z"), (true, "Y")] {
+                        if widgets::pill(ui, n, m.up_y == y).clicked() {
+                            m.up_y = y;
+                            ch = true;
+                        }
+                    }
+                });
+                for (i, a) in ["X", "Y", "Z"].iter().enumerate() {
+                    ch |= m.rot[i].row(ui, id.with(("r", i)), &format!("Rotate {a} (deg)"), env);
+                }
+                for (i, a) in ["X", "Y", "Z"].iter().enumerate() {
+                    ch |= m.t[i].row(ui, id.with(("t", i)), &format!("Move {a}"), env);
+                }
+                ch |= ui.checkbox(&mut m.reference, "Reference (never printed)").changed();
             }
             Body::Boss(b) => {
                 ch |= body_combo(ui, id.with("b"), &mut b.body, &solids, "last solid");

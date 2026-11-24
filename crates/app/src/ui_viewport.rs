@@ -161,7 +161,7 @@ impl BodyFacts for Facts<'_> {
     }
 }
 
-fn body_color(reference: bool, part: bool) -> [f32; 4] {
+pub(crate) fn body_color(reference: bool, part: bool) -> [f32; 4] {
     if part {
         [0.55, 0.60, 0.68, 0.75]
     } else if reference {
@@ -410,14 +410,30 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
     }
 
     // ------------------------------------------------ overlays
-    filter_bar(app, ui, rect);
-    display_bar(app, ui, rect);
     let dialog_w = if app.dialog.is_some() {
         app.dialog_card_w.max(300.0) + 12.0
     } else {
         0.0
     };
+    // the filters run up to the Section checkbox beside the cube, or across the
+    // top when the cube moved below them
+    let cube_at = cube_pos(rect, dialog_w);
+    let toggle = section_toggle_rect(ui, rect, cube_at);
+    let (filter_y, filter_room) = if cube_at.y > rect.top() + 12.0 {
+        (rect.top() + 12.0, rect.width() - 24.0)
+    } else {
+        let beside = toggle.left().min(cube_at.x) - 8.0 - (rect.left() + 12.0);
+        if beside >= 70.0 {
+            (rect.top() + 12.0, beside)
+        } else {
+            // a narrow view: the filters take the row under the checkbox
+            (toggle.bottom() + 6.0, cube_at.x - 8.0 - (rect.left() + 12.0))
+        }
+    };
+    filter_bar(app, ui, rect, filter_y, filter_room);
+    display_bar(app, ui, rect);
     cube(app, ui, rect, dialog_w);
+    section_toggle(app, ui, rect, cube_at, toggle);
     if app.regenerating() && app.model.is_some() {
         let r = Rect::from_center_size(pos2(rect.center().x, rect.top() + 26.0), vec2(150.0, 26.0));
         painter.rect(
@@ -563,8 +579,8 @@ fn tp(xf: &glam::DAffine3, p: [f32; 3]) -> Vec3 {
 /// Model matrix of a body in the current frame (drags and explode included).
 fn body_model(app: &EasyCadApp, m: &Output, b: easycad_model::feature::BodyId) -> glam::Mat4 {
     match m.ctx_body(b) {
-        Some(c) => to_mat4(crate::ui_assembly::display_xf(app, c)),
-        None => glam::Mat4::IDENTITY,
+        Some(c) => to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c)),
+        None => to_mat4(app.tween_body(b)),
     }
 }
 
@@ -648,8 +664,20 @@ fn build_frame(
                 color,
                 translucent: b.body.reference && color[3] < 1.0,
                 colors,
-                model: glam::Mat4::from_translation(offset), top: false,
+                model: glam::Mat4::from_translation(offset) * to_mat4(app.tween_body(b.body.id)), top: false,
+                edges_only: false,
             });
+            if let Some(whole) = shown.cut_away.get(&b.body.id) {
+                bodies.push(DrawBody {
+                    mesh: whole.clone(),
+                    color,
+                    translucent: false,
+                    colors: None,
+                    model: glam::Mat4::from_translation(offset) * to_mat4(app.tween_body(b.body.id)),
+                    top: false,
+                    edges_only: true,
+                });
+            }
         }
     }
     // interference overlap solids (world -> view frame)
@@ -662,6 +690,7 @@ fn build_frame(
                 translucent: false,
                 colors: None,
                 model: to_mat4(to_view), top: false,
+                edges_only: false,
             });
         }
     }
@@ -673,6 +702,7 @@ fn build_frame(
             translucent: false,
             colors: None,
             model: to_mat4(*xf), top: false,
+            edges_only: false,
         });
     }
     // assemblies: the other occurrences (dimmed while a component is being edited)
@@ -699,12 +729,17 @@ fn build_frame(
             color[3] = if b.reference { 0.12 } else { 0.3 };
         }
         let tinted = color[3] < 1.0 && !b.reference && !dim;
+        let model = to_mat4(app.tween_occurrence(&c.path) * crate::ui_assembly::display_xf(app, c));
+        if let Some(whole) = shown.cut_away.get(&c.key) {
+            bodies.push(DrawBody { mesh: whole.clone(), color, translucent: false, colors: None, model, top: false, edges_only: true });
+        }
         bodies.push(DrawBody {
             mesh: m.clone(),
             color,
             translucent: (b.reference && color[3] < 1.0) || dim || tinted,
             colors,
-            model: to_mat4(crate::ui_assembly::display_xf(app, c)), top: false,
+            model, top: false,
+            edges_only: false,
         });
     }
     let mut highlights = Vec::new();
@@ -811,6 +846,7 @@ fn build_frame(
                 colors: None,
                 model: glam::Mat4::IDENTITY,
                 top: forced.contains(&id),
+                edges_only: false,
             })
             // origin-plane squares of the plane pick; `translucent` = hovered (stronger fill)
             .chain(crate::plane_pick::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
@@ -820,6 +856,7 @@ fn build_frame(
                 colors: None,
                 model: glam::Mat4::IDENTITY,
                 top: false,
+                edges_only: false,
             }))
             // construction planes: translucent squares with a border; `translucent` = hovered / picked
             .chain(crate::datum_ui::draw_list(app).into_iter().map(|(mesh, hot)| DrawBody {
@@ -829,6 +866,7 @@ fn build_frame(
                 colors: None,
                 model: glam::Mat4::IDENTITY,
                 top: false,
+                edges_only: false,
             }))
             .collect();
     let mut cam_owned = app.camera.clone();
@@ -976,12 +1014,32 @@ pub fn overlay_frame() -> Frame {
         .inner_margin(Margin::same(4))
 }
 
-fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
+/// How many of `widths` fit in `avail` (gaps between them), leaving room for a
+/// `more` button when not all do.
+fn fit_count(widths: &[f32], avail: f32, gap: f32, more: f32) -> usize {
+    let total = |k: usize| widths[..k].iter().sum::<f32>() + gap * k.saturating_sub(1) as f32;
+    if total(widths.len()) <= avail {
+        return widths.len();
+    }
+    (0..widths.len()).rev().find(|&k| total(k) + gap + more <= avail).unwrap_or(0)
+}
+
+/// Width of a `widgets::pill` / `widgets::seg` with this label.
+fn seg_w(ui: &Ui, label: &str) -> f32 {
+    ui.painter().layout_no_wrap(label.to_owned(), theme::prop(12.0), theme::TEXT).size().x
+        + 2.0 * ui.spacing().button_padding.x
+}
+
+/// Pick filters (top left). `room` is the width up to the view cube: pills
+/// that do not fit go into a » menu.
+fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, y: f32, room: f32) {
     egui::Area::new(egui::Id::unique("filters"))
         .order(egui::Order::Middle)
-        .fixed_pos(rect.min + vec2(12.0, 12.0))
+        .fixed_pos(pos2(rect.left() + 12.0, y))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
+                let room = (room - 10.0).max(30.0);
+                ui.set_max_width(room);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if let Some(note) = app.dialog.as_ref().and_then(|d| d.filter_note()) {
@@ -991,53 +1049,144 @@ fn filter_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                             (false, true, false) => "Faces only",
                             _ => "Custom filter",
                         };
-                        widgets::pill(ui, label, true);
-                        ui.label(RichText::new(note).size(12.0).color(theme::TEXT_MUTED));
+                        let pill = widgets::pill(ui, label, true);
+                        let rest = room - pill.rect.width() - 10.0;
+                        if rest > 40.0 {
+                            ui.add_sized(
+                                vec2(rest.min(ui.painter().layout_no_wrap(note.to_string(), theme::prop(12.0), theme::TEXT).size().x + 2.0), 26.0),
+                                egui::Label::new(RichText::new(note).size(12.0).color(theme::TEXT_MUTED)).truncate(),
+                            );
+                        } else {
+                            pill.on_hover_text(note);
+                        }
                         ui.add_space(6.0);
                         return;
                     }
                     let f = &mut app.filter;
-                    for (label, on, tip) in [
+                    let items: [(&str, &mut bool, &str); 4] = [
                         ("Bodies", &mut f.bodies, "Pick whole bodies"),
                         ("Faces", &mut f.faces, "Pick faces"),
                         ("Edges", &mut f.edges, "Pick edges"),
-                        (
-                            "Sketches",
-                            &mut f.sketches,
-                            "Pick sketch geometry (in sketch mode)",
-                        ),
-                    ] {
-                        if widgets::pill(ui, label, *on).on_hover_text(tip).clicked() {
+                        ("Sketches", &mut f.sketches, "Pick sketch geometry (in sketch mode)"),
+                    ];
+                    let widths: Vec<f32> = items.iter().map(|(l, _, _)| seg_w(ui, l)).collect();
+                    let k = fit_count(&widths, room, 4.0, 26.0);
+                    let mut rest = Vec::new();
+                    for (i, (label, on, tip)) in items.into_iter().enumerate() {
+                        if i >= k {
+                            rest.push((label, on, tip));
+                        } else if widgets::pill(ui, label, *on).on_hover_text(tip).clicked() {
                             *on = !*on;
                         }
+                    }
+                    if !rest.is_empty() {
+                        let r = widgets::more_button(ui, "More filters", 26.0);
+                        egui::Popup::menu(&r)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                for (label, on, tip) in rest {
+                                    ui.checkbox(on, label).on_hover_text(tip);
+                                }
+                            });
                     }
                 });
             });
         });
 }
 
-/// Section controls above the view toolbar: axis, position, flip.
-fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
-    let Some(mut s) = app.section else { return };
-    let w = 330.0;
-    let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 100.0);
-    egui::Area::new(egui::Id::unique("section_bar"))
+const CUBE_W: f32 = 88.0;
+/// The Section checkbox's size.
+const TOGGLE_H: f32 = 24.0;
+
+fn toggle_w(ui: &Ui) -> f32 {
+    ui.painter().layout_no_wrap("Section".into(), theme::prop(12.0), theme::TEXT).size().x + 16.0 + 6.0 + 16.0
+}
+
+/// Where the Section checkbox sits: left of the cube's home button, level with
+/// it; right of it when the cube was pushed to the viewport's left edge.
+fn section_toggle_rect(ui: &Ui, rect: Rect, cube_at: Pos2) -> Rect {
+    let w = toggle_w(ui);
+    let y = cube_at.y - 4.0;
+    let left = cube_at.x - 8.0 - w;
+    let x = if left >= rect.left() + 12.0 { left } else { cube_at.x + CUBE_W + 8.0 };
+    Rect::from_min_size(pos2(x, y), vec2(w, TOGGLE_H))
+}
+
+/// The floating "Section" checkbox by the view cube's home button and, while
+/// on, the cut's controls in a card under the cube's rotate buttons: axis,
+/// position (drag, or nudge a millimetre at a time), which half to keep.
+fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, cube_at: Pos2, at: Rect) {
+    let mut on = app.section.is_some();
+    egui::Area::new(egui::Id::unique("section_toggle"))
         .order(egui::Order::Middle)
-        .fixed_pos(pos)
+        .fixed_pos(at.min)
         .show(ui.ctx(), |ui| {
-            overlay_frame().show(ui, |ui| {
+            let resp = Frame::new()
+                .fill(if on { theme::ACCENT_BG } else { theme::CARD.gamma_multiply(0.92) })
+                .stroke(Stroke::new(1.0, if on { theme::ACCENT } else { theme::BORDER_INPUT }))
+                .corner_radius(6.0)
+                .inner_margin(Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    ui.spacing_mut().icon_spacing = 6.0;
+                    ui.checkbox(&mut on, RichText::new("Section").size(12.0).color(theme::TEXT_STRONG))
+                })
+                .inner;
+            resp.on_hover_text("Cut the model in half to look inside (section view)");
+        });
+    if on != app.section.is_some() {
+        app.toggle_section();
+    }
+    let Some(mut s) = app.section else { return };
+    let bb = app.section_bbox.or_else(|| app.model.as_ref()?.bbox);
+    // under the cube's step grid, right-aligned with the cube (left-aligned when
+    // the cube sits at the viewport's left edge); never over the rotate buttons
+    let top = cube_at.y + viewcube::widget_height(CUBE_W) + 8.0;
+    let room = (rect.width() - 24.0).max(120.0);
+    let w = room.min(236.0);
+    let cube_left = cube_at.x < rect.left() + 13.0;
+    let x = if cube_left { cube_at.x } else { (cube_at.x + CUBE_W - w).max(rect.left() + 12.0) };
+    let narrow = w < 200.0;
+    egui::Area::new(egui::Id::unique("section_card"))
+        .order(egui::Order::Middle)
+        .fixed_pos(pos2(x, top))
+        .show(ui.ctx(), |ui| {
+            overlay_frame().inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_width(w - 14.0);
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
+                    if !narrow {
+                        ui.label(RichText::new("CUT").size(10.5).color(theme::TEXT_LABEL));
+                    }
                     for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
-                        if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() {
+                        if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() && s.axis != i {
                             s.axis = i;
+                            s.at = 0.5;
                         }
                     }
-                    ui.add_sized(vec2(130.0, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
-                        .on_hover_text("Where the plane cuts, across the model");
-                    if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
-                        s.flip = !s.flip;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::seg(ui, "Flip", s.flip).on_hover_text("Keep the other half").clicked() {
+                            s.flip = !s.flip;
+                        }
+                    });
+                });
+                // position: the slider, a millimetre nudge each side, the value
+                let span = bb.map_or(1.0, |b| (b.max[s.axis] - b.min[s.axis]).max(1e-6)) as f32;
+                let step = 1.0 / span;
+                ui.horizontal(|ui| {
+                    if widgets::seg(ui, "−", false).on_hover_text("Nudge the cut 1 mm back").clicked() {
+                        s.at = (s.at - step).clamp(0.0, 1.0);
+                    }
+                    let mm_w = if narrow { 0.0 } else { 58.0 };
+                    let slider_w = (ui.available_width() - 34.0 - mm_w).max(30.0);
+                    ui.add_sized(vec2(slider_w, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
+                        .on_hover_text("Drag the cut across the model");
+                    if widgets::seg(ui, "+", false).on_hover_text("Nudge the cut 1 mm on").clicked() {
+                        s.at = (s.at + step).clamp(0.0, 1.0);
+                    }
+                    if let (Some(b), false) = (bb, narrow) {
+                        let v = b.min[s.axis] as f32 + s.at * span;
+                        ui.label(RichText::new(crate::units::len_u(v as f64)).font(theme::mono(11.0)).color(theme::TEXT_DIM))
+                            .on_hover_text(format!("{} = this, in the model's frame", ["X", "Y", "Z"][s.axis]));
                     }
                 });
             });
@@ -1048,19 +1197,42 @@ fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     }
 }
 
+const DISPLAY_MODES: [(DisplayMode, &str, &str); 3] = [
+    (DisplayMode::Shaded, "Shaded", "1"),
+    (DisplayMode::ShadedEdges, "Shaded + edges", "2"),
+    (DisplayMode::Wireframe, "Wireframe", "3"),
+];
+
+/// The view bar (bottom centre): fit, section, overhang, explode and the display
+/// modes. It narrows with the viewport: first the three modes fold into one
+/// dropdown, then everything after fit and section goes into a » menu.
 fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
-    section_bar(app, ui, rect);
     crate::ui_overhang::legend(app, ui, rect);
     let asm = app.model.as_ref().is_some_and(|m| m.asm.is_some()) && app.active.is_empty();
-    let w = if asm { 640.0 } else { 460.0 };
-    let pos = pos2(rect.center().x - w / 2.0, rect.bottom() - 54.0);
+    let explode_on = asm && (app.asm.explode_open || app.explode > 0.0);
+    let gap = 4.0;
+    let current = DISPLAY_MODES.iter().find(|m| m.0 == app.display).map_or("Shaded", |m| m.1);
+    let dropdown = format!("{current} ▾");
+    let head = 30.0 + gap + 30.0 + gap + seg_w(ui, "Overhang") + gap + 9.0 + gap
+        + if asm { seg_w(ui, "Explode") + gap + if explode_on { 110.0 + gap } else { 0.0 } + 9.0 + gap } else { 0.0 };
+    let modes: f32 = DISPLAY_MODES.iter().map(|m| seg_w(ui, m.1) + gap).sum::<f32>() - gap + 9.0 + gap + seg_w(ui, "Positions") + 24.0;
+    let avail = rect.width() - 24.0 - 10.0;
+    // 0: everything, 1: modes as a dropdown, 2: fit + section + »
+    let tier = if head + modes <= avail {
+        0
+    } else if head + seg_w(ui, &dropdown) <= avail {
+        1
+    } else {
+        2
+    };
     egui::Area::new(egui::Id::unique("display"))
         .order(egui::Order::Middle)
-        .fixed_pos(pos)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(pos2(rect.center().x, rect.bottom() - 54.0))
         .show(ui.ctx(), |ui| {
             overlay_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = gap;
                     if widgets::icon_button(ui, Icon::Fit, 30.0, "Fit all (F)", true).clicked() {
                         app.fit_all();
                     }
@@ -1072,60 +1244,105 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                     if r.clicked() {
                         app.toggle_section();
                     }
+                    if tier == 2 {
+                        let r = widgets::more_button(ui, "More view options", 30.0);
+                        egui::Popup::menu(&r)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                ui.set_min_width(170.0);
+                                if ui.selectable_label(app.overhang.on, "Overhang").on_hover_text("Overhang heat map").clicked() {
+                                    app.overhang.toggle();
+                                }
+                                if asm {
+                                    explode_controls(app, ui, explode_on);
+                                }
+                                ui.separator();
+                                mode_items(app, ui);
+                                ui.separator();
+                                if ui.selectable_label(app.positions.open, "Positions…").on_hover_text("Named poses to snap between").clicked() {
+                                    app.positions.open = !app.positions.open;
+                                }
+                            });
+                        app.positions.button = Some(r.rect);
+                        return;
+                    }
                     let on = app.overhang.on;
                     let r = widgets::seg(ui, "Overhang", on).on_hover_text("Overhang heat map: faces that lean out past the process's critical angle need support");
                     if r.clicked() {
                         app.overhang.toggle();
                     }
-                    let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
-                    ui.painter().vline(
-                        r.center().x,
-                        r.y_range(),
-                        Stroke::new(1.0, theme::BORDER_CARD),
-                    );
+                    bar_sep(ui);
                     if asm {
-                        let on = app.asm.explode_open || app.explode > 0.0;
-                        if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
-                            app.asm.explode_open = !on;
-                            app.explode = if on { 0.0 } else { 0.6 };
-                            app.request_model();
-                        }
-                        if on {
-                            let mut v = app.explode;
-                            let r = ui.add_sized(vec2(110.0, 22.0), egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
-                            app.asm_explode_rect = Some(r.rect);
-                            if r.changed() {
-                                app.explode = v;
-                                app.request_model();
+                        explode_controls(app, ui, explode_on);
+                        bar_sep(ui);
+                    }
+                    if tier == 0 {
+                        for (m, label, key) in DISPLAY_MODES {
+                            if widgets::seg(ui, label, app.display == m)
+                                .on_hover_text(format!("{label} ({key})"))
+                                .clicked()
+                            {
+                                app.display = m;
                             }
                         }
-                        let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
-                        ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_CARD));
+                    } else {
+                        let r = widgets::seg(ui, &dropdown, true).on_hover_text("Display mode (1 / 2 / 3)");
+                        egui::Popup::menu(&r).show(|ui| mode_items(app, ui));
                     }
-                    for (m, label, key) in [
-                        (DisplayMode::Shaded, "Shaded", "1"),
-                        (DisplayMode::ShadedEdges, "Shaded + edges", "2"),
-                        (DisplayMode::Wireframe, "Wireframe", "3"),
-                    ] {
-                        if widgets::seg(ui, label, app.display == m)
-                            .on_hover_text(format!("{label} ({key})"))
-                            .clicked()
-                        {
-                            app.display = m;
-                        }
-                    }
+                    bar_sep(ui);
+                    crate::ui_positions::bar_button(app, ui);
                 });
             });
         });
+    crate::ui_positions::panel(app, ui, rect);
+}
+
+fn bar_sep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_CARD));
+}
+
+fn mode_items(app: &mut EasyCadApp, ui: &mut Ui) {
+    for (m, label, key) in DISPLAY_MODES {
+        if ui.selectable_label(app.display == m, label).on_hover_text(format!("{label} ({key})")).clicked() {
+            app.display = m;
+        }
+    }
+}
+
+/// Explode toggle and, while on, its slider.
+fn explode_controls(app: &mut EasyCadApp, ui: &mut Ui, on: bool) {
+    if widgets::seg(ui, "Explode", on).on_hover_text("Pull the components apart (X)").clicked() {
+        app.asm.explode_open = !on;
+        app.explode = if on { 0.0 } else { 0.6 };
+        app.request_model();
+    }
+    if on {
+        let mut v = app.explode;
+        let r = ui.add_sized(vec2(110.0, 22.0), egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+        app.asm_explode_rect = Some(r.rect);
+        if r.changed() {
+            app.explode = v;
+            app.request_model();
+        }
+    }
+}
+
+/// Where the view cube goes: top right, left of a dialog card, or below the
+/// filters at the left when the card leaves no room beside it.
+fn cube_pos(rect: Rect, right_offset: f32) -> Pos2 {
+    let x = rect.right() - 16.0 - CUBE_W - right_offset;
+    if x < rect.left() + 12.0 {
+        pos2(rect.left() + 12.0, rect.top() + 56.0)
+    } else {
+        pos2(x, rect.top() + 12.0)
+    }
 }
 
 fn cube(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, right_offset: f32) {
     let w = 88.0;
     let h = viewcube::widget_height(w);
-    let r = Rect::from_min_size(
-        pos2(rect.right() - 16.0 - w - right_offset, rect.top() + 12.0),
-        vec2(w, h),
-    );
+    let r = Rect::from_min_size(cube_pos(rect, right_offset), vec2(w, h));
     let mut action = None;
     egui::Area::new(egui::Id::unique("cube"))
         .order(egui::Order::Middle)
@@ -1356,7 +1573,7 @@ fn dialog_overlay(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
         app.worker.busy_with(crate::worker::Purpose::Preview) || app.preview_dirty.is_some();
     let mut ev = DialogEvent::None;
     let card_w = app.dialog_card_w.max(300.0);
-    let mut pos = pos2(rect.right() - 16.0 - card_w, rect.top() + 12.0);
+    let mut pos = pos2((rect.right() - 16.0 - card_w).max(rect.left() + 8.0), rect.top() + 12.0);
     let construct = d.kind == crate::dialogs::DialogKind::Construct;
     if construct {
         // the Construct popup sits next to the last click
@@ -1549,6 +1766,14 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
         crate::ui_process::teardrop_menu(app, ui);
     }
     let body = sel[0].body;
+    if ui.button("Move / copy body…").clicked() {
+        app.open_dialog(crate::dialogs::DialogKind::MoveBody);
+        ui.close();
+    }
+    if ui.button("Combine with…").clicked() {
+        app.open_dialog(crate::dialogs::DialogKind::Combine);
+        ui.close();
+    }
     if ui.button("Hide body").clicked() {
         app.hidden.insert(body);
         app.selection.clear();

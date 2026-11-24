@@ -767,10 +767,17 @@ fn section_view_and_sketch_slice() {
         let app = h.state();
         let m = app.model.as_ref().unwrap();
         assert!(!m.caps.is_empty(), "cut faces");
+        assert!(!m.cut_away.is_empty(), "the cut-away half is kept, to draw as a wireframe");
+        assert!(m.cut_away.keys().all(|id| m.bodies.iter().any(|b| b.body.id == *id)));
         assert!(app.section_cut().is_some());
     }
     let img = save(&mut h, "section_view");
     assert_viewport_rendered(&img, h.state().viewport_rect.shrink(60.0));
+    // shaded without edges: only the cut-away half has lines
+    h.state_mut().display = easycad_app::viewport::gpu::DisplayMode::Shaded;
+    h.run_steps(4);
+    save(&mut h, "section_view_shaded");
+    h.state_mut().display = easycad_app::viewport::gpu::DisplayMode::ShadedEdges;
     h.state_mut().toggle_section();
     settle(&mut h);
     assert!(h.state().model.as_ref().unwrap().caps.is_empty());
@@ -867,4 +874,124 @@ fn drawing_of_an_assembly_with_bom_section_and_gdt() {
         assert!(easycad_app::ui_drawing::export_bytes(r, dr, "pdf").starts_with(b"%PDF-"));
     }
     save(&mut h, "drawing_assembly");
+}
+
+/// Import an STL through the app's import path, combine it with a solid post in the
+/// Combine dialog (cut with clearance at two positions), OK, and export the
+/// watertight result.
+#[test]
+fn mesh_import_and_combine_dialog() {
+    use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::meshbody;
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("easycad-ui-mesh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stl = dir.join("pile.stl");
+    std::fs::write(&stl, meshbody::write_stl_bytes(&meshbody::sample_blob(glam::DVec3::new(0.0, 0.0, 10.0), 10.0, 4))).unwrap();
+    let mut doc = easycad_model::document::Document::new("Pile");
+    let mut s = easycad_model::sketch::Sketch::new("Post", easycad_model::geom::Plane::XY);
+    s.rect(glam::DVec2::new(9.0, -20.0), glam::DVec2::new(20.0, 20.0));
+    let s = doc.add_sketch(s);
+    let post = BodyId::of(doc.add_feature(
+        "Post",
+        FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: 30.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    ));
+    let mut h = harness(doc);
+    let msg = h.state_mut().import_path(&stl).unwrap();
+    assert!(msg.contains("mesh body"), "{msg}");
+    settle(&mut h);
+    let pile = {
+        let app = h.state_mut();
+        let m = app.model.clone().unwrap();
+        let pile = m.bodies.iter().find(|b| b.body.is_mesh()).expect("mesh body").body.id;
+        app.selection = vec![PickKey { body: pile, kind: PickKind::Face(0) }, PickKey { body: post, kind: PickKind::Face(0) }];
+        app.open_dialog(DialogKind::Combine);
+        let d = app.dialog.as_mut().expect("Combine dialog");
+        let Body::Combine(c) = &mut d.body else { panic!("not the Combine dialog") };
+        assert_eq!(c.target, Some(pile), "the picked mesh body is the target");
+        assert_eq!(c.tools, vec![post]);
+        c.clearance.text = "0.5".into();
+        c.positions = "0, 0, 0; 0, 0, 14".into();
+        app.request_preview();
+        pile
+    };
+    settle(&mut h);
+    save(&mut h, "mesh_combine_dialog");
+    {
+        let app = h.state_mut();
+        app.close_dialog(true);
+    }
+    settle(&mut h);
+    let app = h.state_mut();
+    let f = app.doc.data.features.last().unwrap();
+    assert!(matches!(f.kind, FeatureKind::MeshBoolean { op: BoolOp::Cut, .. }), "{:?}", f.kind);
+    let m = app.model.clone().unwrap();
+    let b = m.body(pile).unwrap();
+    assert!(b.is_mesh() && b.bbox().unwrap().max.x <= 8.5 + 1e-6);
+    assert!(m.result.errors().is_empty(), "{:?}", m.result.errors());
+}
+
+/// The Positions panel next to the display modes: three positions, the cart snapped
+/// to "very full" (after its tween), the lid selected with its move shown.
+#[test]
+fn positions_panel() {
+    use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::positions::{PoseMove, PoseTarget};
+    let _serial = serial();
+    let mut doc = easycad_model::document::Document::new("Cart");
+    let mut ids = Vec::new();
+    for (name, lo, hi) in [
+        ("Tub floor", [-20.0, -22.0, 0.0], [20.0, 22.0, 2.0]),
+        ("Lid", [-20.0, -22.0, 56.5], [20.0, 22.0, 58.5]),
+        ("Pile", [-10.0, -10.0, 20.0], [10.0, 10.0, 50.0]),
+    ] {
+        let mut s = easycad_model::sketch::Sketch::new(name, easycad_model::geom::Plane::XY.offset(lo[2]));
+        s.rect(glam::DVec2::new(lo[0], lo[1]), glam::DVec2::new(hi[0], hi[1]));
+        let s = doc.add_sketch(s);
+        ids.push(BodyId::of(doc.add_feature(
+            name,
+            FeatureKind::Extrude { sketch: s, profiles: ProfileSel::All, distance: (hi[2] - lo[2]).into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+        )));
+    }
+    let (lid, pile) = (ids[1], ids[2]);
+    let full = doc
+        .edit("positions", |d| {
+            for (name, dz, deg) in [("closed", "0", "0"), ("peeking full", "7", "-25"), ("very full", "14", "-100")] {
+                let id = d.add_position(name);
+                d.positions.last_mut().unwrap().moves = vec![
+                    PoseMove { translate: ["0".into(), "0".into(), dz.into()], ..PoseMove::new(PoseTarget::Body(pile)) },
+                    PoseMove { angle_deg: deg.into(), axis: glam::DVec3::X, pivot: glam::DVec3::new(0.0, 22.0, 56.5), ..PoseMove::new(PoseTarget::Body(lid)) },
+                ];
+                if name == "very full" {
+                    return Ok::<_, ()>(id);
+                }
+            }
+            unreachable!()
+        })
+        .unwrap();
+    let mut h = harness(doc);
+    {
+        let app = h.state_mut();
+        app.positions.open = true;
+        app.go_to_position(Some(full));
+    }
+    settle(&mut h);
+    h.run_steps(20); // the tween (0.35 s at 30 fps)
+    {
+        let app = h.state_mut();
+        assert_eq!(app.model.as_ref().unwrap().pose, Some(full));
+        assert!(app.positions.anim.is_none(), "the tween ended");
+        let lid_top = app.model.as_ref().unwrap().body(lid).unwrap().bbox().unwrap().max.z;
+        assert!(lid_top > 90.0, "{lid_top}");
+        app.selection = vec![PickKey { body: lid, kind: PickKind::Face(0) }];
+    }
+    h.run_steps(3);
+    save(&mut h, "positions_panel");
+    // a dialog shows the modeled pose; closing it goes back
+    h.state_mut().open_dialog(DialogKind::Split);
+    settle(&mut h);
+    assert_eq!(h.state().model.as_ref().unwrap().pose, None);
+    h.state_mut().close_dialog(false);
+    settle(&mut h);
+    assert_eq!(h.state().model.as_ref().unwrap().pose, Some(full));
 }

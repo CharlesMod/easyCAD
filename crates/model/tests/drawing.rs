@@ -260,7 +260,7 @@ fn title_block_notes_balloons_parting_line_and_exports() {
             threads: Default::default(),
         },
     );
-    let split = doc.add_feature("Split", FeatureKind::Split { body: Some(b), plane: Plane::XY.offset(12.0), new_name: "Lid".into(), offset: 0.0.into() });
+    let split = doc.add_feature("Split", FeatureKind::Split { keep: Default::default(), body: Some(b), plane: Plane::XY.offset(12.0), new_name: "Lid".into(), offset: 0.0.into() });
     let lid = BodyId::of(split);
     let d = doc.add_drawing("Sheet 1", sheet());
     let (front, note, balloon, pl, pl_top) = doc

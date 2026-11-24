@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default)]
     pub last_profile: Option<String>,
+    /// The left side pane (browser; sketch tools) closed to its rail.
+    #[serde(default)]
+    pub left_pane_collapsed: bool,
+    /// The right side pane (Parameters; sketch properties) closed to its rail.
+    #[serde(default)]
+    pub right_pane_collapsed: bool,
     /// Display lengths in inches.
     #[serde(default)]
     pub inch: bool,
@@ -36,6 +42,15 @@ pub struct Settings {
     pub history_height: Option<f32>,
     #[serde(default)]
     pub history_rows: usize,
+    /// Run the Claude bridge (MCP server on 127.0.0.1) at startup.
+    #[serde(default)]
+    pub mcp: bool,
+    /// Its port (`None` = the default, 47311).
+    #[serde(default)]
+    pub mcp_port: Option<u16>,
+    /// Main window position and inner size in points, [x, y, w, h], restored at startup.
+    #[serde(default)]
+    pub window: Option<[f32; 4]>,
 }
 
 fn yes() -> bool {

@@ -7,6 +7,9 @@ pub mod cloud;
 pub mod dialogs;
 pub mod e2e_state;
 pub mod files;
+pub mod mcp;
+pub mod mcp_sketch;
+pub mod panes;
 pub mod pickstack;
 pub mod profiler;
 pub mod recovery;
@@ -35,6 +38,7 @@ pub mod ui_mates;
 pub mod ui_overhang;
 pub mod ui_main;
 pub mod ui_parts;
+pub mod ui_positions;
 pub mod ui_process;
 pub mod ui_settings;
 pub mod region_pick;
@@ -78,17 +82,24 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 /// Native options used by the binary (wgpu, no depth in egui's pass, no MSAA: the
 /// viewport renders its own 4×MSAA target).
 pub fn native_options() -> eframe::NativeOptions {
+    let mut viewport = egui::ViewportBuilder::default();
+    // Reopen where the window was last left (saved by `remember_window`).
+    if let Some([x, y, w, h]) = settings::Settings::load().window {
+        if w >= 480.0 && h >= 400.0 {
+            viewport = viewport.with_position([x, y]).with_inner_size([w, h]);
+        }
+    }
+    let viewport = if viewport.inner_size.is_some() { viewport } else { viewport.with_inner_size([1440.0, 900.0]) };
     eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("easyCAD")
             .with_app_id("easycad")
             .with_icon(std::sync::Arc::new(
                 eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/easycad-256.png"))
                     .unwrap_or_default(),
             ))
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([480.0, 400.0]),
         depth_buffer: 0,
         multisampling: 1,
         wgpu_options: wgpu_options(),

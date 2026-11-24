@@ -70,6 +70,7 @@ struct Frame;
 struct EdgeSpec;
 struct FaceInfo;
 struct EdgeInfo;
+struct ShellBlocker;
 struct MeshData;
 struct BBox;
 struct MassProps;
@@ -110,7 +111,9 @@ int32_t match_edge(const Shape &s, V3 p, V3 tangent, double tol);
 std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const uint32_t> edges, rust::Slice<const double> radii);
 std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges, rust::Slice<const double> dists);
 std::unique_ptr<Shape> remove_faces(const Shape &s, rust::Slice<const uint32_t> faces);
-std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset);
+std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t &strategy);
+double shell_max_thickness(const Shape &s, rust::Slice<const uint32_t> faces, double offset, uint32_t iters);
+rust::Vec<ShellBlocker> shell_blockers(const Shape &s, rust::Slice<const uint32_t> open, double offset);
 std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, V3 pull,
                              double angle_rad, const Frame &neutral);
 
@@ -135,6 +138,7 @@ HlrData hlr(const Shape &s, V3 dir, V3 x_dir, bool exact, double defl);
 MassProps mass_props(const Shape &s);
 BBox bounding_box(const Shape &s);
 rust::Vec<double> extent_along(const Shape &s, V3 origin, V3 dir);
+rust::Vec<double> min_distance(const Shape &a, uint32_t a_kind, uint32_t a_idx, const Shape &b, uint32_t b_kind, uint32_t b_idx);
 
 std::unique_ptr<Shape> read_step_xcaf(rust::Str data, rust::Vec<XcafPart> &parts, rust::Vec<float> &face_rgba);
 rust::String write_step_xcaf(const Shape &c, rust::Slice<const XcafPart> parts, rust::Slice<const float> face_rgba);

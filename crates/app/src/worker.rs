@@ -14,6 +14,7 @@ use easycad_model::assembly::{
 };
 use easycad_model::document::{BlobStore, DocData};
 use easycad_model::feature::{BodyId, FeatureId};
+use easycad_model::positions::PositionId;
 use easycad_model::library::Library;
 use easycad_model::occt::{BBox, EdgeInfo, FaceInfo, Mesh, Shape};
 use easycad_model::pick::{BodyPicker, EdgeTolerance, Hit, HitKind, Picker};
@@ -28,6 +29,9 @@ pub enum Purpose {
     Preview,
     /// A drawing sheet (HLR views + annotations) for the Drawing screen.
     Drawing,
+    /// The Claude bridge's own model: the whole committed document, whatever the
+    /// user's viewport shows (dialog rollback, section, active component).
+    Agent,
 }
 
 pub struct Request {
@@ -53,6 +57,8 @@ pub struct Request {
     /// Section view: (point, normal) in the view frame; bodies keep what is behind
     /// the plane and get cap faces.
     pub cut: Option<(DVec3, DVec3)>,
+    /// Show the model in this position (animation state; display only).
+    pub pose: Option<PositionId>,
 }
 
 /// One solid's cut at the section plane, as triangles in plane coordinates.
@@ -121,6 +127,16 @@ pub struct Output {
     pub ctx_pickable: bool,
     /// Section view caps: (mesh, mesh frame -> view frame).
     pub caps: Vec<(Arc<Mesh>, DAffine3)>,
+    /// Section view: the whole (uncut) mesh of each body the plane cut, by body
+    /// (or occurrence) key, in its own mesh frame. The viewport draws it as a
+    /// wireframe, so the cut-away half stays visible as context.
+    pub cut_away: HashMap<BodyId, Arc<Mesh>>,
+    /// The position the bodies are shown in (`None` = as modeled).
+    pub pose: Option<PositionId>,
+    /// The position the request asked for (even when it failed).
+    pub pose_requested: Option<PositionId>,
+    /// Why the requested position could not be applied (bodies shown as modeled).
+    pub pose_error: Option<String>,
 }
 
 impl Output {
@@ -227,6 +243,7 @@ fn pkey(p: Purpose) -> PurposeKey {
         Purpose::Model => 0,
         Purpose::Preview => 1,
         Purpose::Drawing => 2,
+        Purpose::Agent => 3,
     })
 }
 
@@ -269,6 +286,7 @@ impl Worker {
             active: Vec::new(),
             explode: 0.0,
             cut: None,
+            pose: None,
         })
     }
 
@@ -461,6 +479,25 @@ fn process(
     } else {
         regen.regenerate(&r.data, &r.blobs, &r.library)
     };
+    // position (animation state): move root bodies and occurrences, display only
+    let mut result = result;
+    let mut pose_error = None;
+    let pose_id = r.pose.filter(|_| r.purpose != Purpose::Drawing);
+    if let Some(pid) = pose_id {
+        let root_active = asm_out.as_ref().map_or(true, |a| a.2 == ComponentId::ROOT);
+        let applied = r.data.pose(pid).and_then(|pose| {
+            if root_active {
+                result.bodies = pose.apply(&result.bodies)?;
+            }
+            if let Some(a) = asm_out.as_mut() {
+                a.0 = pose.apply_assembly(&a.0)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = applied {
+            pose_error = Some(e);
+        }
+    }
     let drawing = r.drawing.as_ref().map(|d| {
         // balloons and BOM tables from the document data (GUI_NEEDS #11)
         let flat;
@@ -611,12 +648,16 @@ fn process(
         });
     }
     let mut caps = Vec::new();
+    let mut cut_away = HashMap::new();
     let (mut bodies, mut picker) = (bodies, picker);
     let mut ctx = ctx;
     if let Some((o, n)) = r.cut {
         // section view (GUI_NEEDS #9): keep what is behind the plane, add the caps
         for b in &mut bodies {
             if let Some((mb, cap)) = cut_body(&b.body, o, n, r.quality) {
+                if let Some(whole) = b.mesh.clone().filter(|_| !kept_whole(&mb, b)) {
+                    cut_away.insert(b.body.id, whole);
+                }
                 *b = mb;
                 if let Some(c) = cap {
                     // a hair towards the viewer: the kept half has its own face there
@@ -631,6 +672,9 @@ fn process(
             let inv = c.xf.inverse();
             let (lo, ln) = (inv.transform_point3(o), inv.transform_vector3(n));
             if let Some((mb, cap)) = cut_body(&c.mb.body, lo, ln, r.quality) {
+                if let Some(whole) = c.mb.mesh.clone().filter(|_| !kept_whole(&mb, &c.mb)) {
+                    cut_away.insert(c.key, whole);
+                }
                 c.picker = mb.mesh.as_ref().map(|m| Arc::new(BodyPicker::new(mb.body.id, m)));
                 c.mb = mb;
                 if let Some(cm) = cap {
@@ -656,11 +700,24 @@ fn process(
         asm,
         ctx_pickable,
         caps,
+        cut_away,
+        pose: pose_id.filter(|_| pose_error.is_none()),
+        pose_requested: pose_id,
+        pose_error,
     }
 }
 
+/// The plane missed the body on its front: all of it is kept, nothing is cut away.
+pub fn kept_whole(cut: &MeshedBody, whole: &MeshedBody) -> bool {
+    cut.mesh.is_some() && cut.faces.len() == whole.faces.len() && cut.edges.len() == whole.edges.len()
+        && match (cut.body.shape().volume(), whole.body.shape().volume()) {
+            (Ok(a), Ok(b)) => (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+            _ => false,
+        }
+}
+
 /// One body cut at a plane: the kept half (meshed, with its topology) and the cap.
-fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
+pub fn cut_body(b: &Body, o: DVec3, n: DVec3, q: MeshQuality) -> Option<(MeshedBody, Option<Arc<Mesh>>)> {
     let sv = b.section_view(o, n, q).ok()?;
     let kept = match sv.kept {
         Some(k) => k,

@@ -768,7 +768,54 @@ pub fn tool_button(ui: &mut Ui, ic: Icon, label: &str, tooltip: &str, active: bo
         font,
         col,
     );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.on_hover_text(tooltip)
+}
+
+/// A toolbar tool as an icon alone (narrow windows): its name is the tooltip's
+/// first word and what screen readers and tests find.
+pub fn tool_icon(ui: &mut Ui, ic: Icon, label: &str, tooltip: &str, size: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter().rect(rect, 6.0, theme::HOVER, Stroke::new(1.0, theme::BORDER_CARD), egui::StrokeKind::Inside);
+    }
+    let col = if hovered { theme::TEXT_STRONG } else { theme::hex(0xd7dbe0) };
+    paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), ic, col);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.on_hover_text(tooltip)
+}
+
+/// The » button that opens an overflow menu.
+pub fn more_button(ui: &mut Ui, label: &str, size: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let hot = resp.hovered() || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    if hot {
+        ui.painter().rect(rect, 6.0, theme::HOVER, Stroke::new(1.0, theme::BORDER_CARD), egui::StrokeKind::Inside);
+    }
+    let col = if hot { theme::TEXT_STRONG } else { theme::TEXT_DIM };
+    let st = Stroke::new(1.6, col);
+    let c = rect.center();
+    for dx in [-3.5, 2.5] {
+        ui.painter().line(vec![pos2(c.x + dx - 2.5, c.y - 5.0), pos2(c.x + dx + 2.5, c.y), pos2(c.x + dx - 2.5, c.y + 5.0)], st);
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.on_hover_text(label)
+}
+
+/// A row of an overflow menu: icon and name.
+pub fn menu_tool(ui: &mut Ui, ic: Icon, label: &str) -> Response {
+    let h = 28.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, 4.0, theme::HOVER);
+    }
+    let col = if hovered { theme::TEXT_STRONG } else { theme::hex(0xd7dbe0) };
+    paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(18.0, 18.0)), ic, col);
+    ui.painter().text(pos2(rect.left() + 32.0, rect.center().y), egui::Align2::LEFT_CENTER, label, theme::prop(12.5), col);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp
 }
 
 /// Status dot.

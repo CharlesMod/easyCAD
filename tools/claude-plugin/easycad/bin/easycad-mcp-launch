@@ -1,0 +1,13 @@
+#!/bin/sh
+# Start easyCAD's stdio MCP shim (crates/mcp). It forwards to the running app,
+# found through the endpoint file the app writes when its Claude bridge is on.
+# Build it once with:  cargo install --path crates/mcp   (from the easyCAD repo)
+# or point EASYCAD_MCP_BIN at a built `easycad-mcp`.
+for c in "$EASYCAD_MCP_BIN" "$(command -v easycad-mcp 2>/dev/null)" \
+         "${CARGO_HOME:-$HOME/.cargo}/bin/easycad-mcp" /usr/local/bin/easycad-mcp /opt/homebrew/bin/easycad-mcp; do
+    if [ -n "$c" ] && [ -x "$c" ]; then
+        exec "$c" "$@"
+    fi
+done
+echo "easycad-mcp not found: run 'cargo install --path crates/mcp' in the easyCAD repo, or set EASYCAD_MCP_BIN" >&2
+exit 1

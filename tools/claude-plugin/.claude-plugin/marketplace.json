@@ -1,0 +1,12 @@
+{
+  "name": "easycad",
+  "owner": {"name": "easyCAD"},
+  "metadata": {"description": "Claude Code plugins shipped with easyCAD"},
+  "plugins": [
+    {
+      "name": "easycad",
+      "source": "./easycad",
+      "description": "Model parts live in the running easyCAD app: parameters, sketches, features, screenshots, export."
+    }
+  ]
+}

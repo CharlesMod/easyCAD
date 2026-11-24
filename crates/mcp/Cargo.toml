@@ -1,0 +1,17 @@
+[package]
+name = "easycad-mcp"
+description = "Model Context Protocol bridge for easyCAD: tool schemas, the loopback HTTP server the app runs, and the `easycad-mcp` stdio shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "easycad_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "easycad-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"

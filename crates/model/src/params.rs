@@ -37,7 +37,8 @@ pub enum ExprError {
 /// optional process [`Fit`] applied against the active process profile.
 ///
 /// Serializes as a plain string when there is no fit, else as
-/// `{"expr": "...", "fit": {"role": "Hole", "class": "Slide"}}`.
+/// `{"expr": "...", "fit": {"role": "Hole", "class": "Slide"}}`. A JSON number
+/// is read as that literal (`20` → `"20"`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Expr(pub String, pub Option<Fit>);
 
@@ -62,10 +63,13 @@ impl<'de> Deserialize<'de> for Expr {
         #[serde(untagged)]
         enum Repr {
             Plain(String),
+            // a bare JSON number (hand-written or generated documents)
+            Number(f64),
             WithFit { expr: String, fit: Option<Fit> },
         }
         Ok(match Repr::deserialize(d)? {
             Repr::Plain(s) => Expr(s, None),
+            Repr::Number(v) => Expr(format!("{v}"), None),
             Repr::WithFit { expr, fit } => Expr(expr, fit),
         })
     }
@@ -590,6 +594,12 @@ mod tests {
 
     fn ev(s: &str) -> f64 {
         eval(s, &Values::new()).unwrap()
+    }
+
+    #[test]
+    fn expr_reads_json_numbers() {
+        let e: Vec<Expr> = serde_json::from_str(r#"[20, 0.1, -3, "w*2"]"#).unwrap();
+        assert_eq!(e.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["20", "0.1", "-3", "w*2"]);
     }
 
     #[test]

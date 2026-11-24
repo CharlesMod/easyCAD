@@ -75,6 +75,8 @@ fn orbit_frames_reuse_uploaded_mesh() {
                 translucent: false,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
+                top: false,
+                edges_only: false,
             }],
             highlights: Vec::new(),
             sketches: vec![],
@@ -146,6 +148,8 @@ fn unchanged_frames_reuse_the_image() {
                 translucent: false,
                 colors: None,
                 model: glam::Mat4::IDENTITY,
+                top: false,
+                edges_only: false,
             }],
             highlights: Vec::new(),
             sketches: vec![],
@@ -194,7 +198,7 @@ fn bodies_outside_the_view_are_skipped() {
             background: [0.1, 0.1, 0.1, 1.0],
             mode: DisplayMode::Shaded,
             edge_color: [0.1, 0.1, 0.1, 1.0],
-            bodies: vec![DrawBody { mesh: mesh.clone(), color: [0.7, 0.7, 0.7, 1.0], translucent: false, colors: None, model }],
+            bodies: vec![DrawBody { mesh: mesh.clone(), color: [0.7, 0.7, 0.7, 1.0], translucent: false, colors: None, model, top: false, edges_only: false }],
             highlights: Vec::new(),
             sketches: vec![],
             grid: None,
@@ -206,4 +210,74 @@ fn bodies_outside_the_view_are_skipped() {
     };
     assert_eq!(draws(glam::Mat4::IDENTITY), 1);
     assert_eq!(draws(glam::Mat4::from_translation(Vec3::new(10_000.0, 0.0, 0.0))), 0);
+}
+
+/// A 100 mm square in the XY plane with its four sides as edges.
+fn square() -> Mesh {
+    let mut m = Mesh::default();
+    for p in [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]] {
+        m.positions.push([p[0], p[1], 0.0]);
+        m.normals.push([0.0, 0.0, 1.0]);
+    }
+    m.indices = vec![[0, 1, 2], [0, 2, 3]];
+    m.tri_face = vec![0, 0];
+    let c = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [100.0, 100.0, 0.0], [0.0, 100.0, 0.0], [0.0, 0.0, 0.0]];
+    for (i, w) in c.windows(2).enumerate() {
+        m.edges.push(EdgePolyline { edge: i as u32, points: w.to_vec() });
+    }
+    m
+}
+
+/// A section view's cut-away half (`edges_only`) draws as a wireframe in every
+/// display mode: its edges in the wireframe colour, its faces all but see-through.
+#[test]
+fn edges_only_bodies_draw_as_wireframe() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+        eprintln!("no wgpu adapter: skipped");
+        return;
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let mut gpu = ViewportGpu::new(&device, &adapter, COLOR_FORMAT);
+    let mesh = Arc::new(square());
+    let mut cam = Camera::default();
+    cam.fit_sphere(Vec3::new(50.0, 50.0, 0.0), 75.0, 1.0);
+    let (w, h) = (320u32, 320u32);
+    let mut shot = |mode: DisplayMode, edges_only: bool| {
+        let f = Frame3D {
+            size_px: [w, h],
+            view_proj: cam.view_proj(Vec2::new(w as f32, h as f32)),
+            eye: cam.eye(),
+            forward: cam.forward(),
+            ortho: false,
+            light: Vec3::Z,
+            background: [0.0, 0.0, 0.0, 1.0],
+            mode,
+            edge_color: [0.0, 0.0, 1.0, 1.0],
+            bodies: vec![DrawBody {
+                mesh: mesh.clone(),
+                color: [0.9, 0.2, 0.2, 1.0],
+                translucent: false,
+                colors: None,
+                model: glam::Mat4::IDENTITY,
+                top: false,
+                edges_only,
+            }],
+            sketches: vec![],
+            highlights: Vec::new(),
+            grid: None,
+        };
+        image::RgbaImage::from_raw(w, h, gpu.render_to_image(&device, &queue, &f).unwrap()).unwrap()
+    };
+    let grey = |img: &image::RgbaImage| img.pixels().filter(|p| p.0[0] > 150 && p.0[0].abs_diff(p.0[2]) < 30 && p.0[1] > 150).count();
+    let centre = |img: &image::RgbaImage| img.get_pixel(w / 2, h / 2).0;
+    for mode in [DisplayMode::Shaded, DisplayMode::ShadedEdges, DisplayMode::Wireframe] {
+        let solid = shot(mode, false);
+        let ghost = shot(mode, true);
+        assert!(centre(&ghost)[0] < 40, "{mode:?}: the cut-away half is not filled: {:?}", centre(&ghost));
+        assert!(grey(&ghost) > 200, "{mode:?}: its edges in the wireframe grey ({})", grey(&ghost));
+        if mode != DisplayMode::Wireframe {
+            assert!(centre(&solid)[0] > 100, "{mode:?}: a normal body is filled: {:?}", centre(&solid));
+        }
+    }
 }

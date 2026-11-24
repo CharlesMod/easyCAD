@@ -182,7 +182,7 @@ pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
         .and_then(|m| {
             let mut bb: Option<easycad_model::occt::BBox> = None;
             for b in m.bodies.iter().filter(|b| !b.body.reference) {
-                if let Ok(x) = b.body.shape().bbox() {
+                if let Ok(x) = b.body.bbox() {
                     bb = Some(match bb {
                         None => x,
                         Some(o) => easycad_model::occt::BBox {
@@ -281,7 +281,7 @@ pub fn default_drawing(app: &mut EasyCadApp) -> Option<DrawingId> {
                 edge: EdgeSelector::from_pick(e),
             })
         };
-        if let Ok(bb) = base.body.shape().bbox() {
+        if let Ok(bb) = base.body.bbox() {
             // bottom front edge (straight, along X) in the front view
             if let Some(a) = edge(&|e| {
                 e.kind == CurveKind::Line
@@ -411,6 +411,7 @@ pub fn sync(app: &mut EasyCadApp) {
                 active: Vec::new(),
                 explode: 0.0,
                 cut: None,
+                pose: None,
             });
         }
     }

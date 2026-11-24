@@ -43,7 +43,10 @@ booleans run in non-destructive mode.
   `chamfer_raw` make a single attempt.
 - `shell(open_faces, thickness, outward)` (with no open faces: a closed hollow solid,
   i.e. the outer skin plus an internal void shell, or an error naming the failed
-  offset) and
+  offset); `shell_report` also returns the `ShellStrategy` used (`is_fallback()`,
+  `describe()`), and `shell_blockers(open, t)` lists `ShellBlocker::{NarrowFace,
+  Crease}` (faces narrower than the wall, creases under 8°), which a failed shell
+  names in its error. See Robustness. And
   `draft(faces, pull, deg, &neutral_frame)`.
 - Transforms: `translated`, `rotated`, `mirrored`, `linear_pattern`,
   `circular_pattern`, `split(origin, normal) -> (below, above)`.
@@ -596,6 +599,99 @@ The idle app uses no CPU (0.0 s over 20 s with the sample open).
     more with the failed chains first and keeps the run that applied more edges
     (fixed 6 of 22 order-dependent edges; the rest interact either way).
 
+- **Shell ladder** (`thickSolidLadder`, shim). A drafted body with a collar joined
+  on top (the 1:18 trash cart, built through the Claude bridge) failed with "shell
+  failed (thickness larger than a fillet radius or feature?)". Root cause: the
+  collar was sketched at the lower body's top outline rounded to two decimals
+  (37.82 / r 10.87 against the drafted top's 37.788 / r 10.864), so the fuse left a
+  0.016 mm ledge ring at the joint. `BRepOffsetAPI_MakeThickSolid` by default only
+  intersects offset faces that share an edge; when a face is narrower than the wall,
+  the offsets of the faces on either side of it cross each other, the narrow face's
+  own offset is left dangling, and the offset never closes. Any step or inset
+  narrower than the wall did it (0.016–0.5 mm under a 1.2 mm wall; 1.5 mm was fine),
+  as did an overlapping collar. A second, separate failure: a near-tangent crease
+  (the 2.083° wall meeting a straight or −5° collar at exactly the same outline),
+  where the Arc join's pipe is a sliver the 1e-3 tolerance cannot trim. Shell now
+  tries, in order, and keeps the first result that passes the checks:
+
+  | step | `ShellStrategy` | fixes |
+  |---|---|---|
+  | 0 | `Default` (Arc joins, adjacent intersections, 1e-3) | everything that worked before |
+  | 1 | `CompleteIntersection` (every pair of offset faces intersected) | steps and insets narrower than the wall |
+  | 2 | `LooseTolerance` (+ 0.01 mm) | near-tangent creases (2° bend) |
+  | 3 | `Healed` (ShapeFix + UnifySameDomain first, then 2) | split / badly joined faces |
+  | 4 | `SharpJoins` (Intersection joins, 0.01 mm) | creases every Arc mode throws on (2.9°) |
+  | 5 | `HealedSharp` | both |
+  | 6 | `OffsetAndCut` (inward, flat open faces): body − inner 3D offset − a punch under each open face | MakeThickSolid giving the body back unchanged |
+
+  Every candidate must be valid, keep the input's solid count, have a wall volume
+  within 0.5–1.6 × (area − open area) × t, and be really open: a point half a wall
+  under each open face must be outside it. The checks exposed an old silent failure:
+  a side face opened under a top fillet tangent to it came back as the unchanged
+  body in every MakeThickSolid mode, and was reported `Ok` (the test
+  `selector_threshold_reports_unresolved_after_drastic_edit` passed on it). Step 6
+  hollows it now. The punch is the open face's prism, t deep, clipped to the cavity
+  moved t toward the face, so the side walls keep their full height. A healed retry once came back with the
+  volume about right but the collar left solid, which the last check rejects. The
+  closed shell's open-and-close fallback uses the same ladder (`OpenAndClose(k)`),
+  and `offset_solid` retries with complete intersection, then 0.01 mm.
+  Fallbacks cost 20–120 ms on the cart (the default path is unchanged, ~12 ms). The
+  model puts the strategy in `FeatureReport::note` ("shell: complete-intersection
+  offset (the default offset failed)"), which is not a warning because the result
+  is right. When every step fails, the error lists up to four likely blockers by
+  feature and role, with a `FaceSelector::Hint` for each, and says what to change
+  (`"Collar · start face" {"Hint":…} is only 0.300 mm wide (the wall is 2 mm) …
+  make the outlines match exactly, step out by more than the wall, or use a thinner
+  wall`). Tests: `crates/occt/tests/shell_draft.rs` (the repro, 21 collar variants:
+  exact / ledge 0.1, 0.5, 1.5 / inset 0.016, 0.5 / overlap × collar draft −20.1, −5,
+  0; a boss flush with a drafted wall; a side pocket; collar + pocket; the error),
+  and `crates/model/tests/shell_robust.rs` (the cart's feature tree, the note, the
+  named blockers).
+- **Shell: time budget, largest workable thickness, parameter advice.** A shell's
+  thickness should be a parameter (`wall`, `lid_wall`; any `Expr` works), so
+  changing it (for example from the printer's wall calculator) re-shells everything
+  in one edit. To keep that hands-off:
+  - The slow fallbacks run under a deadline (OCCT's progress `UserBreak`): the
+    healed and sharp-join tries share 12 s, at most 6 s each. Sharp joins used to
+    grind 8–16 s each before failing on a wall too thick for the body; a failing
+    20 mm wall in the cart went from 80 s to about 15 s. The default, complete
+    intersection and loose-tolerance tries run uncapped, so any shell they build
+    (the cart, the lid, every case in the tests) regenerates the same way however busy
+    the machine is. Wall-clock caps on them made the cart test flaky under load
+    (`cargo test --workspace` beside a regenerating easyCAD window). A poll-count
+    budget would be deterministic, but OCCT polls only between stages (~1000 polls for
+    a 7 ms try and a 4 s try alike). A shell that only the healed or sharp-join tries
+    can build may still differ under heavy load.
+  - On failure `Shape::shell_max_thickness` bisects (6 steps, the uncapped fast half
+    of the ladder, no clock) for the largest thickness that works, rounds it down to
+    0.01 mm and shells at that value to confirm it. **OCCT's offset is not
+    deterministic just below its limit**: on the cart (20 mm requested), the very same
+    call at 9.7–10.3 mm succeeds about one time in four, single-threaded too (it
+    depends on where the private copy's shapes land in memory), while 9.5 mm and
+    below never failed in 24 tries. A single lucky success used to become the
+    reported value, and the re-shell at it then failed: the flaky
+    `impossible_shell_reports_largest_thickness_and_parameter` on a busy machine. Now
+    a thickness counts as workable only when three fresh copies all shell, so the
+    answer lands in the stable range (9.37 mm on every run under full CPU load, and
+    `largest_workable_thickness_is_stable` re-shells at it eight times). The same
+    nondeterminism means a document whose wall sits right at OCCT's limit can
+    regenerate differently from run to run (see Known limitations). The error says
+    "largest workable thickness: 9.37 mm", and the model adds "(set `wall` to at most
+    9.37 mm, or remove the blockers below)" when the thickness is a plain parameter,
+    the same way a fillet reports its largest workable size. The test follows the
+    advice and re-shells.
+  - The cart's lid (a rounded-rect extrude ∩ a YZ profile ∩ an XZ profile, open at the
+    bottom) failed at 0.8 mm; it shells now with complete intersection (~1 s, the note
+    says so), and at 0.4, 1.0, 1.2 and 1.6 mm too. With the lid lengthened 1.3 in at
+    the front (the side profile then trims its rounded front corners), the default
+    offset at 0.6 mm returned the body unshelled (10 300 mm³) and the old code
+    reported it `Ok`; the checks reject that, and complete intersection gives the
+    1 630 mm³ shell.
+  - Not done: per-face thickness reduction (thinner only where a feature blocks it),
+    and an exact inner solid for bodies built as an intersection of extruded profiles
+    (each profile inset by t, intersected). The offset-and-cut step uses OCCT's 3D
+    offset of the whole body instead, which covers the lid.
+
 ## Concurrency contract
 
 Everything in `occt` and `easycad-model` may run on any number of threads at once.
@@ -894,8 +990,17 @@ verified on load.
   normal/tangent, and of the same surface/curve type. Otherwise the feature reports
   `FeatureStatus::Unresolved`.
 - OCCT's limits apply. Shell fails when an inward thickness exceeds a concave
-  fillet radius, and draft on faces adjacent to fillets can fail. Both return
-  `FeatureStatus::Error`; nothing panics.
+  fillet radius, or when a feature is thinner than the wall in the offset direction
+  (a 1 mm collar under a 2 mm wall). Steps and creases that used to fail are handled
+  by the shell ladder (Robustness), and a shell that still fails names its likely
+  blockers. Draft on faces adjacent to fillets can fail. All return
+  `FeatureStatus::Error`; nothing panics. OCCT's offset is nondeterministic just
+  below its limit (a band of a few tenths of a mm where the same shell succeeds only
+  sometimes), so a wall right at the limit can flip between built and failed across
+  regenerations; the reported largest workable thickness is chosen outside that band.
+  The offset-and-cut fallback needs flat
+  open faces and an inner 3D offset that works (it fails on the same narrow steps
+  as the thick solid, so it only helps where MakeThickSolid misbehaves).
 - Ribs use `extent: RibExtent::{Height, ToBody}`. `ToBody` grows the rib along its
   direction and trims it where it first meets the body; with draft it is rebuilt to
   that height. A rib that never meets the body, or starts inside it, is an error.
@@ -956,6 +1061,26 @@ verified on load.
   rolling ball (three edges) or a filling patch (more); there is no setback option.
 
 ## Changelog for GUI
+
+- **Claude bridge (MCP).** See `docs/MCP.md`. Model additions:
+  - `Expr` also deserializes from a JSON number (`20` → `"20"`), so hand-written and
+    generated feature JSON can use plain numbers. It still serializes as a string.
+  - `Document::undo_labels()` (most recent first) and `Document::discard_last()`
+    (undo and drop the redo step, for an edit that turned out wrong).
+
+- **Shell robustness (trash cart).**
+  - New `FeatureReport.note: Option<String>` (serde-defaulted): how a feature was
+    built when a fallback was needed, e.g. "shell: complete-intersection offset (the
+    default offset failed)". Status stays `Ok`. The GUI can show it as an info line
+    and the Claude bridge returns it with the report. `FeatureReport { .. }` literals
+    need `note: None` (only `regen.rs` builds them).
+  - A failed Shell's `FeatureStatus::Error` now lists likely blockers, each with
+    its face label and a `FaceSelector::Hint` in JSON, plus what to change.
+  - occt: `Shape::shell_report`, `Shape::shell_blockers`, `Shape::shell_max_thickness`,
+    `ShellStrategy`, `ShellBlocker`. `Shape::shell` keeps its signature.
+  - A failed shell's message includes "largest workable thickness: X mm", plus "set
+    `param` to at most X mm" when its thickness is a plain parameter. A GUI can parse
+    it to offer "Use X mm"; it takes up to ~10 s to compute, on the error path only.
 
 - **Kernel batch (todo-kernel).**
   - `FeatureKind::InsertPart` gained `threads: Threads` (serde-defaulted to

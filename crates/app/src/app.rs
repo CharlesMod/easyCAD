@@ -160,6 +160,10 @@ pub struct EasyCadApp {
     pub active: easycad_model::assembly::OccPath,
     /// Assemblies: explode slider 0..1 (display only).
     pub explode: f32,
+    /// The position (animation state) the user shows the model in (`None` = as
+    /// modeled). Display only.
+    pub pose: Option<easycad_model::positions::PositionId>,
+    pub positions: crate::ui_positions::PositionsUi,
     pub asm: crate::ui_assembly::AsmUi,
     /// Explode slider rect (E2E state dump).
     pub asm_explode_rect: Option<egui::Rect>,
@@ -173,6 +177,10 @@ pub struct EasyCadApp {
     pub cloud: crate::cloud::Cloud,
     /// The performance overlay (F12, `EASYCAD_PROFILE=1`).
     pub show_perf: bool,
+    /// The Claude bridge (MCP server), when on.
+    pub mcp: Option<crate::mcp::Bridge>,
+    /// The GPU device (Claude's screenshots render offscreen on it).
+    pub wgpu: Option<eframe::egui_wgpu::RenderState>,
     pub bench_start: Option<f64>,
     /// Live reload into a newly installed build (reload.rs).
     pub reload: crate::reload::State,
@@ -207,6 +215,7 @@ impl EasyCadApp {
         let worker = Worker::spawn(move || ctx.request_repaint());
         let doc = doc.unwrap_or_else(|| Document::new("Untitled"));
         let mut app = Self::with_parts(doc, worker, gpu);
+        app.wgpu = cc.wgpu_render_state.clone();
         app.recovery_offer = crate::recovery::orphans();
         app
     }
@@ -279,6 +288,8 @@ impl EasyCadApp {
             recovery_offer: Vec::new(),
             active: Vec::new(),
             explode: 0.0,
+            pose: None,
+            positions: Default::default(),
             asm: Default::default(),
             asm_explode_rect: None,
             section: None,
@@ -286,6 +297,8 @@ impl EasyCadApp {
             overhang: Default::default(),
             cloud: crate::cloud::Cloud::disabled(),
             show_perf: std::env::var_os("EASYCAD_PROFILE").is_some(),
+            mcp: None,
+            wgpu: None,
             bench_start: None,
             reload: Default::default(),
         }
@@ -406,7 +419,9 @@ impl EasyCadApp {
             active: self.active.clone(),
             explode: self.explode,
             cut: self.section_cut(),
+            pose: self.shown_pose(),
         });
+        self.positions.sent = self.shown_pose();
         self.model_dirty = false;
     }
 
@@ -459,6 +474,7 @@ impl EasyCadApp {
                     active: self.active.clone(),
                     explode: self.explode,
                     cut: self.section_cut(),
+                    pose: None,
                 });
             }
             None => {
@@ -628,6 +644,11 @@ impl EasyCadApp {
                     if out.drawing.is_some() {
                         d.result = out.drawing.clone();
                     }
+                }
+            }
+            Purpose::Agent => {
+                if let Some(b) = self.mcp.as_mut() {
+                    b.model = Some(Arc::new(out));
                 }
             }
             Purpose::Preview => {
@@ -1189,7 +1210,11 @@ impl EasyCadApp {
     }
 
     pub fn import_file(&mut self) {
-        let req = crate::files::Request::open("Import STEP or DXF", "STEP / DXF", &["step", "stp", "dxf"]);
+        let req = crate::files::Request::open(
+            "Import STEP, DXF or mesh",
+            "STEP / DXF / STL / OBJ / GLB",
+            &["step", "stp", "dxf", "stl", "obj", "glb", "gltf"],
+        );
         self.ask_path(req, |app, p| match app.import_path(&p) {
             Ok(msg) => app.toast(msg),
             Err(e) => app.warn(e),
@@ -1208,6 +1233,20 @@ impl EasyCadApp {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let bytes = std::fs::read(p).map_err(|e| format!("Import failed: {e}"))?;
+        if easycad_model::meshbody::MESH_EXTENSIONS.contains(&ext.as_str()) {
+            // glTF is Y-up by convention: stand it up the way its source app shows it
+            let up = if ext == "glb" || ext == "gltf" {
+                easycad_model::feature::MeshUp::Y
+            } else {
+                easycad_model::feature::MeshUp::Z
+            };
+            self.doc
+                .import_mesh(&name, bytes, up)
+                .map_err(|e| format!("Import failed: {e}"))?;
+            self.fit_pending = true;
+            self.request_model();
+            return Ok(format!("Imported {name} as a mesh body (edit it in the timeline to scale or place it)"));
+        }
         if ext == "dxf" {
             let imp = self.doc.import_dxf(&name, bytes);
             let d = self.doc.dxf(imp).map_err(|e| format!("DXF: {e}"))?;
@@ -1252,6 +1291,7 @@ impl EasyCadApp {
         self.bench_pan(ui.ctx());
         crate::viewport::gpu::set_hidden(!crate::widgets::window_visible(ui.ctx()));
         self.poll_worker();
+        crate::mcp::poll(self, &ui.ctx().clone());
         for n in self.cloud.poll(self.path.as_deref()) {
             match n {
                 crate::cloud::Notice::Info(t) => self.toast(t),
@@ -1263,6 +1303,7 @@ impl EasyCadApp {
         }
         self.shortcuts(ui.ctx());
         self.reload_tick(ui.ctx());
+        self.positions_tick(&ui.ctx().clone());
         if self.model_dirty {
             self.submit_model();
         }
@@ -1585,6 +1626,9 @@ impl EasyCadApp {
 
     /// Clean exit: unsaved work keeps a last recovery copy, saved work leaves none.
     pub fn on_close(&mut self) {
+        if let Some(b) = self.mcp.as_mut() {
+            b.stop();
+        }
         self.autosave.flush();
         let dirty = self.is_dirty() || (self.path.is_none() && !crate::ui_welcome::is_empty(self));
         if dirty && self.settings.autosave_min > 0 {
@@ -1696,6 +1740,7 @@ impl eframe::App for EasyCadApp {
             debug_repaint(ui.ctx());
         }
         self.frame(ui);
+        self.remember_window(ui.ctx());
         crate::profiler::app_ms(self.frame_ms, frame.info().cpu_usage.map(|s| s * 1000.0));
         if self.show_perf {
             let area = if self.viewport_rect.is_positive() { self.viewport_rect } else { ui.ctx().content_rect() };
@@ -1708,6 +1753,30 @@ impl eframe::App for EasyCadApp {
 
     fn on_exit(&mut self) {
         self.on_close();
+    }
+}
+
+impl EasyCadApp {
+    /// Save the window's position and size once it settles (not mid-drag), so the next launch
+    /// reopens it there. Saved on change rather than at exit, which a killed process skips.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner, dragging, fullscreen, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, i.pointer.any_down(), v.fullscreen.unwrap_or(false), v.minimized.unwrap_or(false))
+        });
+        let (Some(outer), Some(inner)) = (outer, inner) else { return };
+        if dragging || fullscreen || minimized {
+            return;
+        }
+        let r = [outer.min.x, outer.min.y, inner.width(), inner.height()];
+        let changed = match self.settings.window {
+            Some(old) => old.iter().zip(r).any(|(a, b)| (a - b).abs() > 1.0),
+            None => true,
+        };
+        if changed {
+            self.settings.window = Some(r);
+            self.settings.save();
+        }
     }
 }
 

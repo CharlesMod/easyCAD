@@ -15,10 +15,11 @@ use crate::document::{BlobStore, DocData};
 use crate::dxf::DxfDrawing;
 use crate::feature::*;
 use crate::geom::{Plane, Profile, Segment2};
+use crate::meshbody::{self, MeshSolid};
 use crate::library::{local_mate, place, HoleChoice, Library, PartInfo, PartInstance};
 use crate::params::{Expr, Values};
 use crate::process::{Fit, FitClass, ProcessProfile, TeardropStyle};
-use crate::select::{resolve_edges, resolve_faces, SelectError, Selector};
+use crate::select::{resolve_edges, resolve_faces, FaceSelector, SelectError, Selector};
 use crate::sketch::{segment_point, Sketch, SolveReport};
 
 /// Geometry of a body plus its lazily computed display mesh.
@@ -27,6 +28,9 @@ pub struct BodyGeom {
     meshes: [OnceLock<Result<Arc<Mesh>, String>>; 3],
     /// Names/colours of sub-parts (imported STEP assemblies).
     pub appearance: Option<Appearance>,
+    /// Mesh bodies: the closed triangle mesh that *is* the body (`shape` is then an
+    /// empty compound). See [`crate::meshbody`].
+    pub solid_mesh: Option<Arc<MeshSolid>>,
 }
 
 /// A named, optionally coloured sub-part of a body (e.g. one component of a PCB).
@@ -52,10 +56,34 @@ pub const DEFAULT_COLOR: [f32; 3] = [0.72, 0.74, 0.78];
 
 impl BodyGeom {
     pub fn new(shape: Shape) -> Arc<Self> {
-        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: None })
+        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: None, solid_mesh: None })
+    }
+    /// A mesh body's geometry.
+    pub fn from_mesh(m: MeshSolid) -> Arc<Self> {
+        let shape = Shape::compound(&[]).expect("empty compound");
+        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: None, solid_mesh: Some(Arc::new(m)) })
     }
     pub fn with_appearance(shape: Shape, appearance: Appearance) -> Arc<Self> {
-        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: Some(appearance) })
+        Arc::new(BodyGeom { shape, meshes: Default::default(), appearance: Some(appearance), solid_mesh: None })
+    }
+}
+
+/// A mesh moved rigidly (positions, normals, edge polylines).
+fn move_mesh(m: &Mesh, xf: &glam::DAffine3) -> Mesh {
+    let p = |v: &[f32; 3]| {
+        let q = xf.transform_point3(DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64));
+        [q.x as f32, q.y as f32, q.z as f32]
+    };
+    let n = |v: &[f32; 3]| {
+        let q = xf.matrix3 * DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
+        [q.x as f32, q.y as f32, q.z as f32]
+    };
+    Mesh {
+        positions: m.positions.iter().map(p).collect(),
+        normals: m.normals.iter().map(n).collect(),
+        indices: m.indices.clone(),
+        tri_face: m.tri_face.clone(),
+        edges: m.edges.iter().map(|e| occt::EdgePolyline { edge: e.edge, points: e.points.iter().map(p).collect() }).collect(),
     }
 }
 
@@ -110,8 +138,60 @@ pub const MESH_LIN_DEFL: f64 = 0.05;
 pub const MESH_ANG_DEFL_DEG: f64 = 12.0;
 
 impl Body {
+    /// The kernel shape. Empty for mesh bodies (see [`Body::mesh_solid`]).
     pub fn shape(&self) -> &Shape {
         &self.geom.shape
+    }
+    /// The triangle mesh of a mesh body.
+    pub fn mesh_solid(&self) -> Option<&MeshSolid> {
+        self.geom.solid_mesh.as_deref()
+    }
+    pub fn is_mesh(&self) -> bool {
+        self.geom.solid_mesh.is_some()
+    }
+    /// Bounding box of a solid or mesh body.
+    pub fn bbox(&self) -> Result<occt::BBox, String> {
+        match self.mesh_solid() {
+            Some(m) => Ok(m.bbox()),
+            None => self.shape().bbox().map_err(|e| e.0),
+        }
+    }
+    /// Volume (mm³) of a solid or mesh body.
+    pub fn volume(&self) -> Result<f64, String> {
+        match self.mesh_solid() {
+            Some(m) => Ok(m.volume()),
+            None => self.shape().volume().map_err(|e| e.0),
+        }
+    }
+    /// This body moved rigidly: rotated by `angle_deg` about `axis` through the
+    /// origin, then translated by `v`.
+    pub fn moved(&self, axis: DVec3, angle_deg: f64, v: DVec3) -> Result<Body, String> {
+        let geom = match self.mesh_solid() {
+            Some(m) => {
+                let r = if angle_deg.abs() > 1e-12 { glam::DMat3::from_axis_angle(axis.normalize(), angle_deg.to_radians()) } else { glam::DMat3::IDENTITY };
+                BodyGeom::from_mesh(m.transformed(&glam::DAffine3 { matrix3: r, translation: v }))
+            }
+            None => {
+                let mut s = self.shape().clone();
+                if angle_deg.abs() > 1e-12 {
+                    s = s.rotated(DVec3::ZERO, axis, angle_deg).map_err(|e| e.0)?;
+                }
+                if v != DVec3::ZERO {
+                    s = s.translated(v).map_err(|e| e.0)?;
+                }
+                // the moved shape tessellates the same: move the meshes already made
+                let r = if angle_deg.abs() > 1e-12 { glam::DMat3::from_axis_angle(axis.normalize(), angle_deg.to_radians()) } else { glam::DMat3::IDENTITY };
+                let xf = glam::DAffine3 { matrix3: r, translation: v };
+                let g = BodyGeom { shape: s, meshes: Default::default(), appearance: self.geom.appearance.clone(), solid_mesh: None };
+                for (k, slot) in self.geom.meshes.iter().enumerate() {
+                    if let Some(Ok(m)) = slot.get() {
+                        let _ = g.meshes[k].set(Ok(Arc::new(move_mesh(m, &xf))));
+                    }
+                }
+                Arc::new(g)
+            }
+        };
+        Ok(Body { geom, ..self.clone() })
     }
     /// Display mesh (computed once per shape, shared by every cached state).
     pub fn mesh(&self) -> Result<Arc<Mesh>, String> {
@@ -150,6 +230,10 @@ impl Body {
     /// Mesh at a quality level (computed once per shape and level, shared by every
     /// cached state that holds this geometry).
     pub fn mesh_quality(&self, q: MeshQuality) -> Result<Arc<Mesh>, String> {
+        if let Some(m) = &self.geom.solid_mesh {
+            // one display mesh for every quality: the triangles are the body
+            return self.geom.meshes[0].get_or_init(|| Ok(Arc::new(m.display_mesh()))).clone();
+        }
         let (l, a) = q.deflection();
         self.geom.meshes[q.slot()].get_or_init(|| self.geom.shape.tessellate(l, a).map(Arc::new).map_err(|e| e.0)).clone()
     }
@@ -179,6 +263,15 @@ impl Body {
         let n = normal.normalize_or_zero();
         if n == DVec3::ZERO {
             return Err("section: the plane normal is zero".into());
+        }
+        if let Some(m) = self.mesh_solid() {
+            let (below, above) = m.split(origin, n).map_err(|e| e.to_string())?;
+            let kept = match (below, above) {
+                (Some(b), _) => Some(Body { geom: BodyGeom::from_mesh(b), ..self.clone() }),
+                (None, None) => Some(self.clone()),
+                (None, Some(_)) => None,
+            };
+            return Ok(SectionView { kept, cap: None, cap_mesh: None, outline: Vec::new() });
         }
         let shape = self.shape();
         let (below, above) = shape.split(origin, n).map_err(|e| e.0)?;
@@ -286,6 +379,11 @@ pub struct FeatureReport {
     /// back so the stored sketch, the editor and regen agree.
     #[serde(skip)]
     pub relinked: Vec<(SketchId, Sketch)>,
+    /// How the feature was built, when a fallback was needed (e.g. "shell:
+    /// complete-intersection offset (the default offset failed)"). Not a warning:
+    /// the result is right.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Where a fillet/chamfer request edge came from.
@@ -311,6 +409,7 @@ impl FeatureReport {
             skipped_edges: Vec::new(),
             rolled_back: false,
             relinked: Vec::new(),
+            note: None,
         }
     }
 }
@@ -390,6 +489,8 @@ pub struct Regenerator {
     parts: HashMap<String, Arc<PartInstance>>,
     stages: HashMap<u64, (Vec<Body>, ProcessReport, crate::provenance::FaceOrigins)>,
     xcaf: HashMap<String, Arc<occt::StyledStep>>,
+    /// Imported meshes (read and repaired) by blob hash.
+    mesh_imports: HashMap<String, Arc<(MeshSolid, meshbody::RepairReport)>>,
     /// In-context bodies per source occurrence path, already in this component's
     /// frame (set by the assembly regeneration before `regenerate`).
     pub(crate) context: HashMap<Vec<crate::assembly::OccurrenceId>, Arc<Vec<ContextBody>>>,
@@ -418,6 +519,7 @@ impl Default for Regenerator {
             parts: HashMap::new(),
             stages: HashMap::new(),
             xcaf: HashMap::new(),
+            mesh_imports: HashMap::new(),
             context: HashMap::new(),
             context_keys: HashMap::new(),
             context_errors: HashMap::new(),
@@ -446,7 +548,7 @@ macro_rules! fail_from {
         }
     )*};
 }
-fail_from!(occt::Error, crate::sketch::SketchError, crate::library::LibraryError, crate::dxf::DxfError, crate::params::ExprError);
+fail_from!(occt::Error, crate::meshbody::MeshError, crate::sketch::SketchError, crate::library::LibraryError, crate::dxf::DxfError, crate::params::ExprError);
 
 impl From<crate::datum::DatumError> for Fail {
     fn from(e: crate::datum::DatumError) -> Self {
@@ -514,7 +616,7 @@ fn fingerprint(f: &Feature, doc: &DocData, vals: &Values) -> u64 {
         deps.push(serde_json::to_value(&s).unwrap_or_default());
     }
     let import = match &f.kind {
-        FeatureKind::ImportStep { import, .. } => Some(*import),
+        FeatureKind::ImportStep { import, .. } | FeatureKind::ImportMesh { import, .. } => Some(*import),
         FeatureKind::StandoffsFromPcb { source: PcbSource::Dxf { import, .. } | PcbSource::Step { import, .. }, .. } => {
             Some(*import)
         }
@@ -605,6 +707,7 @@ impl Regenerator {
                     sketch_report: None,
                     warning: None,
                     relinked: Vec::new(),
+                    note: None,
                     joint: None,
                     xf: Vec::new(),
                     target_default: None,
@@ -618,7 +721,8 @@ impl Regenerator {
                     t_prov += tp.elapsed().as_secs_f64() * 1000.0;
                     s
                 });
-                let (dressup, sketch, warning, joint) = (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take());
+                let (dressup, sketch, warning, joint, note) =
+                    (ctx.report.take(), ctx.sketch_report.take(), ctx.warning.take(), ctx.joint.take(), ctx.note.take());
                 let (edge_requests, skipped_edges) = (std::mem::take(&mut ctx.edge_requests), std::mem::take(&mut ctx.skipped_edges));
                 let relinked = std::mem::take(&mut ctx.relinked);
                 match res {
@@ -631,6 +735,7 @@ impl Regenerator {
                             edge_requests,
                             skipped_edges,
                             relinked,
+                            note,
                             ..FeatureReport::new(f.id, warning.map(FeatureStatus::Warning).unwrap_or(FeatureStatus::Ok))
                         },
                     ),
@@ -709,6 +814,8 @@ struct Ctx<'a> {
     sketch_report: Option<SolveReport>,
     warning: Option<String>,
     relinked: Vec<(SketchId, Sketch)>,
+    /// How the feature was built when that is worth knowing (a fallback strategy).
+    note: Option<String>,
     joint: Option<crate::joint::JointReport>,
     /// Pattern transform stack (applied innermost first).
     xf: Vec<Xf>,
@@ -792,6 +899,42 @@ fn tidy(s: Shape) -> Shape {
 }
 
 impl Ctx<'_> {
+    /// A failed shell's message, its blockers named by feature and role ("Lower
+    /// body · end face") with a selector for each face.
+    /// `thickness` is the feature's expression: when it is a plain parameter
+    /// (`wall`), the message says which parameter to lower.
+    #[allow(clippy::too_many_arguments)]
+    fn shell_error(&self, st: &ModelState, body: usize, shape: &Shape, open: &[u32], t: f64, thickness: &Expr, e: occt::Error) -> String {
+        let blockers = shape.shell_blockers(open, t).unwrap_or_default();
+        let msg = e.to_string();
+        // the kernel's own list names bare indices; replace it
+        let mut head = msg.split("; likely blockers:").next().unwrap_or(&msg).trim_start_matches("kernel: ").to_string();
+        let name = thickness.0.trim();
+        let is_param = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && name.parse::<f64>().is_err();
+        if let (true, Some(max)) = (is_param, head.split("largest workable thickness: ").nth(1).and_then(|r| r.split(" mm").next())) {
+            head += &format!(" (set `{name}` to at most {max} mm, or remove the blockers below)");
+        }
+        if blockers.is_empty() {
+            return format!("{head} (no narrow face or shallow crease found; try a thinner wall)");
+        }
+        let infos = shape.faces().unwrap_or_default();
+        let origins = crate::provenance::FaceOrigins(st.faces.clone());
+        let id = st.bodies[body].id;
+        let name = |i: u32| {
+            let info = infos.get(i as usize);
+            let label = origins.face(id, i).map(|o| o.label(self.doc, info)).unwrap_or_else(|| format!("face {i}"));
+            match info {
+                Some(f) => {
+                    let r = |v: DVec3| DVec3::new((v.x * 1e3).round() / 1e3, (v.y * 1e3).round() / 1e3, (v.z * 1e3).round() / 1e3);
+                    let sel = FaceSelector::Hint { centroid: r(f.centroid), normal: r(f.normal), kind: Some(f.kind.into()) };
+                    format!("\"{label}\" {}", serde_json::to_string(&sel).unwrap_or_default())
+                }
+                None => format!("\"{label}\""),
+            }
+        };
+        format!("{head}{}", occt::ShellBlocker::summarize(&blockers, t.abs(), name))
+    }
+
     fn ev(&self, e: &Expr) -> R<f64> {
         e.eval(self.vals).map_err(|err| Fail::msg(format!("`{}`: {err}", e.0)))
     }
@@ -821,7 +964,8 @@ impl Ctx<'_> {
             Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail::msg(format!("body {id:?} does not exist"))),
             None => match self.target_default {
                 Some(id) => st.bodies.iter().position(|b| b.id == id).ok_or_else(|| Fail::msg(format!("body {id:?} does not exist"))),
-                None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail::msg("there is no solid body yet")),
+                // mesh bodies are only used when named
+                None => st.bodies.iter().rposition(|b| !b.reference && !b.is_mesh()).ok_or_else(|| Fail::msg("there is no solid body yet")),
             },
         }
     }
@@ -919,6 +1063,15 @@ impl Ctx<'_> {
             }
             _ => {
                 let i = self.target(st, target)?;
+                if let Some(m) = st.bodies[i].mesh_solid() {
+                    // a sketch feature cutting / joining a mesh body: tessellate the tool
+                    let t = MeshSolid::from_shape(&tool)?;
+                    let r = meshbody::boolean(m, &[t], op)?;
+                    st.bodies[i].geom = BodyGeom::from_mesh(r);
+                    let id = st.bodies[i].id;
+                    st.tools.entry(fid).or_default().push(ToolOp { target: id, op });
+                    return Ok(());
+                }
                 let cur = st.bodies[i].shape();
                 let r = match op {
                     BoolOp::Join => tidy(cur.fuse(&tool)?),
@@ -957,7 +1110,88 @@ impl Ctx<'_> {
             }
             _ => kind,
         };
+        let brep_body = match kind {
+            FeatureKind::Fillet { body, .. }
+            | FeatureKind::Chamfer { body, .. }
+            | FeatureKind::Shell { body, .. }
+            | FeatureKind::Draft { body, .. }
+            | FeatureKind::Rib { body, .. }
+            | FeatureKind::ScrewBoss { body, .. }
+            | FeatureKind::StandoffsFromPcb { body, .. }
+            | FeatureKind::PartingJoint { body, .. } => Some(*body),
+            FeatureKind::Pattern { source: PatternSource::Body(b), .. } | FeatureKind::Mirror { source: PatternSource::Body(b), .. } => Some(Some(*b)),
+            _ => None,
+        };
+        if let Some(body) = brep_body {
+            if let Ok(i) = self.target(st, body) {
+                if st.bodies[i].is_mesh() {
+                    return fail(format!(
+                        "{} works on solid bodies; `{}` is a mesh body (use Combine, Split or Move/Copy body on it)",
+                        kind.label(),
+                        st.bodies[i].name
+                    ));
+                }
+            }
+        }
         match kind {
+            FeatureKind::ImportMesh { import, scale, up, rotate_deg, translate, reference } => {
+                let imp = self.doc.import(*import).ok_or_else(|| Fail::msg(format!("import {import:?} missing")))?.clone();
+                let src = self.mesh_import(&imp.blob, &imp.name)?;
+                let s = self.ev(scale)?;
+                if s <= 0.0 {
+                    return fail("scale must be positive");
+                }
+                let up = match up {
+                    MeshUp::Z => glam::DMat3::IDENTITY,
+                    MeshUp::Y => glam::DMat3::from_rotation_x(std::f64::consts::FRAC_PI_2),
+                };
+                let lin = meshbody::euler_deg(*rotate_deg) * glam::DMat3::from_diagonal(DVec3::splat(s)) * up;
+                let aff = glam::DAffine3 { matrix3: lin, translation: self.ev3(translate)? };
+                if let Some(w) = src.1.summary() {
+                    self.warning = Some(w);
+                }
+                st.bodies.push(Body { id: BodyId::of(fid), name: name.to_string(), reference: *reference, part: None, geom: BodyGeom::from_mesh(src.0.transformed(&aff)) });
+            }
+            FeatureKind::TransformBody { body, translate, rotate_deg, pivot, scale, copy, new_name } => {
+                let i = self.target(st, Some(*body))?;
+                let t = self.ev3(translate)?;
+                let s = self.ev(scale)?;
+                if s <= 0.0 {
+                    return fail("scale must be positive");
+                }
+                let b = st.bodies[i].clone();
+                let geom = match b.mesh_solid() {
+                    Some(m) => {
+                        let lin = meshbody::euler_deg(*rotate_deg) * glam::DMat3::from_diagonal(DVec3::splat(s));
+                        let aff = glam::DAffine3::from_translation(t + *pivot) * glam::DAffine3::from_mat3(lin) * glam::DAffine3::from_translation(-*pivot);
+                        BodyGeom::from_mesh(m.transformed(&aff))
+                    }
+                    None => {
+                        if (s - 1.0).abs() > 1e-12 {
+                            return fail("scale works on mesh bodies only");
+                        }
+                        let mut sh = b.shape().clone();
+                        for (axis, a) in [(DVec3::X, rotate_deg.x), (DVec3::Y, rotate_deg.y), (DVec3::Z, rotate_deg.z)] {
+                            if a.abs() > 1e-12 {
+                                sh = sh.rotated(*pivot, axis, a)?;
+                            }
+                        }
+                        if t != DVec3::ZERO {
+                            sh = sh.translated(t)?;
+                        }
+                        BodyGeom::new(sh)
+                    }
+                };
+                if *copy {
+                    let name = if new_name.trim().is_empty() { format!("{} copy", b.name) } else { new_name.clone() };
+                    st.bodies.push(Body { id: BodyId::of(fid), name, reference: b.reference, part: None, geom });
+                } else {
+                    st.bodies[i].geom = geom;
+                }
+            }
+            FeatureKind::MeshBoolean { target, tools, op, clearance, positions, keep_tools } => {
+                self.mesh_boolean(st, fid, *target, tools, *op, clearance, positions, *keep_tools)?;
+            }
             FeatureKind::Extrude { sketch, profiles, distance, symmetric, reverse, draft_deg, op, target } => {
                 let (plane, prs) = self.profiles(*sketch, profiles, st)?;
                 let d = self.ev(distance)?;
@@ -1064,7 +1298,15 @@ impl Ctx<'_> {
                 let t = self.ev(thickness)?;
                 let shape = st.bodies[i].shape().clone();
                 let faces = resolve_faces(&shape, open_faces)?;
-                st.bodies[i].geom = BodyGeom::new(shape.shell(&faces, t, *outward)?);
+                match shape.shell_report(&faces, t, *outward) {
+                    Ok((out, how)) => {
+                        if how.is_fallback() {
+                            self.note = Some(format!("shell: {}", how.describe()));
+                        }
+                        st.bodies[i].geom = BodyGeom::new(out);
+                    }
+                    Err(e) => return fail(self.shell_error(st, i, &shape, &faces, t, thickness, e)),
+                }
             }
             FeatureKind::DeleteFace { body, faces } => {
                 let i = self.target(st, *body)?;
@@ -1227,15 +1469,28 @@ impl Ctx<'_> {
             FeatureKind::Mirror { source, plane } => {
                 self.replicate(st, fid, name, source, &[Xf::Mirror(plane.origin, plane.normal)])?;
             }
-            FeatureKind::Split { body, plane, new_name, offset } => {
+            FeatureKind::Split { body, plane, new_name, offset, keep } => {
                 let i = self.target(st, *body)?;
                 let plane = &plane.offset(self.ev(offset)?);
-                let (below, above) = st.bodies[i].shape().split(plane.origin, plane.normal)?;
-                let (Some(below), Some(above)) = (below, above) else {
-                    return fail("the split plane does not cut the body");
+                let (below, above) = match st.bodies[i].mesh_solid() {
+                    Some(m) => {
+                        let (b, a) = m.split(plane.origin, plane.normal)?;
+                        (b.map(BodyGeom::from_mesh), a.map(BodyGeom::from_mesh))
+                    }
+                    None => {
+                        let (b, a) = st.bodies[i].shape().split(plane.origin, plane.normal)?;
+                        (b.map(BodyGeom::new), a.map(BodyGeom::new))
+                    }
                 };
-                st.bodies[i].geom = BodyGeom::new(below);
-                st.bodies.push(Body { id: BodyId::of(fid), name: new_name.clone(), reference: false, part: None, geom: BodyGeom::new(above) });
+                match (keep, below, above) {
+                    (SplitKeep::Both, Some(below), Some(above)) => {
+                        st.bodies[i].geom = below;
+                        st.bodies.push(Body { id: BodyId::of(fid), name: new_name.clone(), reference: false, part: None, geom: above });
+                    }
+                    (SplitKeep::Below, Some(below), Some(_)) => st.bodies[i].geom = below,
+                    (SplitKeep::Above, Some(_), Some(above)) => st.bodies[i].geom = above,
+                    _ => return fail("the split plane does not cut the body"),
+                }
             }
             FeatureKind::PartingJoint { body, plane, offset, kind, rim, upper_name, class, closing_radius } => {
                 let i = self.target(st, *body)?;
@@ -1386,6 +1641,123 @@ impl Ctx<'_> {
                     self.apply_op(st, fid, name, *op, *target, tool)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn ev3(&self, v: &[Expr; 3]) -> R<DVec3> {
+        Ok(DVec3::new(self.ev(&v[0])?, self.ev(&v[1])?, self.ev(&v[2])?))
+    }
+
+    fn mesh_import(&mut self, blob: &str, name: &str) -> R<Arc<(MeshSolid, meshbody::RepairReport)>> {
+        if let Some(m) = self.regen.mesh_imports.get(blob) {
+            return Ok(m.clone());
+        }
+        let data = self.blobs.get(blob).ok_or_else(|| Fail::msg(format!("blob {blob} is missing")))?;
+        let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "stl".into());
+        let raw = meshbody::read_mesh(&data, &ext)?;
+        let m = Arc::new(MeshSolid::repair(&raw)?);
+        self.regen.mesh_imports.insert(blob.to_string(), m.clone());
+        Ok(m)
+    }
+
+    /// `FeatureKind::MeshBoolean`.
+    #[allow(clippy::too_many_arguments)]
+    fn mesh_boolean(
+        &mut self,
+        st: &mut ModelState,
+        fid: FeatureId,
+        target: Option<BodyId>,
+        tools: &[BodyId],
+        op: BoolOp,
+        clearance: &Expr,
+        positions: &[[Expr; 3]],
+        keep_tools: bool,
+    ) -> R<()> {
+        if op == BoolOp::NewBody {
+            return fail("Combine needs Join, Cut or Intersect");
+        }
+        if tools.is_empty() {
+            return fail("Combine needs at least one tool body");
+        }
+        let ti = match target {
+            Some(_) => self.target(st, target)?,
+            None => st.bodies.iter().rposition(|b| !b.reference).ok_or_else(|| Fail::msg("there is no body to combine into"))?,
+        };
+        if st.bodies[ti].reference {
+            return fail(format!("`{}` is a reference body and cannot be changed", st.bodies[ti].name));
+        }
+        let c = self.ev(clearance)?;
+        if c < 0.0 {
+            return fail("clearance must not be negative");
+        }
+        if c > 0.0 && op == BoolOp::Join {
+            return fail("clearance applies to Cut and Intersect only");
+        }
+        let offs: Vec<DVec3> = if positions.is_empty() { vec![DVec3::ZERO] } else { positions.iter().map(|p| self.ev3(p)).collect::<R<_>>()? };
+        let mut tix = Vec::new();
+        for t in tools {
+            let i = self.target(st, Some(*t))?;
+            if i == ti {
+                return fail(format!("`{}` is both the target and a tool", st.bodies[i].name));
+            }
+            tix.push(i);
+        }
+        // a tool grows by the clearance for Cut and shrinks for Intersect
+        let signed = if op == BoolOp::Intersect { -c } else { c };
+        let all_solid = !st.bodies[ti].is_mesh() && tix.iter().all(|i| !st.bodies[*i].is_mesh());
+        let geom = if all_solid {
+            let mut ts = Vec::new();
+            for &i in &tix {
+                let s = st.bodies[i].shape();
+                ts.push(if c > 0.0 { s.offset_solid(signed)? } else { s.clone() });
+            }
+            let tool = fuse_many(&ts)?;
+            let mut cur = st.bodies[ti].shape().clone();
+            for o in &offs {
+                let t = if *o == DVec3::ZERO { tool.clone() } else { tool.translated(-*o)? };
+                cur = match op {
+                    BoolOp::Join => tidy(cur.fuse(&t)?),
+                    BoolOp::Cut => tidy(cur.cut(&t)?),
+                    _ => tidy(cur.common(&t)?),
+                };
+            }
+            if cur.count(occt::ShapeKind::Solid) == 0 {
+                return fail("the operation removed the whole body");
+            }
+            BodyGeom::new(cur)
+        } else {
+            let mut ms = Vec::new();
+            for &i in &tix {
+                let b = &st.bodies[i];
+                ms.push(match b.mesh_solid() {
+                    Some(m) => m.offset(signed)?,
+                    None if c > 0.0 => match b.shape().offset_solid(signed) {
+                        Ok(s) => MeshSolid::from_shape(&s)?,
+                        // the kernel's offset can fail on complex solids: offset the mesh
+                        Err(_) => MeshSolid::from_shape(b.shape())?.offset(signed)?,
+                    },
+                    None => MeshSolid::from_shape(b.shape())?,
+                });
+            }
+            let tool = if ms.len() == 1 { ms.pop().unwrap() } else { meshbody::boolean(&ms[0], &ms[1..], BoolOp::Join)? };
+            let cur = match st.bodies[ti].mesh_solid() {
+                Some(m) => m.clone(),
+                None => MeshSolid::from_shape(st.bodies[ti].shape())?,
+            };
+            let copies: Vec<MeshSolid> = offs.iter().map(|o| tool.translated(-*o)).collect();
+            let r = meshbody::boolean(&cur, &copies, op).map_err(|e| match e {
+                meshbody::MeshError::EmptyResult => Fail::msg("the operation removed the whole body"),
+                e => e.into(),
+            })?;
+            BodyGeom::from_mesh(r)
+        };
+        st.bodies[ti].geom = geom;
+        let tid = st.bodies[ti].id;
+        st.tools.entry(fid).or_default().push(ToolOp { target: tid, op });
+        if !keep_tools {
+            let gone: Vec<BodyId> = tix.iter().map(|i| st.bodies[*i].id).collect();
+            st.bodies.retain(|b| !gone.contains(&b.id));
         }
         Ok(())
     }
@@ -1708,8 +2080,11 @@ impl Ctx<'_> {
                     let why = match src.kind {
                         FeatureKind::Shell { .. } => Some("hollows the whole body, so a copy would shell it a second time"),
                         FeatureKind::Split { .. } | FeatureKind::PartingJoint { .. } => Some("cuts the whole body in two, so a copy would cut it again"),
-                        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => Some("brings in a body that has no recipe to repeat"),
+                        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } | FeatureKind::ImportMesh { .. } => {
+                            Some("brings in a body that has no recipe to repeat")
+                        }
                         FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => Some("is construction geometry, which has nothing to repeat"),
+                        FeatureKind::TransformBody { .. } | FeatureKind::MeshBoolean { .. } => Some("acts on whole bodies, not on a recipe that can be placed again"),
                         _ => None,
                     };
                     if let Some(why) = why {
@@ -1863,7 +2238,7 @@ fn process_stage(bodies: &[Body], profile: &ProcessProfile, doc: &DocData) -> (V
             .map(|b| {
                 sc.spawn(move || {
                     let mut rep = ProcessReport::default();
-                    if b.reference {
+                    if b.reference || b.is_mesh() {
                         return (b.clone(), rep);
                     }
                     let body = match teardrop_body(b, profile, doc, &mut rep) {

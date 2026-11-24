@@ -1,0 +1,7 @@
+{
+  "name": "easycad",
+  "version": "0.1.0",
+  "description": "Drive the easyCAD parametric CAD app live over MCP: Claude builds and edits parts in the open window while you watch, and every step is one undo.",
+  "license": "LGPL-2.1-only",
+  "keywords": ["cad", "3d-printing", "enclosure", "mcp"]
+}

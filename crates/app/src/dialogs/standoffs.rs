@@ -250,6 +250,7 @@ impl StandoffsD {
                     bbox_max: DVec3::ZERO,
                 });
             }
+            ImportKind::Mesh => return,
         }
         self.height_to_board(d);
         self.clearance_mm = self.clearance(d, model);
@@ -308,6 +309,7 @@ impl StandoffsD {
                 max_dia: hi,
                 offset: DVec2::ZERO,
             },
+            ImportKind::Mesh => return Err("a mesh import is not a PCB".into()),
         };
         let has = |n: &str| vals.contains_key(n);
         // unticked holes stay linked to the board, just without a standoff
@@ -348,7 +350,7 @@ impl StandoffsD {
         let vals = crate::adapters::values(d);
         let wall = vals.get("wall").copied().unwrap_or(0.0);
         let solid = model?.bodies.iter().find(|x| !x.body.reference)?;
-        let bb = solid.body.shape().bbox().ok()?;
+        let bb = solid.body.bbox().ok()?;
         let g = [
             bb.max.x - wall - b.bbox_max.x,
             b.bbox_min.x - (bb.min.x + wall),

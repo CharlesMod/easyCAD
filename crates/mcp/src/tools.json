@@ -1,0 +1,747 @@
+[
+  {
+    "name": "get_document",
+    "description": "Read the open easyCAD document: name, path, revision, unsaved flag, parameters (expression and value), sketches (solve status, DOF, closed regions), features in history order (id, name, type, full definition, regen status and summary), bodies (id, name, bounding box), the undo history and what the app is doing (a dialog or sketch open). `user_changes` lists edits the user made in the app since your last call: read it before every change and build on the user's edits instead of overwriting them. Feature definitions use the same JSON as add_feature / edit_feature. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "include_definitions": {
+          "type": "boolean",
+          "description": "Include each feature's full `kind` JSON (default true). Set false for a short overview of long histories."
+        }
+      }
+    }
+  },
+  {
+    "name": "set_param",
+    "description": "Create or change user parameters (mm and degrees; expressions like \"wall*2 + 0.2\", \"1/8 in\", \"max(3, w/10)\"). Several parameters in one call are one undo step. Waits for regeneration and returns every feature's status, so you see what the change broke. Prefer named parameters over literals in sketches and features: the user can then tweak the design from the Parameters panel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Parameter name (letters, digits, _; not a unit or function name)."
+        },
+        "expr": {
+          "type": [
+            "string",
+            "number"
+          ],
+          "description": "Expression or number."
+        },
+        "comment": {
+          "type": "string",
+          "description": "Optional note shown next to the parameter."
+        },
+        "params": {
+          "type": "array",
+          "description": "Set several at once instead of name/expr.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "expr": {
+                "type": [
+                  "string",
+                  "number"
+                ]
+              },
+              "comment": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "expr"
+            ]
+          }
+        },
+        "delete": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Parameter names to remove (refused while anything still uses them)."
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "Refuse if the document revision moved (the user edited since you looked)."
+        }
+      }
+    }
+  },
+  {
+    "name": "add_sketch",
+    "description": "Add (or replace) a constrained 2D sketch and solve it. Elements: `rect` ({center,width,height} fully constrained, or {min,max} with only H/V constraints), `rounded_rect` ({center,width,height,radius}, fully constrained), `circle` ({center, radius|diameter}, centre fixed), `line` ({from,to}), `arc` ({center,start,end}, counter-clockwise), `point` ({at}). Coordinates are numbers in plane units (mm); sizes (width, height, radius, diameter, constraint values) are expressions such as \"width\" or \"wall*2\". Give elements an `id` to reference them in constraints: rect lines `<id>.bottom/.right/.top/.left`, corners `<id>.bl/.br/.tr/.tl`, centre `<id>.center`; rounded_rect lines plus arcs `<id>.arc_br/.arc_tr/.arc_tl/.arc_bl`; any line's ends `<id>.a/.b`; an arc's `<id>.center/.start/.end`; a circle's `<id>.center`; raw indices `#p3` / `#e2`. Constraint types: coincident{a,b}, horizontal{entity}, vertical{entity}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, point_on_line{point,entity}, point_on_circle{point,entity}, midpoint{point,entity}, symmetric{a,b,line}, fix{point,at?}, distance{a,b,value}, distance_x{a,b,value}, distance_y{a,b,value}, point_line_distance{point,entity,value}, length{entity,value}, radius{entity,value}, diameter{entity,value}, angle{a,b,value}. Returns the sketch id, the solve report (status, DOF, residual), the closed regions found and the names you can reference. A sketch that does not converge or conflicts is not added.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "plane": {
+          "description": "\"XY\" (normal +Z), \"XZ\" (front plane, normal -Y, x along +X), \"YZ\" (normal +X, x along +Y), or {origin:[x,y,z], x_dir:[..], normal:[..]}.",
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "XY",
+                "XZ",
+                "YZ"
+              ]
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "offset": {
+          "type": "number",
+          "description": "Move the plane along its normal (mm)."
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rect",
+                  "rounded_rect",
+                  "circle",
+                  "line",
+                  "arc",
+                  "point"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "construction": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "replace": {
+          "type": "integer",
+          "description": "Replace the sketch with this id (features using it follow)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "plane",
+        "elements"
+      ]
+    }
+  },
+  {
+    "name": "add_feature",
+    "description": "Add a feature at the end of the history (or at the rollback marker) and regenerate. `kind` is easyCAD's feature JSON, one key naming the type. Examples:\n{\"Extrude\":{\"sketch\":1,\"profiles\":\"All\",\"distance\":\"height\",\"op\":\"NewBody\"}}  (op: NewBody|Join|Cut|Intersect; optional symmetric, reverse, draft_deg, target {feature,index})\n{\"Revolve\":{\"sketch\":2,\"profiles\":\"All\",\"axis\":{\"origin\":[0,0,0],\"dir\":[0,0,1]},\"angle_deg\":\"360\",\"op\":\"Join\"}}\n{\"Shell\":{\"open_faces\":[{\"Extreme\":{\"normal\":[0,0,1],\"which\":\"Max\"}}],\"thickness\":\"wall\"}}\n{\"Fillet\":{\"edges\":[{\"Parallel\":{\"dir\":[0,0,1]}}],\"radius\":\"corner_r\",\"auto_reduce\":false}}\n{\"Chamfer\":{\"edges\":[{\"OfFace\":{\"Extreme\":{\"normal\":[0,0,-1],\"which\":\"Max\"}}}],\"distance\":\"0.5\"}}\n{\"Draft\":{\"faces\":[...],\"neutral\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"pull\":[0,0,1],\"angle_deg\":\"1\"}}\n{\"ScrewBoss\":{\"plane\":{...},\"points\":[[10,10],[-10,10]],\"od\":\"6\",\"hole_dia\":\"2.5\",\"height\":\"8\"}}\nAlso Rib, Pattern, Mirror, Split, PartingJoint, InsertPart (see the easycad skill). Mesh bodies (from import_mesh) combine with solids:\n{\"MeshBoolean\":{\"target\":{\"feature\":9,\"index\":0},\"tools\":[{\"feature\":2,\"index\":0}],\"op\":\"Cut\",\"clearance\":\"0.4\",\"positions\":[[0,0,0],[0,0,\"stroke\"]]}}  (op Join|Cut|Intersect; clearance grows tools for Cut, shrinks them for Intersect; positions = where the target travels, the tools are cleared at each; keep_tools default true)\n{\"TransformBody\":{\"body\":{\"feature\":9,\"index\":0},\"translate\":[0,0,14],\"rotate_deg\":[0,0,90],\"scale\":\"1\",\"copy\":true,\"new_name\":\"Pile at B\"}}  (move/rotate/copy any body; scale on mesh bodies only)\n{\"Split\":{\"body\":{\"feature\":9,\"index\":0},\"plane\":{\"origin\":[0,0,0],\"x_dir\":[1,0,0],\"normal\":[0,0,1]},\"offset\":\"2\",\"new_name\":\"\",\"keep\":\"Above\"}}  (flat bottom; keep Both|Below|Above, works on mesh bodies)\nFillet, Chamfer, Shell, Draft, Rib, bosses and joints refuse mesh bodies; an Extrude Join/Cut with a mesh body as `target` works. Dimensions are expressions (strings) or numbers. Address faces and edges with selectors, never indices: faces {\"Extreme\":{normal,which:Max|Min}} (the outermost planar face facing `normal`), {\"AllWithNormal\":{normal}}, {\"Cylinders\":{radius,axis}}, {\"Hint\":{centroid,normal,kind}}; edges {\"OfFace\":<face>}, {\"Between\":[<face>,<face>]}, {\"Parallel\":{dir}}, {\"Circles\":{radius,near}}, {\"Hint\":{midpoint,tangent,kind}}. measure and get_selection return ready-made selectors. Omitted `body`/`target` means the last solid body (mesh bodies are used only when named). The reply has this feature's regen status (fillets: the summary with each failed edge's largest workable size) and the status of every feature after it. A feature that ends in error is taken back out (no undo step left behind) unless keep_on_error is true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Feature name shown in the history, e.g. \"Bin body\"."
+        },
+        "kind": {
+          "type": "object",
+          "description": "Feature definition, e.g. {\"Extrude\":{...}}."
+        },
+        "position": {
+          "type": "integer",
+          "description": "Insert before this history index instead of at the end."
+        },
+        "keep_on_error": {
+          "type": "boolean",
+          "description": "Keep the feature even if it fails (default false)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ]
+    }
+  },
+  {
+    "name": "import_mesh",
+    "description": "Import a triangle mesh (STL, OBJ, GLB or glTF) from disk as a mesh body: a closed solid made of triangles that can be moved (TransformBody), split (Split, e.g. a flat bottom with keep: Above) and combined with solid bodies (MeshBoolean: Join / Cut / Intersect with clearance, at several positions). It is placed as stored in the file unless you give scale / rotate_deg / translate (applied in that order after the up-axis turn; all editable later with edit_feature on the ImportMesh feature, expressions allowed). The file is read and checked first: open or non-manifold meshes are repaired (welded, reoriented, holes filled) or refused with the count of bad edges. Returns the feature report and bodies; the body id is {\"feature\": <feature id>, \"index\": 0}.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute path to a .stl, .obj, .glb or .gltf file."
+        },
+        "name": {
+          "type": "string",
+          "description": "Feature / body name (default: the file name)."
+        },
+        "up": {
+          "type": "string",
+          "enum": [
+            "Z",
+            "Y"
+          ],
+          "description": "The file's up axis. Default Y for .glb/.gltf (turned so it stands up along +Z), Z otherwise (coordinates used as they are)."
+        },
+        "scale": {
+          "description": "Uniform scale about the file origin (number or expression, default 1)."
+        },
+        "rotate_deg": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "XYZ Euler rotation in degrees about the origin (default [0,0,0])."
+        },
+        "translate": {
+          "type": "array",
+          "description": "[x, y, z] in mm, numbers or expressions (default [0,0,0])."
+        },
+        "reference": {
+          "type": "boolean",
+          "description": "Reference body: shown, never booleaned or printed (default false)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "edit_feature",
+    "description": "Change a feature by id: a new `kind` definition (same JSON as add_feature; get the current one from get_document), a new `name`, or `suppressed`. One undo step. Regenerates and reports. If the edit makes a previously working feature fail it is reverted unless keep_on_error is true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "object"
+        },
+        "suppressed": {
+          "type": "boolean"
+        },
+        "keep_on_error": {
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_feature",
+    "description": "Delete a feature by id (one undo step). Features that depended on its bodies will report errors: the reply lists them.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "regenerate",
+    "description": "Wait for the model to finish regenerating and return every feature's report: status (ok / warning / error / unresolved reference / suppressed), fillet and chamfer summaries (edges applied, reduced, failed with their largest workable size), sketch solve reports, timing, and the resulting bodies.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "measure",
+    "description": "Measure bodies: bounding box, volume, surface area, and optionally the faces and edges, each with what made it (\"Body · side\", \"Shell · floor\"), its geometry and a ready-to-use selector for add_feature / edit_feature. Use it to find the faces to shell or the edges to fillet. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Mesh bodies report `mesh: {triangles, watertight}` and have no faces or edges to select. Uses your view's position (see apply_position); `position` switches it first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Body name or {feature,index}; omit for all bodies.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "faces": {
+          "type": "boolean",
+          "description": "List faces (default false)."
+        },
+        "edges": {
+          "type": "boolean",
+          "description": "List edges (default false)."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "At most this many faces / edges per body (default 80)."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
+        }
+      }
+    }
+  },
+  {
+    "name": "get_selection",
+    "description": "What the user has selected in the viewport right now (bodies, faces, edges), with geometry, what made each face, and selectors you can use directly. Use it when the user says \"this face\" or \"these edges\".",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "interference",
+    "description": "Check solid bodies (or assembly components) for overlaps: each interfering pair with its common volume. Use it to check that a lid, a PCB or a part does not collide with the body. It reads the whole committed document: what the user hides, cuts or rolls back in their window does not change it. Uses your view's position (see apply_position); `position` switches it first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "include_reference": {
+          "type": "boolean",
+          "description": "Include reference bodies such as imported PCBs and library parts (default true)."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
+        }
+      }
+    }
+  },
+  {
+    "name": "clearance",
+    "description": "The smallest gap between two bodies, or between faces / edges picked by selector, with the closest points (exact, from the kernel). Use it to check that a part clears a wall, how much room is left around a PCB or servo, how far a hole is from an edge, or the wall thickness between two faces of one body (a = {\"body\": \"Box\", \"face\": <outer>}, b = {\"body\": \"Box\", \"face\": <inner>}). Omit `b` to measure from `a` to every other body, nearest first. 0 means touching or overlapping: then use interference for the overlap volume. Reads the whole committed document, like measure.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "description": "A body name (\"Lid\"), a body id {\"feature\": 3, \"index\": 0}, or part of bodies: {\"body\": \"Base\", \"face\": <face selector>} or {\"body\": \"Base\", \"edge\": <edge selector>} (body optional: then every body the selector matches on)."
+        },
+        "b": {
+          "description": "A body name (\"Lid\"), a body id {\"feature\": 3, \"index\": 0}, or part of bodies: {\"body\": \"Base\", \"face\": <face selector>} or {\"body\": \"Base\", \"edge\": <edge selector>} (body optional: then every body the selector matches on)."
+        }
+      },
+      "required": [
+        "a"
+      ]
+    }
+  },
+  {
+    "name": "screenshot",
+    "description": "A PNG of the model, rendered offscreen from your own view. It is separate from the user's window: their camera, hidden bodies, section, display mode, selection or open sketch never change your picture, and your calls never move their view. Your view (camera, hidden bodies, section, display) is kept from call to call; every reply shows it, and view_state resets it. `view` turns your camera to a view-cube direction and keeps it there: \"iso\", \"front\" (looking along +Y), \"back\", \"left\", \"right\", \"top\", \"bottom\", or combinations such as \"top front right\" (corners) and \"front right\" (edges). \"current\" (the default) is your last view, and \"user\" copies the user's camera, to see what they are looking at. `views` takes up to 6 directions as one labelled contact sheet (e.g. [\"front\",\"top\",\"right\",\"iso\"]) without moving your camera: use it to check proportions in one call. `highlight` paints faces, edges, the faces a feature made, or whole bodies orange and fades every other body (this picture only), so you can confirm what a selector picks before you use it in add_feature. `section` cuts the model with a plane (x, y or z, at a coordinate in mm) to show walls, cavities and parts inside, and stays on until `section: null`. A new cut with no view given looks straight at it. `hide`, `show` (or \"all\") and `isolate` take body names and persist. `xray` (this picture only) draws every body see-through. `display` persists: \"shaded\", \"edges\" or \"wireframe\". Uses your view's position (see apply_position); `position` switches it first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "type": "string",
+          "description": "View direction, \"current\" (default: your last view) or \"user\" (the user's camera). Kept for later calls."
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Several directions as one contact sheet (1-6); your camera stays where it was."
+        },
+        "fit": {
+          "type": "boolean",
+          "description": "Zoom to fit the bodies drawn (default true for named views, false for current/user)."
+        },
+        "highlight": {
+          "type": "object",
+          "description": "What to paint orange.",
+          "properties": {
+            "faces": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Face selectors, as in add_feature."
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Edge selectors."
+            },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Feature ids: the faces each one made."
+            },
+            "bodies": {
+              "type": "array",
+              "description": "Body names or {feature,index}: whole bodies."
+            },
+            "body": {
+              "description": "Resolve face/edge selectors on this body only (name or {feature,index}); default every body."
+            }
+          }
+        },
+        "ghost": {
+          "type": "boolean",
+          "description": "Fade the bodies that are not highlighted (default true when highlighting). This picture only."
+        },
+        "xray": {
+          "type": "boolean",
+          "description": "Draw every body see-through, to show parts inside others. This picture only."
+        },
+        "section": {
+          "description": "Cut view, kept until `section: null`.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "axis": {
+                  "type": "string",
+                  "enum": [
+                    "x",
+                    "y",
+                    "z"
+                  ]
+                },
+                "at": {
+                  "type": "number",
+                  "description": "Plane position in mm along the axis (default the middle of the model)."
+                },
+                "keep": {
+                  "type": "string",
+                  "enum": [
+                    "below",
+                    "above"
+                  ],
+                  "description": "Which side of the plane stays (default below, i.e. smaller coordinates)."
+                }
+              },
+              "required": [
+                "axis"
+              ]
+            }
+          ]
+        },
+        "hide": {
+          "type": "array",
+          "description": "Body names (or {feature,index}) to leave out of your view from now on."
+        },
+        "isolate": {
+          "type": "array",
+          "description": "Show only these bodies in your view from now on (`show: \"all\"` undoes it)."
+        },
+        "max_width": {
+          "type": "integer",
+          "description": "Width of the returned PNG in pixels (default 1024)."
+        },
+        "show": {
+          "description": "Body names to bring back into your view, or \"all\"."
+        },
+        "display": {
+          "type": "string",
+          "enum": [
+            "shaded",
+            "edges",
+            "wireframe"
+          ],
+          "description": "How your view draws bodies (kept)."
+        },
+        "reset_view": {
+          "type": "boolean",
+          "description": "Start from the default view (iso, fitted, everything shown, no section) before applying the rest."
+        },
+        "position": {
+          "description": "Check in this position (name or id; null = as modeled). It becomes your view's position (as apply_position)."
+        }
+      }
+    }
+  },
+  {
+    "name": "view_state",
+    "description": "Your own view of the model (camera direction, hidden bodies, section, display), which screenshot keeps from call to call. It is separate from the user's window in both directions. `reset: true` goes back to the default: iso, fitted, every body shown, no section.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "reset": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "list_positions",
+    "description": "List the document's positions (animation states): named poses that move bodies or components rigidly from where the history puts them, e.g. a lid open and a carriage raised. Display only: features never see them. Also says which position your view and the user's window show (they are independent).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "add_position",
+    "description": "Save a new named position. A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body. Bodies not listed stay put. `copy_from` starts from another position's moves. Your view switches to it (apply: false keeps your current one); the user's window is not changed. One undo step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "copy_from": {
+          "description": "Position name or id to copy the moves of first."
+        },
+        "apply": {
+          "type": "boolean",
+          "description": "Show it in your view (default true)."
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "edit_position",
+    "description": "Change a position: `name` renames, `moves` replaces every move, `set` adds or replaces the moves of the bodies it names, `remove` lists body / occurrence names to leave where the history puts them, `delete: true` deletes the position. One undo step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "description": "Name or id."
+        },
+        "name": {
+          "type": "string"
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "set": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "A move: `body` (name or {\"feature\":n,\"index\":0}) or `occurrence` (top-level name or id path), `translate` [x,y,z] mm (numbers or expressions), `angle_deg` (number or expression), `axis` [x,y,z] and `pivot` [x,y,z] (a point the rotation axis goes through). Rotation first (about the axis through the pivot), then the translation, both from where the history puts the body."
+        },
+        "remove": {
+          "type": "array",
+          "description": "Body or occurrence names."
+        },
+        "delete": {
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "position"
+      ]
+    }
+  },
+  {
+    "name": "apply_position",
+    "description": "Show a position (name or id; null = as modeled). `for`: \"claude\" (default) switches only your view, which measure, interference and screenshot then use; \"user\" snaps the user's window (with its short animation); \"both\". Replies with the positions and your bodies' boxes in that pose.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "description": "Name, id, or null for the modeled pose."
+        },
+        "for": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "user",
+            "both"
+          ]
+        }
+      },
+      "required": [
+        "position"
+      ]
+    }
+  },
+  {
+    "name": "render_sketch",
+    "description": "A flat picture of a sketch in its own plane, drawn for you: fully constrained geometry white, geometry that can still move blue (with the list of free entities and coordinates in the text), construction dashed grey, dimensions amber as expr=value, closed regions shaded and numbered R0.. (what an extrude's profiles use), a mm grid and the sketch axes, entity labels E3 (= #e3). Use it after add_sketch to check shape, dimensions and DOF, or to see the sketch the user is drawing right now: with no `id` it renders the user's open sketch, unfinished draft included (also given an `id` they have open, unless `saved: true`). The text gives the plane mapping (sketch x/y in model coordinates), regions with areas, dimensions with values, and mm per pixel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Sketch id (get_document lists them). Omit for the sketch the user has open."
+        },
+        "saved": {
+          "type": "boolean",
+          "description": "With the id of the sketch the user has open: the version in the document instead of their draft."
+        },
+        "labels": {
+          "type": "string",
+          "enum": [
+            "entities",
+            "all",
+            "none"
+          ],
+          "description": "\"entities\" (default): entity labels and dimensions; \"all\": also point labels P0..; \"none\": geometry only."
+        },
+        "max_width": {
+          "type": "integer",
+          "description": "Image width limit in px (240-1600, default 900)."
+        }
+      }
+    }
+  },
+  {
+    "name": "export",
+    "description": "Export the solid bodies to a file: STL or 3MF (printing; the active process profile's compensations apply) or STEP. The format follows the extension unless given. The path must be absolute and its folder must exist. Mesh bodies go to STL/3MF as their (watertight) triangles; STEP leaves them out.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "stl",
+            "3mf",
+            "step"
+          ]
+        },
+        "include_reference": {
+          "type": "boolean",
+          "description": "Include reference bodies (STEP only; default false)."
+        },
+        "orient_to_plate": {
+          "type": "boolean",
+          "description": "Apply each body's build orientation (STL/3MF; default true)."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "open_document",
+    "description": "Open a .ecad document folder in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "discard_unsaved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "new_document",
+    "description": "Start a new empty document in the app. Refused when the open document has unsaved changes unless discard_unsaved is true (ask the user first).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "discard_unsaved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "save_document",
+    "description": "Save the document: to its current .ecad folder, or to `path` (an absolute path; .ecad is added).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "undo",
+    "description": "Undo the last step. By default only your own steps (labelled \"Claude: ...\") are undone; anything else is refused so you never undo the user's work by accident.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "allow_user_steps": {
+          "type": "boolean",
+          "description": "Also undo a step the user made (only when the user asked)."
+        }
+      }
+    }
+  }
+]

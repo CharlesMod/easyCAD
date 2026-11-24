@@ -49,6 +49,8 @@ pub enum DocError {
 pub enum ImportKind {
     Step,
     Dxf,
+    /// STL / OBJ / GLB / glTF (the name keeps the extension).
+    Mesh,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +134,10 @@ pub struct DocData {
     /// Show the origin planes/axes/point in the 3D view (default off; shown while picking).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub origin_visible: bool,
+    /// Named positions (animation states): display-only poses of bodies and
+    /// occurrences. See [`crate::positions`].
+    #[serde(default)]
+    pub positions: Vec<crate::positions::Position>,
     pub next_id: u32,
     /// Saved alternative histories (each a full snapshot with its own `branches`
     /// emptied). The live history is `branch`; see `branch.rs`.
@@ -175,6 +181,7 @@ impl DocData {
             rollback: None,
             hidden_datums: Vec::new(),
             origin_visible: false,
+            positions: Vec::new(),
             next_id: 1,
             branches: Vec::new(),
             branch: crate::branch::main_name(),
@@ -600,6 +607,10 @@ impl Document {
     pub fn peek_redo(&self) -> Option<&DocData> {
         self.redo.last().map(|s| &s.data)
     }
+    /// Undo step labels, most recent first.
+    pub fn undo_labels(&self) -> impl Iterator<Item = &str> {
+        self.undo.iter().rev().map(|s| s.label.as_str())
+    }
 
     /// Undo the last edit; returns its label.
     pub fn undo(&mut self) -> Option<String> {
@@ -610,6 +621,14 @@ impl Document {
         self.data.revision = rev;
         self.touch();
         Some(s.label)
+    }
+
+    /// Undo the last edit and forget it (no redo step): for an edit that turned out
+    /// wrong and should leave no trace in the history.
+    pub fn discard_last(&mut self) -> Option<String> {
+        let l = self.undo()?;
+        self.redo.pop();
+        Some(l)
     }
 
     pub fn redo(&mut self) -> Option<String> {
@@ -684,6 +703,51 @@ impl Document {
         let data = std::fs::read(path)?;
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "STEP".into());
         Ok(self.import_step(&name, data, reference))
+    }
+
+    /// Import a triangle mesh (STL / OBJ / GLB / glTF; `name` must keep the file
+    /// extension, which picks the reader) and add an `ImportMesh` feature. The
+    /// mesh is read and checked first, so a file that is not a closed solid is
+    /// refused here with nothing added.
+    pub fn import_mesh(&mut self, name: &str, data: Vec<u8>, up: crate::feature::MeshUp) -> Result<(ImportId, FeatureId), DocError> {
+        let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Mesh".into());
+        self.import_mesh_as(&format!("Import {stem}"), name, &stem, data, |import| FeatureKind::ImportMesh {
+            import,
+            scale: Expr::new("1"),
+            up,
+            rotate_deg: glam::DVec3::ZERO,
+            translate: [Expr::new("0"), Expr::new("0"), Expr::new("0")],
+            reference: false,
+        })
+    }
+
+    /// [`Document::import_mesh`] with an undo label, a feature name and the feature
+    /// built by `kind` from the new import id (it should be an `ImportMesh`).
+    pub fn import_mesh_as(
+        &mut self,
+        label: &str,
+        name: &str,
+        feature_name: &str,
+        data: Vec<u8>,
+        kind: impl FnOnce(ImportId) -> FeatureKind,
+    ) -> Result<(ImportId, FeatureId), DocError> {
+        let ext = Path::new(name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let raw = crate::meshbody::read_mesh(&data, &ext).map_err(|e| DocError::Other(e.to_string()))?;
+        crate::meshbody::MeshSolid::repair(&raw).map_err(|e| DocError::Other(e.to_string()))?;
+        let size = data.len() as u64;
+        let blob = self.blobs.put(data);
+        self.edit(label, |d| {
+            let id = ImportId(d.alloc());
+            d.imports.push(ImportEntry { id, import: Import { name: name.into(), kind: ImportKind::Mesh, blob, size } });
+            let f = d.add_feature(feature_name, kind(id));
+            Ok::<_, DocError>((id, f))
+        })
+    }
+
+    pub fn import_mesh_file(&mut self, path: &Path, up: crate::feature::MeshUp) -> Result<(ImportId, FeatureId), DocError> {
+        let data = std::fs::read(path)?;
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh.stl".into());
+        self.import_mesh(&name, data, up)
     }
 
     /// Store a DXF as an import (no feature; use it from sketches or standoffs).
@@ -836,13 +900,11 @@ impl Document {
             if opts.orient_to_plate {
                 let o = if it.component == crate::assembly::ComponentId::ROOT { self.data.orientation_of(b.id) } else { self.data.build_orientation };
                 let (axis, angle) = o.quat().to_axis_angle();
-                let mut s = if angle.abs() > 1e-12 { b.shape().rotated(glam::DVec3::ZERO, axis, angle.to_degrees()) } else { Ok(b.shape().clone()) }
-                    .map_err(|e| DocError::Other(e.to_string()))?;
-                let bb = s.bbox().map_err(|e| DocError::Other(e.to_string()))?;
-                s = s.translated(glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(|e| DocError::Other(e.to_string()))?;
-                b.geom = crate::regen::BodyGeom::new(s);
+                let r = b.moved(axis, angle.to_degrees(), glam::DVec3::ZERO).map_err(DocError::Other)?;
+                let bb = r.bbox().map_err(DocError::Other)?;
+                b = r.moved(glam::DVec3::Z, 0.0, glam::DVec3::new(0.0, 0.0, -bb.min.z)).map_err(DocError::Other)?;
             } else if !it.transform.is_identity() {
-                b.geom = crate::regen::BodyGeom::new(it.placed_shape().map_err(|e| DocError::Other(e.to_string()))?);
+                b = it.transform.apply_body(&b).map_err(DocError::Other)?;
             }
             bodies.push(b);
         }

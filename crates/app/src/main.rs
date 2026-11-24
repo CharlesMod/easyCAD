@@ -1,4 +1,7 @@
-//! `easycad [path.ecad | --sample | --smoke <dir> | --sample-board <dir>]`
+//! `easycad [path.ecad | --sample | --smoke <dir> | --sample-board <dir>] [--mcp [--mcp-port N]]`
+//!
+//! `--mcp` turns on the Claude bridge (MCP server on 127.0.0.1, see docs/MCP.md) for
+//! this run; Settings → Claude bridge turns it on at every start.
 
 use easycad_app::{native_options, EasyCadApp};
 use easycad_model::document::Document;
@@ -45,16 +48,39 @@ fn relaunch_on_host() {
     }
 }
 
+/// Take `--mcp` / `--mcp-port N` out of the arguments: `Some(port)` when the bridge
+/// was asked for.
+fn mcp_flags(args: &mut Vec<String>) -> Option<u16> {
+    let mut on = false;
+    let mut port = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--mcp" => {
+                on = true;
+                args.remove(i);
+            }
+            "--mcp-port" if i + 1 < args.len() => {
+                on = true;
+                port = args[i + 1].parse().ok();
+                args.drain(i..i + 2);
+            }
+            _ => i += 1,
+        }
+    }
+    on.then(|| port.unwrap_or(easycad_mcp::DEFAULT_PORT))
+}
+
 fn main() -> eframe::Result<()> {
-    let arg = std::env::args().nth(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mcp = mcp_flags(&mut args);
+    let arg = args.first().cloned();
     #[cfg(target_os = "linux")]
     if !matches!(arg.as_deref(), Some("--smoke") | Some("--sample-board")) {
         relaunch_on_host();
     }
     if arg.as_deref() == Some("--smoke") {
-        let dir = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "easycad-smoke".into());
+        let dir = args.get(1).cloned().unwrap_or_else(|| "easycad-smoke".into());
         match easycad_app::smoke::run(std::path::Path::new(&dir)) {
             Ok(log) => {
                 for l in log {
@@ -71,7 +97,7 @@ fn main() -> eframe::Result<()> {
     }
     if arg.as_deref() == Some("--sample-board") {
         // the sample's PCB as EasyEDA-style files, for trying the PCB wizard
-        let dir = std::path::PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| ".".into()));
+        let dir = std::path::PathBuf::from(args.get(1).cloned().unwrap_or_else(|| ".".into()));
         let r = std::fs::create_dir_all(&dir)
             .and_then(|_| std::fs::write(dir.join("sensor-node.step"), easycad_app::sample::pcb_step()))
             .and_then(|_| std::fs::write(dir.join("sensor-node.dxf"), easycad_app::sample::board_dxf()));
@@ -133,6 +159,12 @@ fn main() -> eframe::Result<()> {
             }
             app.start_reload_watch(&cc.egui_ctx);
             app.cloud = easycad_app::cloud::Cloud::start(&cc.egui_ctx, easycad_app::settings::dir());
+            let port = app.settings.mcp_port.unwrap_or(easycad_mcp::DEFAULT_PORT);
+            match mcp {
+                Some(p) => app.set_mcp(&cc.egui_ctx, true, p),
+                None if app.settings.mcp => app.set_mcp(&cc.egui_ctx, true, port),
+                None => {}
+            }
             Ok(Box::new(app))
         }),
     )

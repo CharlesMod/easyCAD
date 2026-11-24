@@ -21,6 +21,7 @@ pub use glam::DVec3;
 pub use dressup::{DressUpKind, DressUpReport, EdgeOutcome, EdgeStatus, Strategy};
 pub use thread::Thread;
 
+
 /// A kernel error (wraps the C++ exception message).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("kernel: {0}")]
@@ -457,8 +458,55 @@ impl Shape {
     }
     /// Hollow the solid, removing `open_faces`. Inward keeps the outer skin.
     pub fn shell(&self, open_faces: &[u32], thickness: f64, outward: bool) -> Result<Shape> {
+        self.shell_report(open_faces, thickness, outward).map(|(s, _)| s)
+    }
+    /// [`Shape::shell`] plus the strategy that built it. On failure the error names
+    /// the faces / creases that likely blocked the offset ([`Shape::shell_blockers`]).
+    pub fn shell_report(&self, open_faces: &[u32], thickness: f64, outward: bool) -> Result<(Shape, ShellStrategy)> {
         let off = if outward { thickness.abs() } else { -thickness.abs() };
-        wrap(raw::shell(self.r(), open_faces, off))
+        let mut code = 0u32;
+        match raw::shell(self.r(), open_faces, off, &mut code) {
+            Ok(p) => Ok((wrap(Ok(p))?, ShellStrategy::from_code(code))),
+            Err(e) => {
+                let Error(mut msg) = Error::from(e);
+                msg += &self.shell_max_note(open_faces, thickness, outward);
+                if let Ok(b) = self.shell_blockers(open_faces, thickness) {
+                    msg += &ShellBlocker::summarize(&b, thickness.abs(), |i| format!("face {i}"));
+                }
+                Err(Error(msg))
+            }
+        }
+    }
+    /// Largest wall thickness below `thickness` that shells with `open_faces`
+    /// (bisection to about 1/64 of `thickness` with the fast, uncapped half of the
+    /// ladder, rounded down to 0.01 mm and itself shelled; no clock involved, so the
+    /// answer is the same on a busy machine), or `None` when none was found. Only
+    /// worth calling after a failure: up to ten shells.
+    pub fn shell_max_thickness(&self, open_faces: &[u32], thickness: f64, outward: bool) -> Option<f64> {
+        let off = if outward { thickness.abs() } else { -thickness.abs() };
+        let t = raw::shell_max_thickness(self.r(), open_faces, off, 6).ok()?;
+        (t > 0.0).then_some(t)
+    }
+    /// "; largest workable thickness: 0.62 mm" (or that none was found).
+    fn shell_max_note(&self, open_faces: &[u32], thickness: f64, outward: bool) -> String {
+        if open_faces.is_empty() {
+            return String::new();
+        }
+        match self.shell_max_thickness(open_faces, thickness, outward) {
+            Some(t) => format!("; largest workable thickness: {t:.2} mm"),
+            None => format!("; no thickness down to {:.2} mm works", thickness.abs() / 64.0),
+        }
+    }
+    /// Faces narrower than the wall and near-tangent creases (under 8°), the two
+    /// shapes that most often stop a shell of `thickness`. Open faces are skipped.
+    pub fn shell_blockers(&self, open_faces: &[u32], thickness: f64) -> Result<Vec<ShellBlocker>> {
+        Ok(raw::shell_blockers(self.r(), open_faces, thickness.abs())?
+            .into_iter()
+            .map(|b| match b.kind {
+                0 => ShellBlocker::NarrowFace { face: b.face, width: b.value },
+                _ => ShellBlocker::Crease { faces: (b.face, b.other.max(0) as u32), angle_deg: b.value },
+            })
+            .collect())
     }
     /// Delete `faces` and heal the gap from the neighbours (a fillet goes back to a sharp
     /// edge, a boss or hole vanishes). Errs when the neighbours cannot close the gap.
@@ -702,6 +750,21 @@ impl Shape {
         Ok((v[0], v[1]))
     }
 
+    /// The smallest distance between (a part of) this shape and (a part of)
+    /// `other` (BRepExtrema), with the closest points. 0 when they touch or
+    /// overlap; `inside` when one solid contains the other's nearest point.
+    pub fn min_distance(&self, part: SubShape, other: &Shape, other_part: SubShape) -> Result<Distance> {
+        let (ak, ai) = part.raw();
+        let (bk, bi) = other_part.raw();
+        let v = raw::min_distance(self.r(), ak, ai, other.r(), bk, bi)?;
+        Ok(Distance {
+            distance: v[0],
+            on_self: DVec3::new(v[1], v[2], v[3]),
+            on_other: DVec3::new(v[4], v[5], v[6]),
+            inside: v[7] != 0.0,
+        })
+    }
+
     pub fn bbox(&self) -> Result<BBox> {
         let b = raw::bounding_box(self.r())?;
         Ok(BBox { min: dv(b.min), max: dv(b.max) })
@@ -777,4 +840,138 @@ pub fn circular_step(count: u32, total_deg: f64) -> f64 {
     } else {
         total_deg / (count - 1) as f64
     }
+}
+
+/// How [`Shape::shell_report`] built the shell (see ENGINE.md, Robustness).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellStrategy {
+    /// MakeThickSolid with its defaults (or, closed: the direct inner offset).
+    Default,
+    /// Complete intersection of the offset faces (steps narrower than the wall).
+    CompleteIntersection,
+    /// Complete intersection with a 0.01 mm tolerance (near-tangent creases).
+    LooseTolerance,
+    /// The body healed and unified (ShapeFix + UnifySameDomain) first.
+    Healed,
+    /// Complete intersection, 0.01 mm tolerance, sharp inner joins instead of arcs.
+    SharpJoins,
+    /// The same on the healed body.
+    HealedSharp,
+    /// No thick solid: the body minus its inner 3D offset, punched open under each
+    /// (flat) open face.
+    OffsetAndCut,
+    /// Closed shell built by opening the largest planar face and closing it again;
+    /// the inner value is the thick-solid step used.
+    OpenAndClose(u8),
+}
+
+impl ShellStrategy {
+    fn from_code(c: u32) -> Self {
+        match c {
+            0 => ShellStrategy::Default,
+            1 => ShellStrategy::CompleteIntersection,
+            2 => ShellStrategy::LooseTolerance,
+            3 => ShellStrategy::Healed,
+            4 => ShellStrategy::SharpJoins,
+            5 => ShellStrategy::HealedSharp,
+            6 => ShellStrategy::OffsetAndCut,
+            c => ShellStrategy::OpenAndClose(c.saturating_sub(100).min(255) as u8),
+        }
+    }
+    /// A fallback was needed.
+    pub fn is_fallback(&self) -> bool {
+        !matches!(self, ShellStrategy::Default)
+    }
+    /// Plain words for the feature report.
+    pub fn describe(&self) -> String {
+        match self {
+            ShellStrategy::Default => "default offset".into(),
+            ShellStrategy::CompleteIntersection => "complete-intersection offset (the default offset failed)".into(),
+            ShellStrategy::LooseTolerance => "complete-intersection offset at 0.01 mm tolerance (the default offset failed)".into(),
+            ShellStrategy::SharpJoins => "complete-intersection offset with sharp inner corners at 0.01 mm tolerance (the default offset failed)".into(),
+            ShellStrategy::Healed => "healed body, complete-intersection offset (the default offset failed)".into(),
+            ShellStrategy::HealedSharp => "healed body, sharp inner corners, 0.01 mm tolerance (the default offset failed)".into(),
+            ShellStrategy::OffsetAndCut => "inner offset cut out of the body (the thick-solid offset failed)".into(),
+            ShellStrategy::OpenAndClose(k) => {
+                let inner = ShellStrategy::from_code(*k as u32);
+                format!("opened at the largest flat face and closed again ({})", inner.describe())
+            }
+        }
+    }
+}
+
+/// Which part of a shape [`Shape::min_distance`] measures from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubShape {
+    Whole,
+    /// Face index (as in `faces()` / `FaceInfo`).
+    Face(u32),
+    /// Edge index (as in `edges()` / `EdgeInfo`).
+    Edge(u32),
+}
+
+impl SubShape {
+    fn raw(self) -> (u32, u32) {
+        match self {
+            SubShape::Whole => (0, 0),
+            SubShape::Face(i) => (1, i),
+            SubShape::Edge(i) => (2, i),
+        }
+    }
+}
+
+/// A face or crease likely to stop a shell ([`Shape::shell_blockers`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShellBlocker {
+    /// A face narrower than the wall (a ledge or inset ring between two features).
+    NarrowFace { face: u32, width: f64 },
+    /// Two faces meeting at a shallow angle (neither tangent nor a clear corner).
+    Crease { faces: (u32, u32), angle_deg: f64 },
+}
+
+impl ShellBlocker {
+    /// "; likely blockers: …" and what to change, or "" when there are none. At most
+    /// four are listed.
+    pub fn summarize(blockers: &[ShellBlocker], thickness: f64, name: impl Fn(u32) -> String) -> String {
+        if blockers.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = blockers.iter().take(4).map(|b| b.describe(thickness, &name)).collect();
+        let more = if blockers.len() > 4 { format!(" (+{} more)", blockers.len() - 4) } else { String::new() };
+        let narrow = blockers.iter().any(|b| matches!(b, ShellBlocker::NarrowFace { .. }));
+        let crease = blockers.iter().any(|b| matches!(b, ShellBlocker::Crease { .. }));
+        let fix = match (narrow, crease) {
+            (true, false) => "a step narrower than the wall, often where a joined feature's outline almost matches the body under it: make the outlines match exactly, step out by more than the wall, or use a thinner wall",
+            (false, true) => "faces meeting almost flat: make them tangent (same draft) or give the corner a clear angle",
+            _ => "narrow steps and almost-flat creases, often where a joined feature's outline almost matches the body under it: make the outlines match exactly or step out by more than the wall",
+        };
+        format!("; likely blockers: {}{more} ({fix})", list.join("; "))
+    }
+    /// The faces involved.
+    pub fn faces(&self) -> Vec<u32> {
+        match *self {
+            ShellBlocker::NarrowFace { face, .. } => vec![face],
+            ShellBlocker::Crease { faces: (a, b), .. } => vec![a, b],
+        }
+    }
+    /// One clause, with faces named by `name`.
+    pub fn describe(&self, thickness: f64, name: impl Fn(u32) -> String) -> String {
+        match *self {
+            ShellBlocker::NarrowFace { face, width } => {
+                format!("{} is only {width:.3} mm wide (the wall is {thickness} mm)", name(face))
+            }
+            ShellBlocker::Crease { faces: (a, b), angle_deg } => {
+                format!("{} meets {} at a shallow {angle_deg:.1}° crease", name(a), name(b))
+            }
+        }
+    }
+}
+
+/// [`Shape::min_distance`]'s answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Distance {
+    pub distance: f64,
+    pub on_self: DVec3,
+    pub on_other: DVec3,
+    pub inside: bool,
 }

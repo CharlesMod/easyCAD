@@ -220,8 +220,10 @@ fn role_of(kind: &FeatureKind, f: &FaceInfo, sketch_plane: Option<&crate::geom::
         FeatureKind::Pattern { .. } | FeatureKind::Mirror { .. } => FaceRole::Copy,
         FeatureKind::Split { .. } => FaceRole::SplitFace,
         FeatureKind::PartingJoint { .. } => FaceRole::Joint,
-        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } => FaceRole::Imported,
+        FeatureKind::ImportStep { .. } | FeatureKind::ContextRef { .. } | FeatureKind::ImportMesh { .. } => FaceRole::Imported,
         FeatureKind::DatumPlane { .. } | FeatureKind::DatumAxis { .. } | FeatureKind::DatumPoint { .. } => FaceRole::Other,
+        FeatureKind::TransformBody { .. } => FaceRole::Copy,
+        FeatureKind::MeshBoolean { .. } => FaceRole::Other,
     }
 }
 
