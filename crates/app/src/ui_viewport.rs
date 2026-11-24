@@ -1113,9 +1113,8 @@ fn section_toggle_rect(ui: &Ui, rect: Rect, cube_at: Pos2) -> Rect {
     Rect::from_min_size(pos2(x, y), vec2(w, TOGGLE_H))
 }
 
-/// The floating "Section" checkbox by the view cube's home button (the cut's
-/// on, the cut's controls in a card under the cube's rotate buttons: axis,
-/// position (drag, or nudge a millimetre at a time), which half to keep.
+/// The floating "Section" checkbox by the view cube's home button. The cut's
+/// controls are in `section_bar`, above the view bar.
 fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, at: Rect) {
     let mut on = app.section.is_some();
     egui::Area::new(egui::Id::unique("section_toggle"))
