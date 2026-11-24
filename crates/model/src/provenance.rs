@@ -202,7 +202,7 @@ fn role_of(kind: &FeatureKind, f: &FaceInfo, sketch_plane: Option<&crate::geom::
                 FaceRole::Side
             }
         }
-        FeatureKind::Revolve { .. } => FaceRole::Side,
+        FeatureKind::ExtrudeFace { .. } | FeatureKind::Revolve { .. } => FaceRole::Side,
         FeatureKind::Fillet { .. } => FaceRole::Fillet,
         FeatureKind::Chamfer { .. } => FaceRole::Chamfer,
         FeatureKind::Shell { .. } => FaceRole::Inner,

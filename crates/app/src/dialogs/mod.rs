@@ -219,7 +219,23 @@ impl Op {
     }
 }
 
+/// A body's planar face used as the extrude profile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceSrc {
+    pub sel: FaceSelector,
+    /// Face centroid and outward normal (where the drag arrow sits).
+    pub centroid: DVec3,
+    pub normal: DVec3,
+}
+
+/// Smallest |distance| an auto extrude accepts; below it there is no tool.
+pub const EXTRUDE_DEAD: f64 = 0.05;
+
 pub struct ExtrudeD {
+    /// Profile from a body face instead of a sketch (then `sketch` is unused).
+    pub face: Option<FaceSrc>,
+    /// Op follows the sign of the distance: positive Join, negative Cut.
+    pub auto: bool,
     pub sketch: Option<SketchId>,
     /// Which regions of the sketch to extrude (`All` until the user clicks a region).
     pub profiles: ProfileSel,
@@ -398,6 +414,38 @@ fn face_sel(m: Option<&Output>, k: &PickKey) -> Option<FaceSelector> {
     Some(FaceSelector::from_pick(info))
 }
 
+/// The planar face to extrude when the selection is faces of one solid body.
+fn face_src(sel: &[PickKey], m: Option<&Output>) -> Option<FaceSrc> {
+    let m = m?;
+    let mut body = None;
+    let mut first = None;
+    for k in sel {
+        let PickKind::Face(f) = k.kind else { continue };
+        if body.is_some_and(|b| b != k.body) || m.body(k.body).is_none_or(|b| b.reference) {
+            return None;
+        }
+        body = Some(k.body);
+        let info = m.meshed(k.body)?.faces.get(f as usize)?;
+        if info.kind != easycad_model::occt::SurfaceKind::Plane {
+            return None;
+        }
+        first.get_or_insert(info);
+    }
+    let info = first?;
+    Some(FaceSrc { sel: FaceSelector::from_pick(info), centroid: info.centroid, normal: info.normal.normalize_or_zero() })
+}
+
+impl ExtrudeD {
+    /// The op in force: auto picks Join/Cut from the sign of the distance.
+    pub fn live_op(&self, v: Option<f64>) -> Op {
+        match (self.auto, v) {
+            (true, Some(v)) if v < 0.0 => Op::Cut,
+            (true, _) => Op::Join,
+            _ => self.op,
+        }
+    }
+}
+
 fn plane_offset(p: &Plane) -> f64 {
     p.origin.dot(p.normal)
 }
@@ -472,8 +520,11 @@ impl Dialog {
     ) -> Result<Dialog, String> {
         let d = &cx.data;
         let body = match kind {
-            DialogKind::Extrude => Body::Extrude(ExtrudeD {
-                sketch: last_sketch(d, true),
+            DialogKind::Extrude => {
+                let face = face_src(sel, model);
+                Body::Extrude(ExtrudeD {
+                auto: face.is_some() || last_solid(model).is_some(),
+                sketch: if face.is_some() { None } else { last_sketch(d, true) },
                 profiles: ProfileSel::All,
                 distance: Field::new("10"),
                 symmetric: false,
@@ -485,7 +536,9 @@ impl Dialog {
                     Op::NewBody
                 },
                 target: sel_body(sel, model),
-            }),
+                face,
+            })
+            }
             DialogKind::Revolve => Body::Revolve(RevolveD {
                 sketch: last_sketch(d, true),
                 profiles: ProfileSel::All,
@@ -638,6 +691,8 @@ impl Dialog {
             } => (
                 DialogKind::Extrude,
                 Body::Extrude(ExtrudeD {
+                    face: None,
+                    auto: false,
                     sketch: Some(*sketch),
                     profiles: profiles.clone(),
                     distance: Field::from_expr(distance, None),
@@ -648,6 +703,30 @@ impl Dialog {
                     target: *target,
                 }),
             ),
+            FeatureKind::ExtrudeFace { face, distance, op, target } => {
+                let (centroid, normal) = match face {
+                    FaceSelector::Hint { centroid, normal, .. } => (*centroid, *normal),
+                    FaceSelector::Extreme { normal, .. } | FaceSelector::AllWithNormal { normal } => (DVec3::ZERO, *normal),
+                    FaceSelector::Cylinders { .. } => (DVec3::ZERO, DVec3::Z),
+                };
+                let v = crate::widgets::eval(&distance.0, &crate::adapters::values(d)).ok();
+                let auto = v.is_some_and(|v| (*op == BoolOp::Join && v >= 0.0) || (*op == BoolOp::Cut && v < 0.0));
+                (
+                    DialogKind::Extrude,
+                    Body::Extrude(ExtrudeD {
+                        face: Some(FaceSrc { sel: face.clone(), centroid, normal }),
+                        auto,
+                        sketch: None,
+                        profiles: ProfileSel::All,
+                        distance: Field::from_expr(distance, None),
+                        symmetric: false,
+                        reverse: false,
+                        draft: Field::new("0"),
+                        op: Op::from(*op),
+                        target: *target,
+                    }),
+                )
+            }
             FeatureKind::Revolve {
                 sketch,
                 profiles,
@@ -910,16 +989,37 @@ impl Dialog {
             }])
         };
         match &self.body {
-            Body::Extrude(e) => one(FeatureKind::Extrude {
-                sketch: e.sketch.ok_or("pick a sketch with a closed profile")?,
-                profiles: region_sel(&e.profiles)?,
-                distance: e.distance.expr(None),
-                symmetric: e.symmetric,
-                reverse: e.reverse,
-                draft_deg: e.draft.expr(None),
-                op: e.op.to(),
-                target: if e.op == Op::NewBody { None } else { e.target },
-            }),
+            Body::Extrude(e) => {
+                let v = num(&e.distance).ok();
+                let op = e.live_op(v);
+                let neg = v.is_some_and(|v| v < 0.0);
+                if e.auto && v.is_some_and(|v| v.abs() < EXTRUDE_DEAD) {
+                    return Err("distance is too small".into());
+                }
+                let flipped = |t: &str| Expr::new(format!("-({})", t.trim()));
+                if let Some(f) = &e.face {
+                    // signed along the outward normal; an explicit Cut goes into the body
+                    let invert = !e.auto && op == Op::Cut && v.is_some_and(|v| v > 0.0);
+                    return one(FeatureKind::ExtrudeFace {
+                        face: f.sel.clone(),
+                        distance: if invert { flipped(&e.distance.text) } else { e.distance.expr(None) },
+                        op: op.to(),
+                        target: e.target,
+                    });
+                }
+                // auto Cut from a sketch: |distance| the other way round
+                let back = e.auto && neg;
+                one(FeatureKind::Extrude {
+                    sketch: e.sketch.ok_or("pick a sketch with a closed profile")?,
+                    profiles: region_sel(&e.profiles)?,
+                    distance: if back { flipped(&e.distance.text) } else { e.distance.expr(None) },
+                    symmetric: e.symmetric,
+                    reverse: e.reverse != back,
+                    draft_deg: e.draft.expr(None),
+                    op: op.to(),
+                    target: if op == Op::NewBody { None } else { e.target },
+                })
+            }
             Body::Revolve(r) => one(FeatureKind::Revolve {
                 sketch: r.sketch.ok_or("pick a sketch")?,
                 profiles: region_sel(&r.profiles)?,
@@ -1267,13 +1367,18 @@ impl Dialog {
         match &mut self.body {
             Body::Extrude(e) => {
                 let before = e.sketch;
-                ch |= sketch_combo(ui, id.with("sk"), &mut e.sketch, &sketches);
-                if e.sketch != before {
-                    e.profiles = ProfileSel::All;
+                if e.face.is_some() {
+                    ui.label(RichText::new("Profile: picked face").size(12.0).color(theme::TEXT_DIM));
+                } else {
+                    ch |= sketch_combo(ui, id.with("sk"), &mut e.sketch, &sketches);
+                    if e.sketch != before {
+                        e.profiles = ProfileSel::All;
+                    }
+                    ch |= region_row(ui, e.sketch, &mut e.profiles, cx);
                 }
-                ch |= region_row(ui, e.sketch, &mut e.profiles, cx);
                 ch |= e.distance.row(ui, id.with("d"), "Distance", env);
-                ui.horizontal(|ui| {
+                let live = e.live_op(crate::widgets::eval(&e.distance.text, &crate::adapters::values(cx.data)).ok());
+                if e.face.is_none() { ui.horizontal(|ui| {
                     ui.label(RichText::new("Direction").size(12.0).color(theme::TEXT_DIM));
                     for (label, sym, rev) in [
                         ("One side", false, false),
@@ -1288,10 +1393,18 @@ impl Dialog {
                             ch = true;
                         }
                     }
-                });
-                ch |= e.draft.row(ui, id.with("dr"), "Taper angle", env);
-                ch |= op_row(ui, &mut e.op);
-                if e.op != Op::NewBody {
+                }); 
+                ch |= e.draft.row(ui, id.with("dr"), "Taper angle", env); }
+                let mut shown = live;
+                if op_row(ui, &mut shown) {
+                    e.op = shown;
+                    e.auto = false;
+                    ch = true;
+                }
+                if e.auto {
+                    ui.label(RichText::new("Auto: drag out to Join, in to Cut").size(11.0).color(theme::TEXT_DIM));
+                }
+                if live != Op::NewBody {
                     ch |= body_combo(ui, id.with("t"), &mut e.target, &solids, "last solid");
                 }
             }
