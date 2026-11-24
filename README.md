@@ -4,6 +4,9 @@
 assemble and draw, on the OpenCascade B-rep kernel, in a native app that stays smooth on a laptop.
 Fully offline. macOS, Linux and Windows. LGPL-2.1.
 
+![easyCAD with an assembly of the Raspberry Pi Pico W case open](docs/img/preview.png)
+<sub>Pico W case model © Adafruit Industries, MIT ([Adafruit_CAD_Parts](https://github.com/adafruit/Adafruit_CAD_Parts)).</sub>
+
 - **Fast.** 120+ fps in the viewport even on a MacBook Air (M4, 16 GB). Native Rust with a
   wgpu renderer, one self-contained binary, no installer, no cloud round-trips.
 - **Powerful.** A full parametric modeler: constrained sketches, solid and face features,
