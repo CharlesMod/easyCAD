@@ -316,10 +316,13 @@ impl DocData {
         let mut changed = false;
         for (id, sk) in res.reports.iter().flat_map(|r| &r.relinked) {
             if let Some(e) = self.sketches.iter_mut().find(|e| e.id == *id) {
-                if e.sketch.points != sk.points || e.sketch.entities != sk.entities || e.sketch.constraints != sk.constraints {
+                if e.sketch.points != sk.points || e.sketch.entities != sk.entities || e.sketch.constraints != sk.constraints
+                    || e.sketch.proj_srcs != sk.proj_srcs
+                {
                     e.sketch.points = sk.points.clone();
                     e.sketch.entities = sk.entities.clone();
                     e.sketch.constraints = sk.constraints.clone();
+                    e.sketch.proj_srcs = sk.proj_srcs.clone();
                     changed = true;
                 }
             }

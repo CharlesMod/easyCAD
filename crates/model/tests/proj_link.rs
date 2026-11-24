@@ -168,3 +168,28 @@ fn relinked_geometry_is_written_back_to_the_stored_sketch() {
     assert!(!doc.data.apply_relinked(&again));
     assert_eq!(b_state(&mut doc, fb).0, DVec2::new(60.0, -15.0));
 }
+
+#[test]
+fn hint_follows_the_edge_across_many_small_moves() {
+    // a cylinder has twin top / bottom circles; 0.25 x its bbox diagonal is ~4.3
+    let (mut doc, sa, _, fb) = linked(
+        |a| {
+            a.circle(DVec2::new(20.0, 15.0), 5.0);
+        },
+        |e| e.circle.is_some_and(|(c, _, _)| (c.z - 10.0).abs() < 1e-6),
+    );
+    let sb = doc.data.sketches[1].id;
+    let mut x = 20.0;
+    for _ in 0..3 {
+        translate(&mut doc, sa, DVec2::new(3.0, 0.0));
+        x += 3.0;
+        let res = doc.regenerate().clone();
+        assert_eq!(res.report(fb).unwrap().status, FeatureStatus::Ok);
+        doc.data.apply_relinked(&res);
+        let b = doc.data.sketch(sb).unwrap().clone();
+        assert!((b.points[0] - DVec2::new(x, 15.0)).length() < 1e-6, "{:?}", b.points[0]);
+        let sig = b.proj_srcs[0].sig.unwrap();
+        assert!((sig.anchor - glam::DVec3::new(x, 15.0, 10.0)).length() < 1e-6, "stored source follows the top circle: {:?}", sig.anchor);
+        assert!((b_state(&mut doc, fb).0 - DVec2::new(x, 15.0)).length() < 1e-6);
+    }
+}

@@ -772,6 +772,12 @@ impl Sketch {
                 }
             }
         }
+        // the source now sits where the edge is: later moves are measured from here
+        let p = &mut self.proj_srcs[i];
+        p.edge = crate::select::EdgeSelector::from_pick(e);
+        p.sig = crate::select::EdgeSig::of(e);
+        p.mid = e.midpoint;
+        p.samples = shifted;
         Ok(())
     }
 
