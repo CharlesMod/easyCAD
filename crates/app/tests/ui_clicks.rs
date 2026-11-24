@@ -1167,9 +1167,126 @@ fn extrude_arrow_shift_and_ctrl_steps() {
     arrow_drag(&mut h, egui::Modifiers::CTRL, -37.0);
     let w = arrow_text(&h).parse::<f64>().unwrap();
     assert!(mult_of(w, 0.1) && w < v, "ctrl: {w}");
-    // never below zero
-    arrow_drag(&mut h, egui::Modifiers::SHIFT, -4000.0);
+    // with a solid the op is auto: the drag goes negative (Cut) but never inside the dead zone
+    for _ in 0..8 {
+        if arrow_text(&h).parse::<f64>().unwrap() < 0.0 {
+            break;
+        }
+        arrow_drag(&mut h, egui::Modifiers::SHIFT, -250.0);
+    }
+    let n = arrow_text(&h).parse::<f64>().unwrap();
+    assert!(n < 0.0 && n.abs() >= easycad_app::dialogs::EXTRUDE_DEAD, "{n}");
+}
+
+#[test]
+fn extrude_arrow_without_auto_never_goes_below_zero() {
+    let _g = serial();
+    let mut h = harness(box_doc());
+    open_extrude(&mut h);
+    if let Some(easycad_app::dialogs::Body::Extrude(e)) = h.state_mut().dialog.as_mut().map(|d| &mut d.body) {
+        e.auto = false;
+    }
+    for _ in 0..4 {
+        arrow_drag(&mut h, egui::Modifiers::SHIFT, -250.0);
+    }
     assert!(arrow_text(&h).parse::<f64>().unwrap() > 0.0);
+}
+
+fn cylinder_doc() -> easycad_model::document::Document {
+    use easycad_model::feature::{BoolOp, FeatureKind, ProfileSel};
+    use easycad_model::sketch::Sketch;
+    let mut doc = easycad_model::document::Document::new("cyl");
+    let mut s = Sketch::new("S", easycad_model::geom::Plane::XY);
+    s.circle(glam::DVec2::ZERO, 15.0);
+    let sid = doc.add_sketch(s);
+    doc.add_feature(
+        "Cyl",
+        FeatureKind::Extrude { sketch: sid, profiles: ProfileSel::All, distance: 20.0.into(), symmetric: false, reverse: false, draft_deg: 0.0.into(), op: BoolOp::NewBody, target: None },
+    );
+    doc
+}
+
+fn extrude_body<'a>(h: &'a Harness<'static, EasyCadApp>) -> &'a easycad_app::dialogs::ExtrudeD {
+    match h.state().dialog.as_ref().map(|d| &d.body) {
+        Some(easycad_app::dialogs::Body::Extrude(e)) => e,
+        _ => panic!("no extrude dialog"),
+    }
+}
+
+/// Select the cylinder's top face and press E.
+fn face_extrude_open() -> Harness<'static, EasyCadApp> {
+    let mut h = harness(cylinder_doc());
+    top_view(&mut h);
+    click_w(&mut h, glam::Vec3::new(4.0, 3.0, 20.0));
+    h.key_press(egui::Key::E);
+    h.run_steps(3);
+    settle(&mut h);
+    // an oblique view, so the arrow along the face normal is not end-on
+    h.state_mut().camera.rot = easycad_app::camera::look_rot(glam::Vec3::new(1.0, 1.0, 1.0).normalize(), glam::Vec3::Z);
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn e_on_a_selected_top_face_extrudes_that_face() {
+    let _g = serial();
+    let h = face_extrude_open();
+    let e = extrude_body(&h);
+    let f = e.face.as_ref().expect("face source");
+    assert!(f.normal.z > 0.99 && (f.centroid.z - 20.0).abs() < 1e-6, "{f:?}");
+    assert!(e.sketch.is_none() && e.auto && e.target.is_some());
+    let s = easycad_app::drag_arrow::spec(h.state()).unwrap();
+    assert!(s.dir.z > 0.99 && (s.base.z - 20.0).abs() < 1e-6);
+}
+
+#[test]
+fn face_extrude_arrow_negative_cuts_positive_joins() {
+    use easycad_model::feature::{BoolOp, FeatureKind};
+    let _g = serial();
+    let mut h = face_extrude_open();
+    let build_op = |h: &Harness<'static, EasyCadApp>| {
+        let cx = h.state().dialog_cx_data();
+        let d = h.state().dialog.as_ref().unwrap();
+        match d.build(&cx).unwrap().remove(0).kind {
+            FeatureKind::ExtrudeFace { op, distance, .. } => (op, distance.0),
+            k => panic!("{k:?}"),
+        }
+    };
+    // down (against the outward normal) = into the body
+    arrow_drag(&mut h, egui::Modifiers::NONE, -320.0);
+    let v: f64 = arrow_text(&h).parse().unwrap();
+    assert!(v < 0.0, "{v}");
+    assert_eq!(build_op(&h).0, BoolOp::Cut);
+    assert_eq!(extrude_body(&h).live_op(Some(v)), easycad_app::dialogs::Op::Cut);
+    // and back out past zero = Join
+    arrow_drag(&mut h, egui::Modifiers::NONE, 500.0);
+    let w: f64 = arrow_text(&h).parse().unwrap();
+    assert!(w > 0.0, "{w}");
+    assert_eq!(build_op(&h).0, BoolOp::Join);
+    // picking an op in the dialog turns auto off
+    if let Some(easycad_app::dialogs::Body::Extrude(e)) = h.state_mut().dialog.as_mut().map(|d| &mut d.body) {
+        e.auto = false;
+        e.op = easycad_app::dialogs::Op::Cut;
+    }
+    let (op, dist) = build_op(&h);
+    assert_eq!(op, BoolOp::Cut);
+    assert!(dist.trim_start().starts_with("-("), "explicit Cut goes into the body: {dist}");
+}
+
+#[test]
+fn editing_a_face_extrude_restores_face_and_op() {
+    use easycad_app::dialogs::{Body, Dialog, Op};
+    let _g = serial();
+    let mut h = face_extrude_open();
+    if let Some(Body::Extrude(e)) = h.state_mut().dialog.as_mut().map(|d| &mut d.body) {
+        e.distance.text = "-3".into();
+    }
+    let cx = h.state().dialog_cx_data();
+    let feats = h.state().dialog.as_ref().unwrap().build(&cx).unwrap();
+    let d = Dialog::edit(&feats[0], &cx).expect("edit dialog");
+    let Body::Extrude(e) = &d.body else { panic!("not extrude") };
+    assert!(e.face.is_some() && e.sketch.is_none() && e.target.is_some());
+    assert_eq!((e.distance.text.as_str(), e.op, e.auto), ("-3", Op::Cut, true));
 }
 
 #[test]

@@ -935,7 +935,7 @@ impl Ctx<'_> {
                 let d = self.ev(distance)?;
                 let ti = self.target(st, *target)?;
                 let body = st.bodies[ti].shape();
-                let idx = *resolve_faces(&body, std::slice::from_ref(face))?.first().ok_or_else(|| Fail::msg("the face no longer exists"))?;
+                let idx = *resolve_faces(body, std::slice::from_ref(face))?.first().ok_or_else(|| Fail::msg("the face no longer exists"))?;
                 let info = body.faces()?.into_iter().find(|f| f.index == idx).ok_or_else(|| Fail::msg("the face no longer exists"))?;
                 if info.kind != SurfaceKind::Plane {
                     return fail("extrude face: the picked face is not planar");

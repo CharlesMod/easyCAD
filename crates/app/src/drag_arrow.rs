@@ -27,6 +27,9 @@ pub struct Spec {
     pub value: f64,
     /// Lowest value the drag may reach.
     pub min: f64,
+    /// Auto join/cut: the value may go negative, but never inside `|v| < dead`
+    /// (0 = no dead zone).
+    pub dead: f64,
 }
 
 impl Spec {
@@ -79,7 +82,13 @@ pub fn axis_param(o: DVec3, r: DVec3, p0: DVec3, dir: DVec3) -> Option<f64> {
 
 /// The value after dragging: start + travel along the axis, rounded.
 pub fn drag_value(spec: &Spec, start_value: f64, t0: f64, t: f64, step: f64) -> f64 {
-    quantise(start_value + (t - t0) / spec.per, step, spec.min)
+    let raw = start_value + (t - t0) / spec.per;
+    let v = quantise(raw, step, spec.min);
+    if spec.dead > 0.0 && v.abs() < spec.dead {
+        // never an empty tool: snap to the nearer side of the dead zone
+        return if raw < 0.0 { -spec.dead } else { spec.dead };
+    }
+    v
 }
 
 /// Text for a value in a field: "12" or "12.3".
@@ -122,6 +131,15 @@ pub fn spec(app: &EasyCadApp) -> Option<Spec> {
     let view = app.view();
     let vals = crate::adapters::values(view);
     match &d.body {
+        Body::Extrude(e) if e.face.is_some() => {
+            let f = e.face.as_ref()?;
+            let value = crate::widgets::eval(&e.distance.text, &vals).ok()?;
+            let n = f.normal.normalize_or_zero();
+            if n == DVec3::ZERO {
+                return None;
+            }
+            Some(Spec { base: f.centroid, dir: n, per: 1.0, value, min: f64::MIN, dead: crate::dialogs::EXTRUDE_DEAD * 2.0 })
+        }
         Body::Extrude(e) => {
             let sk = view.sketch(e.sketch?)?;
             let value = crate::widgets::eval(&e.distance.text, &vals).ok()?;
@@ -133,7 +151,8 @@ pub fn spec(app: &EasyCadApp) -> Option<Spec> {
                 dir: if e.reverse { -n } else { n },
                 per: if e.symmetric { 0.5 } else { 1.0 },
                 value,
-                min: 0.1,
+                min: if e.auto { f64::MIN } else { 0.1 },
+                dead: if e.auto { crate::dialogs::EXTRUDE_DEAD * 2.0 } else { 0.0 },
             })
         }
         Body::Datum(dd) if dd.kind == crate::datum_ui::DatumKind::PlaneOffset => {
@@ -153,7 +172,7 @@ pub fn spec(app: &EasyCadApp) -> Option<Spec> {
                 .and_then(|a| a.picks.first())
                 .map(|p| p.p - pl.normal * (p.p - pl.origin).dot(pl.normal))
                 .unwrap_or(pl.origin);
-            Some(Spec { base: on - dir * value, dir, per: 1.0, value, min: f64::MIN })
+            Some(Spec { base: on - dir * value, dir, per: 1.0, value, min: f64::MIN, dead: 0.0 })
         }
         _ => None,
     }
@@ -281,7 +300,7 @@ mod tests {
     use super::*;
 
     fn spec(per: f64) -> Spec {
-        Spec { base: DVec3::ZERO, dir: DVec3::Z, per, value: 5.0, min: 0.1 }
+        Spec { base: DVec3::ZERO, dir: DVec3::Z, per, value: 5.0, min: 0.1, dead: 0.0 }
     }
 
     #[test]
@@ -324,6 +343,13 @@ mod tests {
         assert_eq!(drag_value(&spec(0.5), 5.0, 0.0, 3.0, 1.0), 11.0);
         // never below the minimum
         assert_eq!(drag_value(&s, 5.0, 0.0, -20.0, 1.0), 0.1);
+        // auto join/cut: goes negative, and skips the dead zone around zero
+        let a = Spec { min: f64::MIN, dead: 0.1, ..s.clone() };
+        assert_eq!(drag_value(&a, 5.0, 0.0, -8.0, 1.0), -3.0);
+        assert_eq!(drag_value(&a, 5.0, 0.0, -5.0, 1.0), 0.1);
+        assert_eq!(drag_value(&a, 5.0, 0.0, -5.1, 1.0), -0.1);
+        assert_eq!(drag_value(&a, 5.0, 0.0, -4.9, 1.0), 0.1);
+        assert_eq!(drag_value(&a, 5.0, 0.0, -5.4, 1.0), -0.1);
     }
 
     #[test]

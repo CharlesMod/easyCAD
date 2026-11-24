@@ -1191,7 +1191,7 @@ pub fn display_expr(e: &str) -> String {
 
 pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
     match k {
-        FeatureKind::Extrude { .. } => ("EX", theme::TEXT_DIM),
+        FeatureKind::Extrude { .. } | FeatureKind::ExtrudeFace { .. } => ("EX", theme::TEXT_DIM),
         FeatureKind::Revolve { .. } => ("RV", theme::TEXT_DIM),
         FeatureKind::Fillet { .. } => ("FL", theme::ORANGE_SOFT),
         FeatureKind::Chamfer { .. } => ("CH", theme::ORANGE_SOFT),
@@ -1225,7 +1225,7 @@ pub fn chip_label(app: &EasyCadApp, f: &easycad_model::feature::Feature) -> Stri
     };
     let name = &f.name;
     match &f.kind {
-        FeatureKind::Extrude { distance, .. } => format!("{name} {}", ev(distance)),
+        FeatureKind::Extrude { distance, .. } | FeatureKind::ExtrudeFace { distance, .. } => format!("{name} {}", ev(distance)),
         FeatureKind::Fillet { radius, .. } => format!("{name} r{}", ev(radius)),
         FeatureKind::Chamfer { distance, .. } => format!("{name} {}", ev(distance)),
         FeatureKind::Shell { thickness, .. } => format!("{name} {}", ev(thickness)),
