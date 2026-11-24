@@ -115,6 +115,10 @@ pub struct Camera {
     /// Bounding sphere of the scene, for clip planes and fitting.
     pub scene_center: Vec3,
     pub scene_radius: f32,
+    /// World-space AABB (min, max) of everything drawn this frame (set by the viewport:
+    /// model, preview, sketches). When set, clip planes enclose it exactly instead of the
+    /// scene sphere, which a rolled-back or preview regen can leave smaller than the geometry.
+    pub clip_box: Option<(Vec3, Vec3)>,
     pub home: Home,
     /// Fit the model whenever a view-cube view is chosen.
     pub fit_on_change: bool,
@@ -132,6 +136,7 @@ impl Default for Camera {
             ortho: false,
             scene_center: Vec3::ZERO,
             scene_radius: 100.0,
+            clip_box: None,
             home: Home::default(),
             fit_on_change: false,
             step_frame: StepFrame::World,
@@ -217,16 +222,45 @@ impl Camera {
         2.0 * self.distance * (self.fov_y / 2.0).tan() / viewport_h.max(1.0)
     }
 
-    fn clip(&self) -> (f32, f32) {
-        let r = self.scene_radius.max(1e-3);
-        let d = (self.scene_center - self.eye()).dot(self.forward());
+    /// Near/far for the current view. Encloses `clip_box` (all drawn geometry) when set,
+    /// else the scene sphere.
+    pub fn clip_range(&self) -> (f32, f32) {
+        let eye = self.eye();
+        let fwd = self.forward();
+        let (lo, hi) = match self.clip_box {
+            Some((mn, mx)) => {
+                let mut lo = f32::MAX;
+                let mut hi = f32::MIN;
+                for i in 0..8 {
+                    let c = Vec3::new(
+                        if i & 1 == 0 { mn.x } else { mx.x },
+                        if i & 2 == 0 { mn.y } else { mx.y },
+                        if i & 4 == 0 { mn.z } else { mx.z },
+                    );
+                    let d = (c - eye).dot(fwd);
+                    lo = lo.min(d);
+                    hi = hi.max(d);
+                }
+                (lo, hi)
+            }
+            None => {
+                let r = self.scene_radius.max(1e-3);
+                let d = (self.scene_center - eye).dot(fwd);
+                (d - 1.5 * r, d + 1.5 * r)
+            }
+        };
+        let pad = 0.01 * (hi - lo).max(0.0) + 1.0;
         if self.ortho {
-            (d - 2.0 * r - 1.0, d + 2.0 * r + 1.0)
+            (lo - pad, hi + pad)
         } else {
-            let near = (d - 1.5 * r).max(self.distance * 0.002).max(1e-3);
-            let far = (d + 1.5 * r).max(near * 2.0) + 1.0;
+            let near = (lo - pad * 0.5).max(self.distance * 0.002).max(1e-3);
+            let far = (hi + pad).max(near * 2.0);
             (near, far)
         }
+    }
+
+    fn clip(&self) -> (f32, f32) {
+        self.clip_range()
     }
 
     pub fn view(&self) -> Mat4 {
@@ -472,6 +506,59 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3, eps: f32) -> bool {
         (a - b).length() < eps
+    }
+
+    /// Corners of a box, as the geometry a frame draws.
+    fn corners(mn: Vec3, mx: Vec3) -> Vec<Vec3> {
+        (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { mn.x } else { mx.x },
+                    if i & 2 == 0 { mn.y } else { mx.y },
+                    if i & 4 == 0 { mn.z } else { mx.z },
+                )
+            })
+            .collect()
+    }
+
+    fn depths_inside(c: &Camera, pts: &[Vec3]) -> bool {
+        let (near, far) = c.clip_range();
+        pts.iter().all(|p| {
+            let d = (*p - c.eye()).dot(c.forward());
+            d >= near && d <= far
+        })
+    }
+
+    /// A rolled-back model leaves a small scene sphere while a preview (or the full
+    /// model) is drawn larger: the sphere clip planes slice it ("spherical cutout").
+    #[test]
+    fn clip_encloses_drawn_geometry_beyond_the_scene_sphere() {
+        for ortho in [false, true] {
+            let mut c = cam();
+            c.ortho = ortho;
+            c.distance = 150.0;
+            c.scene_center = Vec3::ZERO;
+            c.scene_radius = 10.0; // stale/rolled-back bounds
+            let drawn = corners(Vec3::new(-80.0, -80.0, -80.0), Vec3::new(80.0, 80.0, 80.0));
+            // the bug: sphere-only clipping cuts the drawn geometry
+            assert!(!depths_inside(&c, &drawn), "sphere clip should miss (ortho={ortho})");
+            c.clip_box = Some((Vec3::splat(-80.0), Vec3::splat(80.0)));
+            assert!(depths_inside(&c, &drawn), "ortho={ortho}");
+            let (near, far) = c.clip_range();
+            assert!(near > 0.0 && far > near);
+            if !ortho {
+                assert!(near >= c.distance * 0.002);
+            }
+        }
+    }
+
+    #[test]
+    fn clip_near_stays_positive_with_eye_inside_the_box() {
+        let mut c = cam();
+        c.distance = 1.0;
+        c.clip_box = Some((Vec3::splat(-500.0), Vec3::splat(500.0)));
+        let (near, far) = c.clip_range();
+        assert!(near > 0.0 && far > near);
     }
 
     fn cam() -> Camera {
