@@ -1,7 +1,7 @@
 //! The floating Section checkbox by the view cube's home button, at 480, 800
-//! and 1440 px wide: it cuts the model in half (caps drawn), the card under the
-//! cube picks the axis, drags or nudges the cut and flips the kept half, and
-//! neither the checkbox nor the card covers the cube or its rotate buttons.
+//! and 1440 px wide: it cuts the model in half (caps drawn), the bar above the
+//! view bar picks the axis, drags or nudges the cut and flips the kept half, and
+//! neither the checkbox nor the bar covers the cube, its rotate buttons or the view bar.
 //! Snapshots land in `tests/snapshots/` (written, not compared).
 //! Run with `cargo test -p easycad --test ui_section`.
 
@@ -102,14 +102,20 @@ fn run(w: f32, panes: bool) {
     }
     snap(&mut h, &format!("section_{tag}"));
 
-    // the card: under the cube's rotate grid, inside the view
+    // the bar: directly above the view bar, inside the viewport, clear of the cube
     let flip = h.get_by_label("Flip").rect();
     let x = h.get_by_label("X").rect();
+    let view_bar = ["Overhang", "More view options"]
+        .iter()
+        .find_map(|l| h.query_by_label(l).map(|n| n.rect()))
+        .expect("view bar");
     for r in [flip, x] {
-        assert!(!r.intersects(cube), "{tag}: card control {r:?} over the cube {cube:?}");
-        assert!(r.top() > cube.bottom(), "{tag}: card below the cube: {r:?}");
+        assert!(!r.intersects(cube), "{tag}: bar control {r:?} over the cube {cube:?}");
+        assert!(r.bottom() <= view_bar.top(), "{tag}: bar above the view bar: {r:?} vs {view_bar:?}");
         assert!(r.left() >= vp.left() && r.right() <= vp.right(), "{tag}: {r:?} outside {vp:?}");
+        assert!(r.top() > vp.bottom() - 54.0 - 90.0, "{tag}: bar sits just above the view bar: {r:?}");
     }
+    assert!((flip.right() + x.left() - 2.0 * vp.center().x).abs() < 120.0 || w < 800.0, "{tag}: bar centred");
 
     // axis, nudge, flip each recut the model
     let s0 = h.state().section.unwrap();
@@ -119,10 +125,10 @@ fn run(w: f32, panes: bool) {
     let s1 = h.state().section.unwrap();
     assert_eq!(s1.axis, (s0.axis + 1) % 3, "{tag}: axis");
     assert!(!h.state().model.as_ref().unwrap().caps.is_empty());
-    // the card's "+" (Parameters has its own "+ Add" row buttons)
+    // the bar's "+" (Parameters has its own "+ Add" row buttons)
     let plus = h
         .query_all_by_label("+")
-        .find(|n| n.rect().top() > cube.bottom() && n.rect().center().y < flip.bottom() + 60.0)
+        .find(|n| n.rect().bottom() <= view_bar.top() && n.rect().top() > view_bar.top() - 120.0)
         .expect("nudge button");
     plus.click();
     h.run_steps(2);
@@ -160,4 +166,26 @@ fn section_checkbox_at_800() {
 fn section_checkbox_at_1440() {
     let _serial = serial();
     run(1440.0, true);
+}
+
+/// Section turned on from the app side (the view bar's toggle, the shortcut and
+/// MCP all end in `toggle_section`) shows the same bar; Y in it cuts across Y.
+#[test]
+fn section_bar_follows_the_toggle_and_y_cuts_across_y() {
+    let _g = serial();
+    let cfg = config("bar_y");
+    let mut h = harness(800.0, &cfg);
+    assert!(h.query_by_label("Flip").is_none(), "no bar while section is off");
+    h.state_mut().toggle_section();
+    settle(&mut h);
+    assert!(h.query_by_label("Flip").is_some(), "bar shown with section on");
+    h.get_by_label("Y").click();
+    settle(&mut h);
+    assert_eq!(h.state().section.unwrap().axis, 1, "Y picked");
+    assert!(!h.state().model.as_ref().unwrap().caps.is_empty());
+    snap(&mut h, "section_bar_y");
+    h.state_mut().toggle_section();
+    settle(&mut h);
+    assert!(h.query_by_label("Flip").is_none(), "bar gone with section off");
+    let _ = std::fs::remove_dir_all(&cfg);
 }
