@@ -2142,3 +2142,45 @@ fn dialog_sketch_is_drawn_while_extrude_dialog_is_open() {
         Some(false)
     );
 }
+
+/// The face of the first body whose outward normal best matches `n`.
+fn face_key(app: &EasyCadApp, n: glam::DVec3) -> easycad_app::pickstack::PickKey {
+    use easycad_app::pickstack::{PickKey, PickKind};
+    let m = app.model.as_ref().unwrap();
+    let b = m.bodies.iter().find(|b| !b.body.reference).expect("body");
+    let f = b.faces.iter().max_by(|a, c| a.normal.dot(n).total_cmp(&c.normal.dot(n))).unwrap();
+    PickKey { body: b.body.id, kind: PickKind::Face(f.index) }
+}
+
+#[test]
+fn fillet_dialog_takes_face_picks() {
+    use easycad_model::feature::FeatureKind;
+    use easycad_model::select::EdgeSelector;
+    let _serial = serial();
+    let mut h = harness(box_doc());
+    let top = face_key(h.state(), glam::DVec3::Z);
+    let bottom = face_key(h.state(), glam::DVec3::NEG_Z);
+    // a face selected outside the dialog pre-fills it
+    h.state_mut().selection = vec![top];
+    h.state_mut().open_dialog(easycad_app::dialogs::DialogKind::Fillet);
+    h.run_steps(2);
+    assert_eq!(h.state().dialog.as_ref().unwrap().picked(), vec![top]);
+    // the filter lets faces through; a click on the second face adds it, again removes it
+    let f = h.state().filter;
+    assert!(f.faces && f.edges);
+    let model = h.state().model.clone();
+    let d = h.state_mut().dialog.as_mut().unwrap();
+    assert!(d.on_pick(bottom, model.as_deref()));
+    assert_eq!(d.picked(), vec![top, bottom]);
+    assert!(d.on_pick(bottom, model.as_deref()));
+    assert!(d.on_pick(bottom, model.as_deref()));
+    assert_eq!(d.picked(), vec![top, bottom]);
+    click_ok(&mut h);
+    let fillet = h.state().doc.data.features.iter().find_map(|f| match &f.kind {
+        FeatureKind::Fillet { edges, .. } => Some(edges.clone()),
+        _ => None,
+    });
+    let edges = fillet.expect("a fillet feature");
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().all(|e| matches!(e, EdgeSelector::OfFace(_))));
+}
