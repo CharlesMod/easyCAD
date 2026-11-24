@@ -597,7 +597,6 @@ fn build_frame(
     ppp: f32,
 ) -> Frame3D {
     let size = Vec2::new(rect.width(), rect.height());
-    let cam = &app.camera;
     let forced = crate::sketch_view::dialog_sketches(app);
     let mut bodies = Vec::new();
     let explode = explode_offset(app, shown);
@@ -782,23 +781,7 @@ fn build_frame(
             center: [bb.center().x as f32, bb.center().y as f32],
         }
     });
-    let light = (cam.up() * 0.8 + cam.right() * -0.35 - cam.forward() * 0.6).normalize();
-    Frame3D {
-        size_px: [
-            (rect.width() * ppp).round().max(1.0) as u32,
-            (rect.height() * ppp).round().max(1.0) as u32,
-        ],
-        view_proj: cam.view_proj(size),
-        eye: cam.eye(),
-        forward: cam.forward(),
-        ortho: cam.ortho,
-        light,
-        background: srgba(theme::VIEWPORT),
-        mode: app.display,
-        edge_color: srgba(theme::EDGE_DARK),
-        bodies,
-        highlights,
-        sketches: crate::sketch_view::draw_list(app)
+    let sketches: Vec<DrawBody> = crate::sketch_view::draw_list(app)
             .into_iter()
             .map(|(id, mesh)| DrawBody {
                 mesh,
@@ -830,9 +813,55 @@ fn build_frame(
                 model: glam::Mat4::IDENTITY,
                 top: false,
             }))
-            .collect(),
+            .collect();
+    let mut cam_owned = app.camera.clone();
+    cam_owned.clip_box = drawn_bounds(&bodies, &highlights, &sketches);
+    let cam = &cam_owned;
+    let light = (cam.up() * 0.8 + cam.right() * -0.35 - cam.forward() * 0.6).normalize();
+    Frame3D {
+        size_px: [
+            (rect.width() * ppp).round().max(1.0) as u32,
+            (rect.height() * ppp).round().max(1.0) as u32,
+        ],
+        view_proj: cam.view_proj(size),
+        eye: cam.eye(),
+        forward: cam.forward(),
+        ortho: cam.ortho,
+        light,
+        background: srgba(theme::VIEWPORT),
+        mode: app.display,
+        edge_color: srgba(theme::EDGE_DARK),
+        bodies,
+        highlights,
+        sketches,
         grid,
     }
+}
+
+/// World AABB of every mesh drawn this frame (bodies, highlights, sketches and overlays).
+fn drawn_bounds(
+    bodies: &[DrawBody],
+    highlights: &[crate::viewport::gpu::FaceHighlight],
+    sketches: &[DrawBody],
+) -> Option<(Vec3, Vec3)> {
+    let mut mn = Vec3::splat(f32::MAX);
+    let mut mx = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let mut add = |mesh: &easycad_model::occt::Mesh, m: &glam::Mat4| {
+        for p in &mesh.positions {
+            let q = m.transform_point3(Vec3::from_array(*p));
+            mn = mn.min(q);
+            mx = mx.max(q);
+            any = true;
+        }
+    };
+    for b in bodies.iter().chain(sketches) {
+        add(&b.mesh, &b.model);
+    }
+    for h in highlights {
+        add(&h.mesh, &h.model);
+    }
+    any.then_some((mn, mx))
 }
 
 #[allow(clippy::too_many_arguments)]
