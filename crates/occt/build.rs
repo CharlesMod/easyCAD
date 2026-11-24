@@ -48,6 +48,9 @@ fn main() {
     }
     if std::env::var("TARGET").unwrap().contains("windows") {
         println!("cargo:rustc-link-lib=dylib=user32");
+        // Image_AlienPixMap (TKService) reads/writes images through WIC
+        println!("cargo:rustc-link-lib=dylib=windowscodecs");
+        println!("cargo:rustc-link-lib=dylib=ole32");
     }
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=cpp/shim.cpp");
