@@ -1,2 +1,3 @@
 /target
 *.step.tmp
+/dist

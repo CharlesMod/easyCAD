@@ -78,6 +78,11 @@ EOF
   *) echo "unknown kind: $KIND" >&2; exit 2 ;;
 esac
 
+# License texts: easyCAD's own (LGPL-2.1) and every bundled third party's.
+test -f /out/THIRD-PARTY-NOTICES.html || { echo "missing /out/THIRD-PARTY-NOTICES.html (scripts/notices.sh)" >&2; exit 1; }
+cp /src/LICENSE "$PKG/LICENSE.txt"
+cp /out/THIRD-PARTY-NOTICES.html "$PKG/THIRD-PARTY-NOTICES.html"
+
 rm -f "$ZIP"
 ( cd "$STAGE" && zip -qr "$ZIP" easyCAD )
 file "$PKG"/* | sed 's|^.*/||'

@@ -16,11 +16,16 @@ Output in `dist/`:
 | `easyCAD-<ver>-<sha>-windows-x86_64.zip` | `easyCAD.exe` (static, no DLLs, no console window) |
 | `easyCAD-<ver>-<sha>-all-platforms.zip` | the three zips above |
 
+Every package also carries `LICENSE` and `THIRD-PARTY-NOTICES.html` (written by
+`scripts/notices.sh`: each Rust crate's license plus OpenCascade's LGPL exception).
+
 ### One-time setup on the Mac
 1. Xcode Command Line Tools: `xcode-select --install`
 2. Homebrew packages: `brew install cmake`
 3. Rust: https://rustup.rs (the script adds the macOS targets itself)
 4. Docker Desktop (for the Linux and Windows builds), running.
+5. cargo-about, for the license notices every package carries:
+   `cargo install --locked cargo-about --features cli`
 
 ### How it builds
 - **macOS:** native `cargo build --release` for each arch in `MACOS_ARCHS`, then `lipo` into a

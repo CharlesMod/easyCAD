@@ -34,6 +34,13 @@ Fully offline.
 - **Selection that works:** a pick stack under the cursor (Tab cycles hidden faces, no
   press-and-hold), a full view cube (26 regions, 15° steps, home), and Fusion navigation.
 
+## Download
+
+Prebuilt zips for macOS (universal), Linux x86_64 and Windows x86_64 are on the
+[Releases](https://github.com/CharlesMod/easyCAD/releases) page. They are unsigned: on macOS,
+right-click the app and choose **Open** the first time; on Windows, SmartScreen needs
+**More info → Run anyway**. The Windows build is new and lightly tested.
+
 ## Build
 
 ```bash
@@ -60,4 +67,9 @@ folders still open.
 ## License
 
 [LGPL-2.1-only](LICENSE), matching OpenCascade (which is LGPL-2.1 with an additional exception,
-see its sources).
+see its sources
+and [licenses/OCCT_LGPL_EXCEPTION.txt](licenses/OCCT_LGPL_EXCEPTION.txt)). Release packages include
+`THIRD-PARTY-NOTICES.html` with every bundled dependency's license.
+
+Issues and pull requests are welcome at
+[github.com/CharlesMod/easyCAD/issues](https://github.com/CharlesMod/easyCAD/issues).

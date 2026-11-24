@@ -35,6 +35,9 @@ TAG="${VERSION}-${SHA}"
 DIST="$REPO/dist"
 mkdir -p "$DIST"
 
+# Third-party license notices, bundled into every package (needs cargo-about).
+"$REPO/scripts/notices.sh" "$DIST/THIRD-PARTY-NOTICES.html"
+
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found. $2"; }
@@ -73,6 +76,8 @@ build_macos() {
   local stage; stage="$(mktemp -d)"
   local app="$stage/easyCAD.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+  cp "$DIST/THIRD-PARTY-NOTICES.html" "$app/Contents/Resources/THIRD-PARTY-NOTICES.html"
   lipo -create "${bins[@]}" -output "$app/Contents/MacOS/easycad"
   strip -x "$app/Contents/MacOS/easycad"
   cat > "$app/Contents/Info.plist" <<PLIST

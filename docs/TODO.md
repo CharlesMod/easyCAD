@@ -7,12 +7,12 @@ validation: nobody has used it by hand on real hardware yet.
 Legend: **[you]** needs a human with a Mac/printer, **[eng]** engine work, **[ui]** app work.
 
 ## 1. Get it somewhere safe and building everywhere
-- [ ] Push to GitHub (`CharlesMod/easycad`, private) as `main`.
+- [x] Public on GitHub: `CharlesMod/easyCAD`, `main`.
 - [ ] Reconcile the in-flight worker changes (the speed work, interference/mate wiring) with the
       rename and commit them. The helper `tools/rename-casework-to-easycad.sh` rewrites old
       names in any older branch.
-- [ ] **[you]** Build on the Mac: `scripts/build-release.sh`. Only the Linux leg has been tested.
-      Expect to fix MinGW link errors for the Windows cross-build and macOS universal-binary details.
+- [x] **[you]** Build on the Mac: `scripts/build-release.sh`. macOS, Linux and Windows zips build;
+      the Windows build has not been run on Windows yet.
 - [ ] **[you]** Run on a real GPU (Mac Metal first): rendering, 60 fps orbit, native file dialogs,
       HiDPI, trackpad navigation, shortcuts. So far only a software GPU under Xvfb has been used.
 

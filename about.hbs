@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>easyCAD third-party notices</title>
+<style>body{font-family:sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style>
+</head><body>
+<h1>easyCAD third-party notices</h1>
+<p>easyCAD is free software under the GNU Lesser General Public License v2.1 (see LICENSE).
+Its complete source, including the build scripts needed to relink it, is at
+<a href="https://github.com/CharlesMod/easyCAD">github.com/CharlesMod/easyCAD</a>.</p>
+
+<h2>Open CASCADE Technology 7.8</h2>
+<p>easyCAD links Open CASCADE Technology (OCCT) statically. OCCT is © OPEN CASCADE SAS and is
+licensed under the GNU LGPL v2.1 with the Open CASCADE exception below. Its source is at
+<a href="https://github.com/Open-Cascade-SAS/OCCT">github.com/Open-Cascade-SAS/OCCT</a>; easyCAD
+builds it from the <code>occt-sys</code> 7.8.1 crate. The LGPL v2.1 text is the LICENSE file
+shipped with easyCAD.</p>
+<pre>@@OCCT_EXCEPTION@@</pre>
+
+<h2>Rust crates</h2>
+<ul>
+{{#each overview}}<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}</ul>
+{{#each licenses}}
+<h3 id="{{id}}">{{name}}</h3>
+<p>Used by:</p>
+<ul>{{#each used_by}}<li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body></html>

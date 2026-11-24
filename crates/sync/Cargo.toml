@@ -4,6 +4,9 @@ description = "Google Drive sync (OAuth2 + Drive v3 + local-first sync engine) f
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 async-trait = "0.1"

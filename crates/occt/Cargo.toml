@@ -4,6 +4,9 @@ description = "Narrow cxx bridge to the OpenCascade kernel for easyCAD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 cxx = "1"
