@@ -970,7 +970,10 @@ impl EasyCadApp {
             // a new sketch first asks which plane or flat face it goes on
             None => {
                 self.dialog = None;
-                self.plane_pick = Some(crate::plane_pick::PlanePick::default());
+                self.plane_pick = Some(crate::plane_pick::PlanePick {
+                    scene_was_empty: crate::ui_welcome::data_is_empty(&self.doc.data),
+                    ..Default::default()
+                });
                 None
             }
         };
@@ -1736,6 +1739,10 @@ impl eframe::App for EasyCadApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // geometry arriving ends a pick-a-plane begun in an empty scene
+        if self.plane_pick.as_ref().is_some_and(|p| p.scene_was_empty) && !crate::ui_welcome::data_is_empty(&self.doc.data) {
+            self.plane_pick = None;
+        }
         if std::env::var_os("EASYCAD_DEBUG_REPAINT").is_some() {
             debug_repaint(ui.ctx());
         }

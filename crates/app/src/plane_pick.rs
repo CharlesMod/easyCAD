@@ -29,6 +29,9 @@ pub enum Target {
 #[derive(Clone, Debug, Default)]
 pub struct PlanePick {
     pub hover: Option<Target>,
+    /// The document had no geometry when the pick began: geometry arriving later
+    /// (an import, a wizard, Claude) ends the pick, the planes having served.
+    pub scene_was_empty: bool,
 }
 
 pub const HINT: &str = "Click a plane or flat face to sketch on (Esc to cancel)";

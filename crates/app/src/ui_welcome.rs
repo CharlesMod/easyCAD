@@ -68,12 +68,17 @@ impl Default for WizardUi {
 
 /// Is the document empty enough to greet the user?
 pub fn is_empty(app: &EasyCadApp) -> bool {
-    let d = &app.doc.data;
+    data_is_empty(&app.doc.data) && app.dialog.is_none()
+}
+
+/// No geometry of any kind: features (mesh bodies are features), sketches,
+/// imports, components (an assembly-only document) or placed occurrences.
+pub fn data_is_empty(d: &easycad_model::document::DocData) -> bool {
     d.features.is_empty()
         && d.sketches.is_empty()
         && d.imports.is_empty()
+        && d.components.is_empty()
         && d.occurrences.is_empty()
-        && app.dialog.is_none()
 }
 
 /// Welcome card over an empty viewport.
@@ -514,4 +519,18 @@ fn preview(ui: &mut Ui, r: Rect, w: &WizardUi) {
         theme::mono(11.0),
         theme::TEXT_MUTED,
     );
+}
+
+#[cfg(test)]
+mod empty_tests {
+    use super::data_is_empty;
+    use easycad_model::document::Document;
+
+    #[test]
+    fn a_document_with_only_components_is_not_empty() {
+        let mut d = Document::new("asm");
+        assert!(data_is_empty(&d.data));
+        d.add_component("Part");
+        assert!(!data_is_empty(&d.data));
+    }
 }

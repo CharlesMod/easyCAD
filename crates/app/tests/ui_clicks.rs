@@ -2488,3 +2488,27 @@ fn play_positions_until_the_view_moves() {
     assert_eq!(h.state().pose, at, "and stays there");
     assert_eq!(h.state().model.as_ref().unwrap().pose, at);
 }
+
+#[test]
+fn geometry_arriving_ends_the_empty_scene_plane_pick() {
+    let _g = serial();
+    let mut h = harness(easycad_model::document::Document::new("empty"));
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_some(), "S asks for a plane");
+    assert_eq!(easycad_app::plane_pick::draw_list(h.state()).len(), 3, "the origin planes are drawn");
+    let dir = std::env::temp_dir().join(format!("easycad-clicks-planepick-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let step = dir.join("board.step");
+    std::fs::write(&step, easycad_app::sample::pcb_step()).unwrap();
+    h.state_mut().import_path(&step).expect("import the STEP");
+    let _ = std::fs::remove_file(&step);
+    let _ = std::fs::remove_dir(&dir);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_none(), "the pick ends once the scene has geometry");
+    assert!(easycad_app::plane_pick::draw_list(h.state()).is_empty(), "no origin plane items are drawn");
+    // a sketch begun on purpose after geometry exists still asks for its plane
+    h.key_press(egui::Key::S);
+    h.run_steps(3);
+    assert!(h.state().plane_pick.is_some());
+}
