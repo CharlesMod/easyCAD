@@ -6,6 +6,8 @@
 //! as a function of depth (a pixel radius in perspective grows linearly with
 //! distance: `tol(t) = constant + per_unit_depth * t`).
 
+use std::collections::HashMap;
+
 use glam::Vec3;
 use occt::Mesh;
 
@@ -88,6 +90,12 @@ pub struct BodyPicker {
     nodes: Vec<Node>,
     segs: Vec<(Vec3, Vec3, u32)>,
     seg_bb: Aabb,
+    /// Faces each edge borders, inferred from shared mesh vertices (edge id -> faces).
+    /// Edges missing here have unknown adjacency.
+    edge_faces: HashMap<u32, Vec<u32>>,
+    /// Measured tessellation sag: how far a tessellated face may sit in front of
+    /// the exact surface (and so the exact edges on it).
+    defl: f32,
 }
 
 const LEAF: usize = 4;
@@ -111,7 +119,13 @@ impl BodyPicker {
                 segs.push((a, b, e.edge));
             }
         }
-        BodyPicker { body, tris, tri_face: mesh.tri_face.clone(), order, nodes, segs, seg_bb }
+        let (edge_faces, defl) = adjacency_and_sag(mesh);
+        BodyPicker { body, tris, tri_face: mesh.tri_face.clone(), order, nodes, segs, seg_bb, edge_faces, defl }
+    }
+
+    /// Faces the edge borders, when known.
+    fn faces_of_edge(&self, edge: u32) -> Option<&[u32]> {
+        self.edge_faces.get(&edge).map(|v| v.as_slice())
     }
 
     /// All hits on this body (unsorted).
@@ -157,6 +171,51 @@ impl BodyPicker {
             }
         }
     }
+}
+
+/// Infer edge -> bordering faces from mesh vertices shared by an edge polyline and
+/// the triangles of a face, and estimate the tessellation sag from the vertex
+/// normals (`L * angle / 8` per triangle side, the sagitta of a circular chord).
+fn adjacency_and_sag(mesh: &Mesh) -> (HashMap<u32, Vec<u32>>, f32) {
+    let mut bb = Aabb::empty();
+    for p in &mesh.positions {
+        bb.grow(Vec3::from_array(*p));
+    }
+    let diag = if mesh.positions.is_empty() { 0.0 } else { (bb.max - bb.min).length() };
+    let cell = (diag * 1e-5).max(1e-6);
+    let key = |p: [f32; 3]| [(p[0] / cell).round() as i64, (p[1] / cell).round() as i64, (p[2] / cell).round() as i64];
+    let mut at: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    let mut sag = 0.0f32;
+    for (ti, t) in mesh.indices.iter().enumerate() {
+        let f = mesh.tri_face.get(ti).copied().unwrap_or(0);
+        for k in 0..3 {
+            let (i, j) = (t[k] as usize, t[(k + 1) % 3] as usize);
+            let v = at.entry(key(mesh.positions[i])).or_default();
+            if !v.contains(&f) {
+                v.push(f);
+            }
+            if let (Some(ni), Some(nj)) = (mesh.normals.get(i), mesh.normals.get(j)) {
+                let ang = Vec3::from_array(*ni).dot(Vec3::from_array(*nj)).clamp(-1.0, 1.0).acos();
+                let l = Vec3::from_array(mesh.positions[i]).distance(Vec3::from_array(mesh.positions[j]));
+                sag = sag.max(l * ang / 8.0);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for e in &mesh.edges {
+        let mut faces: Option<Vec<u32>> = None;
+        for p in &e.points {
+            let here = at.get(&key(*p)).cloned().unwrap_or_default();
+            faces = Some(match faces {
+                None => here,
+                Some(f) => f.into_iter().filter(|x| here.contains(x)).collect(),
+            });
+        }
+        if let Some(f) = faces.filter(|f| !f.is_empty()) {
+            out.insert(e.edge, f);
+        }
+    }
+    (out, sag.min(diag * 0.05))
 }
 
 fn centroid(t: &[Vec3; 3]) -> Vec3 {
@@ -231,6 +290,19 @@ fn ray_segment(o: Vec3, d: Vec3, a: Vec3, b: Vec3) -> Option<(f32, Vec3, f32)> {
     Some((t, q, dist))
 }
 
+/// How far behind a face hit an edge hit may lie and still beat that face.
+/// Edge known to border the face: a few pick radii plus the mesh sag (the
+/// tessellated face leads the exact edge by up to the sag, and a grazing view
+/// stretches the depth gap). Adjacency unknown: only a sliver, so an edge truly
+/// behind other geometry never beats the front face.
+fn edge_slack(tol: EdgeTolerance, t: f32, defl: f32, adjacent_known: bool) -> f32 {
+    if adjacent_known {
+        4.0 * tol.at(t) + 2.0 * defl + 1e-3
+    } else {
+        0.25 * tol.at(t) + 1e-3
+    }
+}
+
 /// Picker over several bodies.
 pub struct Picker {
     pub bodies: Vec<BodyPicker>,
@@ -249,7 +321,10 @@ impl Picker {
         for b in &self.bodies {
             b.pick(origin, dir, tol, &mut hits);
         }
-        hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+        // Nearest first; an exact depth tie goes to the edge (edges sit on faces).
+        hits.sort_by(|a, b| {
+            a.t.total_cmp(&b.t).then_with(|| matches!(b.kind, HitKind::Edge(_)).cmp(&matches!(a.kind, HitKind::Edge(_))))
+        });
         let mut out: Vec<Hit> = Vec::new();
         for h in hits {
             let dup = out.iter().rev().take_while(|o| h.t - o.t < 1e-3 + 1e-6 * h.t).any(|o| o.body == h.body && o.kind == h.kind);
@@ -257,12 +332,32 @@ impl Picker {
                 out.push(h);
             }
         }
-        // Prefer an edge over a face hit at the same depth (edges sit on faces).
-        out.sort_by(|a, b| {
-            let ta = (a.t * 1e3).round();
-            let tb = (b.t * 1e3).round();
-            ta.total_cmp(&tb).then_with(|| matches!(b.kind, HitKind::Edge(_)).cmp(&matches!(a.kind, HitKind::Edge(_))))
-        });
+        // Edge priority: an edge hit moves in front of the nearest face hit it
+        // outranks. It outranks a face of its own body when the edge borders that
+        // face (or adjacency is unknown) and the face is not in front of it by
+        // more than the slack (see `edge_slack`). The 3D depth of a tessellated
+        // face can lead the exact edge by the mesh sag, so depth alone is not enough.
+        let mut i = 0;
+        while i < out.len() {
+            if let HitKind::Edge(e) = out[i].kind {
+                let eh = out[i];
+                let bp = self.bodies.iter().find(|b| b.body == eh.body);
+                let adj = bp.and_then(|b| b.faces_of_edge(e));
+                let slack = edge_slack(tol, eh.t, bp.map_or(0.0, |b| b.defl), adj.is_some());
+                let first = (0..i).find(|&j| {
+                    let f = out[j];
+                    match f.kind {
+                        HitKind::Face(fid) => f.body == eh.body && eh.t - f.t <= slack && adj.is_none_or(|a| a.contains(&fid)),
+                        HitKind::Edge(_) => false,
+                    }
+                });
+                if let Some(j) = first {
+                    let h = out.remove(i);
+                    out.insert(j, h);
+                }
+            }
+            i += 1;
+        }
         out
     }
 
@@ -316,5 +411,28 @@ mod tests {
         assert!(hits.iter().any(|h| h.kind == HitKind::Edge(0)));
         // miss
         assert!(p.pick_all(Vec3::new(5.0, 5.0, 10.0), Vec3::NEG_Z, EdgeTolerance::ortho(0.01)).is_empty());
+    }
+
+    /// A quad at z = 0 and a floating edge (no shared vertices, so adjacency is
+    /// unknown) at exactly the same depth: the tie goes to the edge. One 0.02 behind
+    /// is outside the sliver slack and the face stays first.
+    #[test]
+    fn exact_depth_tie_goes_to_the_edge() {
+        let mut m = Mesh::default();
+        m.positions.extend([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]);
+        m.normals.extend([[0.0, 0.0, 1.0]; 4]);
+        m.indices.extend([[0, 1, 2], [0, 2, 3]]);
+        m.tri_face.extend([0, 0]);
+        m.edges.push(EdgePolyline { edge: 7, points: vec![[0.3, 0.5, 0.0], [0.8, 0.5, 0.0]] });
+        let id = BodyId::of(FeatureId(1));
+        let p = Picker::new([(id, &m)]);
+        let tol = EdgeTolerance::ortho(0.05);
+        let hits = p.pick_all(Vec3::new(0.5, 0.52, 10.0), Vec3::NEG_Z, tol);
+        assert_eq!(hits[0].kind, HitKind::Edge(7), "{hits:?}");
+        assert_eq!(hits[1].kind, HitKind::Face(0));
+        m.edges[0].points = vec![[0.3, 0.5, -0.02], [0.8, 0.5, -0.02]];
+        let p = Picker::new([(id, &m)]);
+        let hits = p.pick_all(Vec3::new(0.5, 0.52, 10.0), Vec3::NEG_Z, tol);
+        assert_eq!(hits[0].kind, HitKind::Face(0), "{hits:?}");
     }
 }
