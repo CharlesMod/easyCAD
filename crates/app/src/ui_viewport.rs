@@ -431,9 +431,10 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
         }
     };
     filter_bar(app, ui, rect, filter_y, filter_room);
+    section_bar(app, ui, rect);
     display_bar(app, ui, rect);
     cube(app, ui, rect, dialog_w);
-    section_toggle(app, ui, rect, cube_at, toggle);
+    section_toggle(app, ui, toggle);
     if app.regenerating() && app.model.is_some() {
         let r = Rect::from_center_size(pos2(rect.center().x, rect.top() + 26.0), vec2(150.0, 26.0));
         painter.rect(
@@ -1112,10 +1113,10 @@ fn section_toggle_rect(ui: &Ui, rect: Rect, cube_at: Pos2) -> Rect {
     Rect::from_min_size(pos2(x, y), vec2(w, TOGGLE_H))
 }
 
-/// The floating "Section" checkbox by the view cube's home button and, while
+/// The floating "Section" checkbox by the view cube's home button (the cut's
 /// on, the cut's controls in a card under the cube's rotate buttons: axis,
 /// position (drag, or nudge a millimetre at a time), which half to keep.
-fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, cube_at: Pos2, at: Rect) {
+fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, at: Rect) {
     let mut on = app.section.is_some();
     egui::Area::new(egui::Id::unique("section_toggle"))
         .order(egui::Order::Middle)
@@ -1136,26 +1137,35 @@ fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, cube_at: Pos2, 
     if on != app.section.is_some() {
         app.toggle_section();
     }
+}
+
+/// Where the view bar's last frame put it (its width sets the section bar's).
+fn display_bar_id() -> egui::Id {
+    egui::Id::new("display_bar_width")
+}
+
+/// Section controls in a bar directly above the view bar, centred on it, as wide
+/// as it (at least 330 px where the viewport has room): axis, flip, and the cut's
+/// position as a slider with a millimetre nudge each side and its value. Shown
+/// whenever section view is on, however it was turned on.
+fn section_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     let Some(mut s) = app.section else { return };
     let bb = app.section_bbox.or_else(|| app.model.as_ref()?.bbox);
-    // under the cube's step grid, right-aligned with the cube (left-aligned when
-    // the cube sits at the viewport's left edge); never over the rotate buttons
-    let top = cube_at.y + viewcube::widget_height(CUBE_W) + 8.0;
     let room = (rect.width() - 24.0).max(120.0);
-    let w = room.min(236.0);
-    let cube_left = cube_at.x < rect.left() + 13.0;
-    let x = if cube_left { cube_at.x } else { (cube_at.x + CUBE_W - w).max(rect.left() + 12.0) };
-    let narrow = w < 200.0;
-    egui::Area::new(egui::Id::unique("section_card"))
+    let bar_w: f32 = ui.ctx().data(|d| d.get_temp::<f32>(display_bar_id())).unwrap_or(0.0);
+    let w = bar_w.max(330.0).min(room);
+    let narrow = w < 300.0;
+    egui::Area::new(egui::Id::unique("section_bar"))
         .order(egui::Order::Middle)
-        .fixed_pos(pos2(x, top))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(rect.center().x, rect.bottom() - 54.0 - 6.0))
         .show(ui.ctx(), |ui| {
-            overlay_frame().inner_margin(Margin::same(6)).show(ui, |ui| {
-                ui.set_width(w - 14.0);
+            overlay_frame().show(ui, |ui| {
+                ui.set_width(w - 10.0);
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 ui.horizontal(|ui| {
                     if !narrow {
-                        ui.label(RichText::new("CUT").size(10.5).color(theme::TEXT_LABEL));
+                        ui.label(RichText::new("SECTION").size(10.5).color(theme::TEXT_LABEL));
                     }
                     for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
                         if widgets::seg(ui, n, s.axis == i).on_hover_text(format!("Cut across {n}")).clicked() && s.axis != i {
@@ -1169,14 +1179,14 @@ fn section_toggle(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect, cube_at: Pos2, 
                         }
                     });
                 });
-                // position: the slider, a millimetre nudge each side, the value
+                // position: a millimetre nudge each side of the slider, then the value
                 let span = bb.map_or(1.0, |b| (b.max[s.axis] - b.min[s.axis]).max(1e-6)) as f32;
                 let step = 1.0 / span;
                 ui.horizontal(|ui| {
                     if widgets::seg(ui, "−", false).on_hover_text("Nudge the cut 1 mm back").clicked() {
                         s.at = (s.at - step).clamp(0.0, 1.0);
                     }
-                    let mm_w = if narrow { 0.0 } else { 58.0 };
+                    let mm_w = if narrow { 0.0 } else { 62.0 };
                     let slider_w = (ui.available_width() - 34.0 - mm_w).max(30.0);
                     ui.add_sized(vec2(slider_w, 22.0), egui::Slider::new(&mut s.at, 0.0..=1.0).show_value(false))
                         .on_hover_text("Drag the cut across the model");
@@ -1225,7 +1235,7 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
     } else {
         2
     };
-    egui::Area::new(egui::Id::unique("display"))
+    let shown = egui::Area::new(egui::Id::unique("display"))
         .order(egui::Order::Middle)
         .pivot(egui::Align2::CENTER_TOP)
         .fixed_pos(pos2(rect.center().x, rect.bottom() - 54.0))
@@ -1294,6 +1304,8 @@ fn display_bar(app: &mut EasyCadApp, ui: &mut Ui, rect: Rect) {
                 });
             });
         });
+    let bar_w = shown.response.rect.width();
+    ui.ctx().data_mut(|d| d.insert_temp(display_bar_id(), bar_w));
     crate::ui_positions::panel(app, ui, rect);
 }
 
