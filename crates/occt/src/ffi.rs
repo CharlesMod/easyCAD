@@ -187,6 +187,7 @@ pub mod bridge {
         /// Per-edge radii (`radii.len() == edges.len()`).
         fn fillet(s: &Shape, edges: &[u32], radii: &[f64]) -> Result<UniquePtr<Shape>>;
         fn chamfer(s: &Shape, edges: &[u32], dists: &[f64]) -> Result<UniquePtr<Shape>>;
+        fn remove_faces(s: &Shape, faces: &[u32]) -> Result<UniquePtr<Shape>>;
         fn shell(s: &Shape, faces: &[u32], offset: f64) -> Result<UniquePtr<Shape>>;
         fn draft(
             s: &Shape,

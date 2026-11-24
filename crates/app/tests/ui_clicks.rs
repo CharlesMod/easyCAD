@@ -2329,3 +2329,57 @@ fn fillet_dialog_takes_face_picks() {
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().all(|e| matches!(e, EdgeSelector::OfFace(_))));
 }
+
+/// `box_doc` with its (+x,+y) vertical corner edge filleted.
+fn filleted_box_doc() -> easycad_model::document::Document {
+    use easycad_model::feature::FeatureKind;
+    use easycad_model::select::{EdgeKind, EdgeSelector};
+    let mut doc = box_doc();
+    let edge = EdgeSelector::Hint { midpoint: glam::DVec3::new(30.0, 20.0, 10.0), tangent: glam::DVec3::Z, kind: Some(EdgeKind::Line) };
+    doc.add_feature("Fillet", FeatureKind::Fillet { body: None, edges: vec![edge], radius: 3.0.into(), auto_reduce: false, sets: vec![], skipped: vec![] });
+    doc
+}
+
+#[test]
+fn del_on_a_selected_face_adds_a_delete_face_feature() {
+    use easycad_app::pickstack::{PickKey, PickKind};
+    use easycad_model::feature::FeatureKind;
+    use easycad_model::occt::SurfaceKind;
+    let _serial = serial();
+    let mut h = harness(filleted_box_doc());
+    let m = h.state().model.clone().unwrap();
+    let b = m.bodies.iter().find(|b| !b.body.reference).unwrap();
+    let cyl = b.faces.iter().find(|f| f.kind == SurfaceKind::Cylinder).expect("fillet face");
+    h.state_mut().selection = vec![PickKey { body: b.body.id, kind: PickKind::Face(cyl.index) }];
+    let n = h.state().doc.data.features.len();
+    h.key_press(egui::Key::Delete);
+    settle(&mut h);
+    let feats = &h.state().doc.data.features;
+    assert_eq!(feats.len(), n + 1);
+    assert!(matches!(feats.last().unwrap().kind, FeatureKind::DeleteFace { .. }));
+    assert!(h.state().selection.is_empty());
+    let m = h.state().model.clone().unwrap();
+    let b = m.bodies.iter().find(|b| !b.body.reference).unwrap();
+    assert_eq!(b.faces.len(), 6, "the sharp corner is back");
+    // one undo step takes it away
+    h.state_mut().undo();
+    settle(&mut h);
+    assert_eq!(h.state().doc.data.features.len(), n);
+}
+
+#[test]
+fn a_failing_delete_face_leaves_nothing_behind_and_says_why() {
+    use easycad_model::feature::FeatureKind;
+    let _serial = serial();
+    let mut h = harness(box_doc());
+    let top = face_key(h.state(), glam::DVec3::Z);
+    let n = h.state().doc.data.features.len();
+    h.state_mut().selection = vec![top];
+    h.key_press(egui::Key::Delete);
+    settle(&mut h);
+    let feats = &h.state().doc.data.features;
+    assert_eq!(feats.len(), n);
+    assert!(!feats.iter().any(|f| matches!(f.kind, FeatureKind::DeleteFace { .. })));
+    assert!(h.state().toasts.iter().any(|t| t.warn && t.text.starts_with("Delete face failed")), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    assert!(h.state().doc.data.features.iter().all(|f| h.state().feature_status(f.id).map_or(true, |s| !matches!(s, easycad_model::regen::FeatureStatus::Error(_)))));
+}

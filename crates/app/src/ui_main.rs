@@ -1196,6 +1196,7 @@ pub fn feature_code(k: &FeatureKind) -> (&'static str, Color32) {
         FeatureKind::Fillet { .. } => ("FL", theme::ORANGE_SOFT),
         FeatureKind::Chamfer { .. } => ("CH", theme::ORANGE_SOFT),
         FeatureKind::Shell { .. } => ("SH", theme::ORANGE_SOFT),
+        FeatureKind::DeleteFace { .. } => ("DF", theme::ORANGE_SOFT),
         FeatureKind::Draft { .. } => ("DR", theme::ORANGE_SOFT),
         FeatureKind::Split { .. } => ("SP", theme::ORANGE_SOFT),
         FeatureKind::Rib { .. } => ("RB", theme::GREEN),

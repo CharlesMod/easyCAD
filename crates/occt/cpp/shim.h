@@ -109,6 +109,7 @@ int32_t match_edge(const Shape &s, V3 p, V3 tangent, double tol);
 
 std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const uint32_t> edges, rust::Slice<const double> radii);
 std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges, rust::Slice<const double> dists);
+std::unique_ptr<Shape> remove_faces(const Shape &s, rust::Slice<const uint32_t> faces);
 std::unique_ptr<Shape> shell(const Shape &s, rust::Slice<const uint32_t> faces, double offset);
 std::unique_ptr<Shape> draft(const Shape &s, rust::Slice<const uint32_t> faces, V3 pull,
                              double angle_rad, const Frame &neutral);

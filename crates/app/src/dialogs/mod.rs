@@ -44,6 +44,7 @@ pub enum DialogKind {
     Fillet,
     Chamfer,
     Shell,
+    DeleteFace,
     Draft,
     Split,
     Pattern,
@@ -66,6 +67,7 @@ impl DialogKind {
             DialogKind::Fillet => "Fillet",
             DialogKind::Chamfer => "Chamfer",
             DialogKind::Shell => "Shell",
+            DialogKind::DeleteFace => "Delete face",
             DialogKind::Draft => "Draft",
             DialogKind::Split => "Split body",
             DialogKind::Pattern => "Pattern",
@@ -84,6 +86,7 @@ impl DialogKind {
             DialogKind::Fillet
             | DialogKind::Chamfer
             | DialogKind::Shell
+            | DialogKind::DeleteFace
             | DialogKind::Draft
             | DialogKind::Split => theme::ORANGE_SOFT,
             DialogKind::Boss | DialogKind::Rib | DialogKind::Standoffs | DialogKind::Joint => {
@@ -263,6 +266,12 @@ pub struct ShellD {
     pub outward: bool,
 }
 
+pub struct DeleteFaceD {
+    pub body: Option<BodyId>,
+    pub faces: Vec<(PickKey, FaceSelector, String)>,
+    pub kept: Vec<FaceSelector>,
+}
+
 pub struct DraftD {
     pub body: Option<BodyId>,
     pub faces: Vec<(PickKey, FaceSelector, String)>,
@@ -316,6 +325,7 @@ pub enum Body {
     Revolve(RevolveD),
     Fillet(fillet::FilletD),
     Shell(ShellD),
+    DeleteFace(DeleteFaceD),
     Draft(DraftD),
     Split(SplitD),
     Boss(BossD),
@@ -406,7 +416,7 @@ pub fn face_label(m: Option<&Output>, k: &PickKey) -> String {
     }
 }
 
-fn face_sel(m: Option<&Output>, k: &PickKey) -> Option<FaceSelector> {
+pub(crate) fn face_sel(m: Option<&Output>, k: &PickKey) -> Option<FaceSelector> {
     let PickKind::Face(f) = k.kind else {
         return None;
     };
@@ -564,6 +574,14 @@ impl Dialog {
                     "2"
                 }),
                 outward: false,
+            }),
+            DialogKind::DeleteFace => Body::DeleteFace(DeleteFaceD {
+                body: sel_body(sel, model).or(last_solid(model)),
+                faces: sel
+                    .iter()
+                    .filter_map(|k| face_sel(model, k).map(|s| (*k, s, face_label(model, k))))
+                    .collect(),
+                kept: Vec::new(),
             }),
             DialogKind::Draft => Body::Draft(DraftD {
                 body: sel_body(sel, model).or(last_solid(model)),
@@ -767,6 +785,10 @@ impl Dialog {
                     outward: *outward,
                 }),
             ),
+            FeatureKind::DeleteFace { body, faces } => (
+                DialogKind::DeleteFace,
+                Body::DeleteFace(DeleteFaceD { body: *body, faces: Vec::new(), kept: faces.clone() }),
+            ),
             FeatureKind::Draft {
                 body,
                 faces,
@@ -946,7 +968,7 @@ impl Dialog {
                 edges: true,
                 sketches: false,
             }),
-            DialogKind::Shell | DialogKind::Draft => Some(Filter::FACES_ONLY),
+            DialogKind::Shell | DialogKind::DeleteFace | DialogKind::Draft => Some(Filter::FACES_ONLY),
             DialogKind::Boss => Some(Filter {
                 bodies: false,
                 faces: false,
@@ -1041,6 +1063,14 @@ impl Dialog {
                     thickness: s.thickness.expr(None),
                     outward: s.outward,
                 })
+            }
+            Body::DeleteFace(s) => {
+                let mut faces = s.kept.clone();
+                faces.extend(s.faces.iter().map(|f| f.1.clone()));
+                if faces.is_empty() {
+                    return Err("pick the faces to delete".into());
+                }
+                one(FeatureKind::DeleteFace { body: s.body, faces })
             }
             Body::Draft(s) => {
                 let mut faces = s.kept.clone();
@@ -1198,7 +1228,9 @@ impl Dialog {
     pub fn on_pick(&mut self, key: PickKey, model: Option<&Output>) -> bool {
         match &mut self.body {
             Body::Fillet(f) => f.toggle(key, model),
-            Body::Shell(ShellD { faces, body, .. }) | Body::Draft(DraftD { faces, body, .. }) => {
+            Body::Shell(ShellD { faces, body, .. })
+            | Body::DeleteFace(DeleteFaceD { faces, body, .. })
+            | Body::Draft(DraftD { faces, body, .. }) => {
                 let Some(s) = face_sel(model, &key) else {
                     return false;
                 };
@@ -1241,6 +1273,7 @@ impl Dialog {
         match &self.body {
             Body::Fillet(f) => f.picked(),
             Body::Shell(s) => s.faces.iter().map(|f| f.0).collect(),
+            Body::DeleteFace(s) => s.faces.iter().map(|f| f.0).collect(),
             Body::Draft(s) => s.faces.iter().map(|f| f.0).collect(),
             _ => Vec::new(),
         }
@@ -1437,6 +1470,11 @@ impl Dialog {
                 ch |= face_list(ui, "Faces to remove", &mut s.faces, &mut s.kept);
                 ch |= s.thickness.row(ui, id.with("t"), "Thickness", env);
                 ch |= ui.checkbox(&mut s.outward, "Grow outward").changed();
+            }
+            Body::DeleteFace(s) => {
+                ch |= body_combo(ui, id.with("b"), &mut s.body, &solids, "last solid");
+                ch |= face_list(ui, "Faces to delete", &mut s.faces, &mut s.kept);
+                ui.label(widgets::muted("The neighbouring faces grow to close the gap."));
             }
             Body::Draft(s) => {
                 ch |= body_combo(ui, id.with("b"), &mut s.body, &solids, "last solid");

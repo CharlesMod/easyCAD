@@ -14,7 +14,7 @@ use egui::{Key, Modifiers};
 use crate::adapters;
 use crate::camera::Camera;
 use crate::dialogs::{Dialog, DialogKind};
-use crate::pickstack::{Filter, PickKey, PickStack};
+use crate::pickstack::{Filter, PickKey, PickKind, PickStack};
 use crate::sketch_mode::SketchSession;
 use crate::viewport::gpu::DisplayMode;
 use crate::worker::{Output, Purpose, Worker};
@@ -130,6 +130,9 @@ pub struct EasyCadApp {
     pub hist_diff: Option<easycad_model::branch::HistDiff>,
     /// History chips selected by click (Del deletes them).
     pub hist_sel: Vec<crate::hist_sel::HistItem>,
+    /// A Delete-face feature just added by the Del key, with the document revision it
+    /// was added at: when the model for that revision comes back failed, it is undone.
+    pub pending_delete_face: Option<(FeatureId, u64)>,
     /// A delete waiting on the "dependents" confirm.
     pub delete_ask: Option<crate::hist_sel::DeleteAsk>,
     /// The body whose face a new sketch was placed on, and once committed the
@@ -256,6 +259,7 @@ impl EasyCadApp {
             pending_cycle: 0,
             typing: false,
             hist_sel: Vec::new(),
+            pending_delete_face: None,
             hist_rects: Vec::new(),
             hist_peek: None,
             hist_row_rects: Vec::new(),
@@ -598,7 +602,26 @@ impl EasyCadApp {
                     self.doc.data.refresh_sketch_planes(&out.result);
                     self.doc.data.apply_relinked(&out.result);
                 }
+                let failed = match self.pending_delete_face {
+                    Some((id, rev)) if out.data.revision >= rev => {
+                        self.pending_delete_face = None;
+                        out.result.report(id).and_then(|r| match &r.status {
+                            FeatureStatus::Error(e) => Some(e.clone()),
+                            FeatureStatus::Unresolved(_) => Some("the picked face could not be found".to_string()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                };
                 self.model = Some(Arc::new(out));
+                if let Some(why) = failed {
+                    // a failed delete leaves no broken feature behind
+                    if self.doc.undo_label().is_some_and(|l| l.starts_with("Delete face")) {
+                        self.doc.undo();
+                        self.after_edit();
+                    }
+                    self.warn(format!("Delete face failed: {why}"));
+                }
             }
             Purpose::Drawing => {
                 if let Mode::Drawing(d) = &mut self.mode {
@@ -769,6 +792,46 @@ impl EasyCadApp {
             }
             Err(e) => self.warn(e.to_string()),
         }
+    }
+
+    /// Del on a viewport face selection: add a Delete-face feature for the picked faces
+    /// of one solid body, no dialog, one undo step. False (nothing done) unless the
+    /// selection is only faces of one solid, non-reference body. A feature that fails
+    /// to regenerate is undone and the reason toasted (see `accept`).
+    pub fn delete_selected_faces(&mut self) -> bool {
+        if self.selection.is_empty() || !matches!(self.mode, Mode::Model) {
+            return false;
+        }
+        let body = self.selection[0].body;
+        if self.selection.iter().any(|k| k.body != body || !matches!(k.kind, PickKind::Face(_))) {
+            return false;
+        }
+        let Some(m) = self.model.as_deref() else { return false };
+        if m.body(body).is_none_or(|b| b.reference) {
+            return false;
+        }
+        let mut faces = Vec::new();
+        for k in &self.selection {
+            if let Some(s) = crate::dialogs::face_sel(Some(m), k) {
+                if !faces.contains(&s) {
+                    faces.push(s);
+                }
+            }
+        }
+        if faces.is_empty() {
+            return false;
+        }
+        let id = FeatureId(self.doc.data.next_id);
+        let feat = Feature {
+            id,
+            name: "Delete face".into(),
+            suppressed: false,
+            kind: easycad_model::feature::FeatureKind::DeleteFace { body: Some(body), faces },
+        };
+        self.commit_features("Delete face", vec![feat], None);
+        self.pending_delete_face = Some((id, self.doc.data.revision));
+        self.selection.clear();
+        true
     }
 
     pub fn open_dialog(&mut self, kind: DialogKind) {
@@ -1379,6 +1442,9 @@ impl EasyCadApp {
         }
         if !self.hist_sel.is_empty() && (pressed(Key::Delete) || pressed(Key::Backspace)) {
             self.hist_delete_selected();
+            return;
+        }
+        if self.hist_sel.is_empty() && (pressed(Key::Delete) || pressed(Key::Backspace)) && self.delete_selected_faces() {
             return;
         }
         if !self.hist_sel.is_empty() && pressed(Key::Escape) {

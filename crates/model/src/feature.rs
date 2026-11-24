@@ -213,6 +213,13 @@ pub enum FeatureKind {
         #[serde(default)]
         outward: bool,
     },
+    /// Delete faces and heal the gap from their neighbours (fusion-style): a fillet face
+    /// gives back the sharp edge, a boss's faces give back the flat, a hole wall closes it.
+    DeleteFace {
+        #[serde(default)]
+        body: Option<BodyId>,
+        faces: Vec<FaceSelector>,
+    },
     Draft {
         #[serde(default)]
         body: Option<BodyId>,
@@ -506,6 +513,7 @@ impl FeatureKind {
             FeatureKind::Chamfer { .. } => "Chamfer",
             FeatureKind::Shell { .. } => "Shell",
             FeatureKind::Draft { .. } => "Draft",
+            FeatureKind::DeleteFace { .. } => "Delete face",
             FeatureKind::Rib { .. } => "Rib",
             FeatureKind::ScrewBoss { .. } => "Screw boss",
             FeatureKind::StandoffsFromPcb { .. } => "Standoffs from PCB",

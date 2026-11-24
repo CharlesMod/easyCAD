@@ -456,6 +456,11 @@ impl Shape {
         let off = if outward { thickness.abs() } else { -thickness.abs() };
         wrap(raw::shell(self.r(), open_faces, off))
     }
+    /// Delete `faces` and heal the gap from the neighbours (a fillet goes back to a sharp
+    /// edge, a boss or hole vanishes). Errs when the neighbours cannot close the gap.
+    pub fn remove_faces(&self, faces: &[u32]) -> Result<Shape> {
+        wrap(raw::remove_faces(self.r(), faces))
+    }
     /// Draft `faces` by `angle_deg` about the neutral plane, pulling along `pull`.
     pub fn draft(&self, faces: &[u32], pull: DVec3, angle_deg: f64, neutral: &Frame) -> Result<Shape> {
         wrap(raw::draft(self.r(), faces, v3(pull), angle_deg.to_radians(), &neutral.raw()))

@@ -207,6 +207,7 @@ fn role_of(kind: &FeatureKind, f: &FaceInfo, sketch_plane: Option<&crate::geom::
         FeatureKind::Chamfer { .. } => FaceRole::Chamfer,
         FeatureKind::Shell { .. } => FaceRole::Inner,
         FeatureKind::Draft { .. } => FaceRole::Drafted,
+        FeatureKind::DeleteFace { .. } => FaceRole::Side,
         FeatureKind::Rib { .. } => FaceRole::Rib,
         FeatureKind::ScrewBoss { plane, .. } | FeatureKind::StandoffsFromPcb { plane, .. } => match f.kind {
             SurfaceKind::Plane if f.normal.dot(plane.normal.normalize_or_zero()).abs() > 0.999 => FaceRole::BossTop,

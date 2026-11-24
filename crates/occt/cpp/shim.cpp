@@ -38,6 +38,7 @@
 #include <TopoDS_Solid.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
@@ -855,6 +856,48 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const uint32_t> edges
   TopoDS_Shape r = healIfInvalid(mc.Shape(), "chamfer");
   requireSolids(in, r, "chamfer");
   return wrap(simplify(r));
+}
+
+std::unique_ptr<Shape> remove_faces(const Shape &s, rust::Slice<const uint32_t> faces) {
+  requireShape(s, "remove faces");
+  if (faces.empty()) fail("delete face: no faces selected");
+  TopoDS_Shape copy = privateCopy(s.s);
+  auto m = mapOf(copy, TopAbs_FACE);
+  TopTools_ListOfShape gone;
+  for (uint32_t i : faces) {
+    if (i >= static_cast<uint32_t>(m.Extent())) fail("delete face: face index out of range");
+    gone.Append(m.FindKey(static_cast<int>(i) + 1));
+  }
+  const char *kReason = "these faces can't be removed: the neighbouring faces don't close the gap";
+  BRepAlgoAPI_Defeaturing d;
+  d.SetShape(copy);
+  d.AddFacesToRemove(gone);
+  d.SetRunParallel(Standard_False);
+  d.SetToFillHistory(Standard_False);
+  try {
+    d.Build();
+  } catch (const Standard_Failure &e) {
+    fail(std::string(kReason) + " (" + e.GetMessageString() + ")");
+  }
+  if (!d.IsDone() || d.HasErrors() || d.Shape().IsNull()) {
+    std::ostringstream ss;
+    d.DumpErrors(ss);
+    std::string t = ss.str();
+    fail(std::string(kReason) + (t.empty() ? "" : " (" + t + ")"));
+  }
+  if (d.HasWarnings()) {
+    // A warning means some face was skipped: the delete would silently do less than asked.
+    std::ostringstream ss;
+    d.DumpWarnings(ss);
+    std::string t = ss.str();
+    fail(std::string(kReason) + (t.empty() ? "" : " (" + t + ")"));
+  }
+  TopoDS_Shape r = healIfInvalid(d.Shape(), "delete face");
+  r = simplify(r);
+  BRepCheck_Analyzer an(r);
+  if (!an.IsValid()) fail(std::string(kReason) + " (the result is not a valid solid)");
+  requireSolids(copy, r, "delete face");
+  return wrap(r);
 }
 
 namespace {
