@@ -144,3 +144,27 @@ fn source_round_trips_and_old_docs_load() {
     let old = DocData::from_json(&v.to_string()).unwrap();
     assert!(old.sketches.iter().all(|s| s.sketch.proj_srcs.is_empty()));
 }
+
+#[test]
+fn relinked_geometry_is_written_back_to_the_stored_sketch() {
+    let (mut doc, sa, _, fb) = linked(
+        |a| {
+            a.circle(DVec2::new(20.0, 15.0), 5.0);
+        },
+        |e| e.circle.is_some_and(|(c, _, _)| (c.z - 10.0).abs() < 1e-6),
+    );
+    let sb = doc.data.sketches[1].id;
+    // an old frozen entity must not be touched by the write-back
+    translate(&mut doc, sa, DVec2::new(40.0, -30.0));
+    let res = doc.regenerate().clone();
+    assert_eq!(res.report(fb).unwrap().status, FeatureStatus::Ok);
+    assert!(doc.data.apply_relinked(&res));
+    let b = doc.data.sketch(sb).unwrap().clone();
+    let c = b.points[0];
+    assert!((c - DVec2::new(60.0, -15.0)).length() < 1e-6, "{c:?}");
+    assert!(b.constraints.iter().any(|k| matches!(k, easycad_model::sketch::Constraint::Fix(_, q) if (*q - DVec2::new(60.0, -15.0)).length() < 1e-6)));
+    // stored, editor and regen agree: nothing left to write back, regen is unchanged
+    let again = doc.regenerate().clone();
+    assert!(!doc.data.apply_relinked(&again));
+    assert_eq!(b_state(&mut doc, fb).0, DVec2::new(60.0, -15.0));
+}

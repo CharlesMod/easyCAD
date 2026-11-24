@@ -4347,6 +4347,44 @@ mod tests {
     }
 
     #[test]
+    fn editor_opens_on_relinked_projection() {
+        use easycad_model::document::Document;
+        use easycad_model::feature::{BodyId, BoolOp, FeatureKind, ProfileSel};
+        let extrude = |sketch, d: f64| FeatureKind::Extrude {
+            sketch,
+            profiles: ProfileSel::All,
+            distance: d.into(),
+            symmetric: false,
+            reverse: false,
+            draft_deg: 0.0.into(),
+            op: BoolOp::NewBody,
+            target: None,
+        };
+        let mut doc = Document::new("Link");
+        let mut a = Sketch::new("A", Plane::XY);
+        a.circle(DVec2::new(20.0, 15.0), 5.0);
+        let sa = doc.add_sketch(a);
+        let fa = doc.add_feature("A", extrude(sa, 10.0));
+        let edges = doc.regenerate().body_by_id(BodyId::of(fa)).unwrap().shape().edges().unwrap();
+        let top = edges.iter().find(|e| e.circle.is_some_and(|(c, _, _)| (c.z - 10.0).abs() < 1e-6)).unwrap();
+        let mut b = Sketch::new("B", Plane::XY.offset(10.0));
+        b.project_edge_from(BodyId::of(fa), top, None, false);
+        let sb = doc.add_sketch(b);
+        doc.add_feature("B", extrude(sb, 5.0));
+        // move the source circle in A, regenerate as the app does, then open B
+        doc.edit("Move", |d| {
+            d.sketch_mut(sa).unwrap().points.iter_mut().for_each(|p| *p += DVec2::new(40.0, -30.0));
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        let res = doc.regenerate().clone();
+        doc.data.apply_relinked(&res);
+        let s = SketchSession::edit(sb, doc.data.sketch(sb).unwrap().clone(), &doc.data);
+        let Geom::Circle { center, .. } = s.sketch.entities[0].geom else { panic!() };
+        assert!((s.sketch.point(center) - DVec2::new(60.0, -15.0)).length() < 1e-6);
+    }
+
+    #[test]
     fn project_hover_hits_edge_and_clears() {
         let mut s = session();
         s.center = DVec2::ZERO;

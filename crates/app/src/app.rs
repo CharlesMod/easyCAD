@@ -596,6 +596,7 @@ impl EasyCadApp {
                 // sketches on construction planes follow their plane (a cache, not an edit)
                 if out.data.revision == self.doc.data.revision {
                     self.doc.data.refresh_sketch_planes(&out.result);
+                    self.doc.data.apply_relinked(&out.result);
                 }
                 self.model = Some(Arc::new(out));
             }
