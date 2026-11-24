@@ -69,6 +69,8 @@ build_macos() {
     esac
     log "macOS $arch: cargo build ($triple)"
     rustup target add "$triple" >/dev/null
+    # manifold-csg-sys runs plain `cmake`, which builds for the host arch unless told
+    CMAKE_OSX_ARCHITECTURES="$arch" \
     cargo build --release --locked -p easycad --target "$triple" -j "$JOBS"
     bins+=("target/$triple/release/easycad")
   done

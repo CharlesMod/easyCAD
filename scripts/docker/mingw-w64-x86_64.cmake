@@ -12,3 +12,7 @@ set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+# Big translation units (OpenCascade, manifold) exceed the default COFF section limit.
+set(CMAKE_C_FLAGS_INIT   "-Wa,-mbig-obj")
+set(CMAKE_CXX_FLAGS_INIT "-Wa,-mbig-obj")

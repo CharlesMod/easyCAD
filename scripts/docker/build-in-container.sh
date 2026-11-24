@@ -58,6 +58,9 @@ EOF
     export CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++-posix
     export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
     export CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu=/opt/mingw-w64-x86_64.cmake
+    # manifold-csg-sys runs plain `cmake`, which ignores the target-suffixed
+    # variable above; CMake >= 3.21 reads this one from the environment.
+    export CMAKE_TOOLCHAIN_FILE=/opt/mingw-w64-x86_64.cmake
     # Static OpenCascade on Windows: headers must not use dllimport; big OCCT
     # translation units exceed the default COFF section limit.
     export CFLAGS_x86_64_pc_windows_gnu="-Wa,-mbig-obj"
