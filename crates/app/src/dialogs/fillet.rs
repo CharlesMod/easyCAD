@@ -10,7 +10,7 @@
 use easycad_model::feature::*;
 use easycad_model::occt::{CurveKind, EdgeInfo, EdgeStatus, Strategy};
 use easycad_model::regen::FeatureStatus;
-use easycad_model::select::{EdgeSelector, Selector};
+use easycad_model::select::{EdgeSelector, FaceSelector, Selector};
 use egui::{RichText, Ui};
 use glam::DVec3;
 
@@ -134,7 +134,7 @@ impl FilletD {
         let mut set = EdgeSet::new(if chamfer { "0.5" } else { "1" });
         let mut body = None;
         for k in sel {
-            if let Some(r) = edge_ref(model, *k) {
+            if let Some(r) = edge_ref(model, *k).or_else(|| face_ref(model, *k)) {
                 body = Some(k.body);
                 set.edges.push(r);
             }
@@ -200,7 +200,7 @@ impl FilletD {
     }
 
     pub fn toggle(&mut self, key: PickKey, model: Option<&Output>) -> bool {
-        if !matches!(key.kind, PickKind::Edge(_)) {
+        if !matches!(key.kind, PickKind::Edge(_) | PickKind::Face(_)) {
             return false;
         }
         for s in &mut self.sets {
@@ -209,7 +209,7 @@ impl FilletD {
                 return true;
             }
         }
-        let Some(r) = edge_ref(model, key) else {
+        let Some(r) = edge_ref(model, key).or_else(|| face_ref(model, key)) else {
             return false;
         };
         if self.body.is_some_and(|b| b != key.body) {
@@ -807,6 +807,7 @@ fn report_row(ui: &mut Ui, icon: Icon, color: egui::Color32, title: &str, note: 
 fn hint_mid(s: &EdgeSelector) -> Option<DVec3> {
     match s {
         EdgeSelector::Hint { midpoint, .. } => Some(*midpoint),
+        EdgeSelector::OfFace(FaceSelector::Hint { centroid, .. }) => Some(*centroid),
         _ => None,
     }
 }
@@ -825,5 +826,23 @@ pub fn edge_ref(model: Option<&Output>, k: PickKey) -> Option<EdgeRef> {
         sel: EdgeSelector::from_pick(info),
         label: edge_label(info),
         midpoint: Some(info.midpoint),
+    })
+}
+
+/// A picked face: one ref standing for every edge that bounds it.
+pub fn face_ref(model: Option<&Output>, k: PickKey) -> Option<EdgeRef> {
+    let PickKind::Face(f) = k.kind else {
+        return None;
+    };
+    let b = model?.meshed(k.body)?;
+    if b.body.reference {
+        return None;
+    }
+    let info = b.faces.get(f as usize)?;
+    Some(EdgeRef {
+        key: Some(k),
+        sel: EdgeSelector::OfFace(super::face_sel(model, &k)?),
+        label: format!("Face {} edges", f + 1),
+        midpoint: Some(info.centroid),
     })
 }

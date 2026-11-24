@@ -859,7 +859,14 @@ impl Dialog {
 
     pub fn filter(&self) -> Option<Filter> {
         match self.kind {
-            DialogKind::Fillet | DialogKind::Chamfer => Some(Filter::EDGES_ONLY),
+            // faces too: a face pick dresses every edge bounding it (edges still win
+            // under the cursor, as the ray pick ties go to edges)
+            DialogKind::Fillet | DialogKind::Chamfer => Some(Filter {
+                bodies: false,
+                faces: true,
+                edges: true,
+                sketches: false,
+            }),
             DialogKind::Shell | DialogKind::Draft => Some(Filter::FACES_ONLY),
             DialogKind::Boss => Some(Filter {
                 bodies: false,

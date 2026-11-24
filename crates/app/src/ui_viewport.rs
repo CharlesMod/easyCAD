@@ -378,6 +378,16 @@ pub fn viewport(app: &mut EasyCadApp, ui: &mut Ui) {
                 draw_edge(&painter, app, m, rect, k.body, e, theme::ACCENT, 3.0, true);
             }
         }
+        // a face picked in Fillet / Chamfer stands for every edge around it
+        if let Some(d) = &app.dialog {
+            for k in d.picked() {
+                let PickKind::Face(f) = k.kind else { continue };
+                let Some(b) = m.meshed(k.body) else { continue };
+                for e in b.edges.iter().filter(|e| e.faces.contains(&f)) {
+                    draw_edge(&painter, app, m, rect, k.body, e.index, theme::ACCENT, 3.0, true);
+                }
+            }
+        }
         if let Some(c) = app.stack.current() {
             if let PickKind::Edge(e) = c.key.kind {
                 // only the hidden pick candidate is drawn x-ray; everything else is depth-tested
@@ -1476,7 +1486,7 @@ fn context_menu(app: &mut EasyCadApp, ui: &mut Ui) {
     }
     let edges = sel.iter().any(|k| matches!(k.kind, PickKind::Edge(_)));
     let faces = sel.iter().any(|k| matches!(k.kind, PickKind::Face(_)));
-    if edges {
+    if edges || faces {
         if ui.button("Fillet…   F").clicked() {
             app.open_dialog(crate::dialogs::DialogKind::Fillet);
             ui.close();

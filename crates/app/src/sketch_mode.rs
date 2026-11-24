@@ -3834,7 +3834,12 @@ fn draw(s: &SketchSession, ui: &Ui, rect: Rect, p: &egui::Painter) {
         }
         match (s.tool, s.clicks.as_slice()) {
             (Tool::Line, [a]) => {
-                p.add(egui::Shape::dashed_line(&[to(a.0), to(q)], pv, 6.0, 3.0));
+                // Live segment: solid, dashed only in construction mode.
+                if s.construction_mode {
+                    p.add(egui::Shape::dashed_line(&[to(a.0), to(q)], pv, 6.0, 3.0));
+                } else {
+                    p.line_segment([to(a.0), to(q)], pv);
+                }
                 p.text(
                     to(q) + vec2(12.0, 12.0),
                     egui::Align2::LEFT_TOP,
